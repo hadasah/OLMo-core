@@ -11,6 +11,7 @@ from .scheduler import (
     Scheduler,
     SchedulerUnits,
     SequentialScheduler,
+    WSD,
 )
 from .skip_step_optimizer import SkipStepOptimizer
 
@@ -34,4 +35,5 @@ __all__ = [
     "InvSqrtWithWarmup",
     "LinearWithWarmup",
     "SequentialScheduler",
+    "WSD"
 ]

@@ -508,15 +508,18 @@ def retriable(
 ######################
 
 
-@retriable()
+@retriable(max_attempts=10, retry_condition=lambda exc: isinstance(exc, requests.exceptions.HTTPError))
 def _http_file_size(url: str) -> int:
     response = requests.head(url, allow_redirects=True)
     content_length = response.headers.get("content-length")
-    assert content_length
+    # assert content_length
+    if not content_length:
+        raise requests.exceptions.HTTPError(f"{response.status_code}: {response.text}. No content-length header found.")
+
     return int(content_length)
 
 
-@retriable()
+@retriable(max_attempts=10, retry_condition=lambda exc: isinstance(exc, requests.exceptions.HTTPError))
 def _http_get_bytes_range(url: str, bytes_start: int, num_bytes: int) -> bytes:
     response = requests.get(
         url, headers={"Range": f"bytes={bytes_start}-{bytes_start+num_bytes-1}"}
@@ -528,7 +531,9 @@ def _http_get_bytes_range(url: str, bytes_start: int, num_bytes: int) -> bytes:
 
     result = response.content
     # Some web servers silently ignore range requests and send everything
-    assert len(result) == num_bytes, f"expected {num_bytes} bytes, got {len(result)}"
+    # assert len(result) == num_bytes, f"expected {num_bytes} bytes, got {len(result)}"
+    if len(result) != num_bytes:
+        raise requests.exceptions.HTTPError(f"{response.status_code}: {response.text}. expected {num_bytes} bytes, got {len(result)}")
 
     return result
 

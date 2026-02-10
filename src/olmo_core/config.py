@@ -186,6 +186,7 @@ class Config:
                     )
                 ]
             merge_fields = om.from_dotlist(dotlist)
+            print(merge_fields)
             merged = om.merge(self, merge_fields)
             out = cast(Self, om.to_object(merged))
             out.apply(lambda c: c.validate())
