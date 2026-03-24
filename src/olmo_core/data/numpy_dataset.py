@@ -359,6 +359,8 @@ class NumpyFSLDatasetBase(NumpyDatasetBase, Dataset[Dict[str, Any]]):
         instance_filter_config: Optional[InstanceFilterConfig] = None,
         label_mask_paths: Optional[List[PathOrStr]] = None,
     ):
+        # log.info("NumpyFSLDatasetBase __init__ called on paths: %s", paths)
+        # log.info("metadata: %s", metadata)
         if include_instance_metadata is None and metadata:
             include_instance_metadata = True
 
@@ -542,6 +544,7 @@ class NumpyFSLDataset(NumpyFSLDatasetBase):
         return self._num_instances
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
+        # log.info("NumpyFSLDataset __getitem__ called")
         index = int(index)  # in case this is a numpy int type.
         pos_index = index if index >= 0 else len(self) + index
 
@@ -559,7 +562,9 @@ class NumpyFSLDataset(NumpyFSLDatasetBase):
             raise IndexError(f"{index} is out of bounds for dataset of size {len(self)}")
 
         # Read the data from file.
+        # log.info(f"Reading from {self.paths[array_index]}")
         input_ids = self._read_chunk_from_array(self.paths[array_index], array_local_index)
+        # log.info("Read complete.")
         out: Dict[str, Any] = {"input_ids": input_ids}
 
         if self._label_mask_paths is not None:
@@ -617,6 +622,7 @@ class NumpyFSLDataset(NumpyFSLDatasetBase):
         return self._array_file_sizes, self._array_offsets
 
     def _read_chunk_from_array(self, path: PathOrStr, index: int, dtype=None) -> torch.Tensor:
+        # log.info(f"Reading chunk {index} from array at path: {path}")
         start_idx = index * self.sequence_length
         return load_array_slice_into_tensor(
             path,
@@ -626,6 +632,7 @@ class NumpyFSLDataset(NumpyFSLDatasetBase):
         )
 
     def _get_file_size_and_length(self, path: PathOrStr, idx: int, dtype=None) -> Tuple[int, int]:
+        # log.info(f"Getting file size and length for path: {path}, idx: {idx}")
         del idx
         dtype = dtype or self.dtype
         item_size = dtype(0).itemsize
@@ -716,6 +723,7 @@ class NumpyFSLDatasetMixture(NumpyFSLDataset):
         return np.uint32
 
     def prepare(self):
+        # log.info("Preparing NumpyFSLDatasetMixture...")
         if self.fs_local_rank == 0:
             log.info("Gathering indices...")
             self._write_document_indices()
@@ -723,11 +731,14 @@ class NumpyFSLDatasetMixture(NumpyFSLDataset):
         len(self)
 
     def _get_instance_indices_path(self, source_path: PathOrStr) -> Path:
+
+        # log.info(f"Getting instance indices path for source path: {source_path}")
         return self._get_indices_path(
             source_path, "mixture-instance-indices", self.indices_dtype.__name__
         )
 
     def _write_document_indices(self):
+        # log.info("Writing document indices...")
         paths_needed: List[Tuple[PathOrStr, int]] = []
         for idx, path in enumerate(self.paths):
             indices_path = self._get_instance_indices_path(path)
@@ -783,6 +794,7 @@ class NumpyFSLDatasetMixture(NumpyFSLDataset):
     #     return data
 
     def _get_file_size_and_length(self, path: PathOrStr, idx: int, dtype=None) -> Tuple[int, int]:
+        # log.info(f"Getting file size and length for path: {path}, idx: {idx}")
         dtype = dtype or self.dtype
         item_size = dtype(0).itemsize
         file_size = self._get_size_from_offset_index((path, idx))
@@ -802,6 +814,7 @@ class NumpyFSLDatasetMixture(NumpyFSLDataset):
             raise RuntimeError("invalid 'max_target_sequence_length' or 'sequence_length'")
 
     def _get_size_from_offset_index(self, path_index: Tuple[PathOrStr, int]) -> int:
+        # log.info(f"Getting size from offset index for path_index: {path_index}")
         try:
             path, idx = path_index
             # Get size in bytes from tokens in the supplied index * itemsize
@@ -867,12 +880,14 @@ class NumpyPaddedFSLDataset(NumpyFSLDataset):
 
     def prepare(self):
         if self.fs_local_rank == 0:
-            log.info("Gathering dataset document indices...")
+            # log.info("Gathering dataset document indices...")
             self._write_instance_indices()
         barrier()
         len(self)
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
+        # log.info("NumpyPaddedFSLDataset __getitem__ called")
+
         item = super().__getitem__(index)
         pad_shape = (0, self.sequence_length - len(item["input_ids"]))
         if "label_mask" in item:
@@ -885,6 +900,7 @@ class NumpyPaddedFSLDataset(NumpyFSLDataset):
         return item
 
     def _read_chunk_from_array(self, path: PathOrStr, index: int, dtype=None) -> torch.Tensor:
+        # log.info(f"Reading chunk {index} from array at path: {path}")
         indices_path = self._get_instance_indices_path(path)
         indices = load_array_slice_into_tensor(
             indices_path, index * 2, index * 2 + 2, self.indices_dtype
@@ -894,9 +910,11 @@ class NumpyPaddedFSLDataset(NumpyFSLDataset):
         return data
 
     def _get_instance_indices_path(self, source_path: PathOrStr) -> Path:
+        log
         return self._get_indices_path(source_path, "instance-indices")
 
     def _write_instance_indices(self):
+        # log.info("Writing instance indices...")
         paths_needed: List[PathOrStr] = []
         for path in self.paths:
             indices_path = self._get_instance_indices_path(path)
@@ -910,7 +928,7 @@ class NumpyPaddedFSLDataset(NumpyFSLDataset):
                 futures = []
                 for path in paths_needed:
                     indices_path = self._get_instance_indices_path(path)
-                    log.info(f"Gathering instance indices for '{path}'...")
+                    # log.info(f"Gathering instance indices for '{path}'...")
                     future = executor.submit(
                         run_worker_func,
                         segment_documents_into_instances,
@@ -1007,6 +1025,7 @@ class NumpyPackedFSLDataset(NumpyFSLDatasetBase):
 
     @property
     def offsets(self) -> Tuple[Tuple[int, int], ...]:
+        log.info("Getting array instance offsets...")
         if self._array_instance_offsets is None:
             item_size = self.indices_dtype(0).itemsize
             num_instances_per_path = self.map(
@@ -1022,6 +1041,7 @@ class NumpyPackedFSLDataset(NumpyFSLDatasetBase):
         return self._array_instance_offsets
 
     def prepare(self):
+        log.info("Preparing NumpyPackedFSLDataset...")
         if self.fs_local_rank == 0:
             log.info("Packing document into instances...")
             self._pack_all_documents_into_instances()
@@ -1034,6 +1054,8 @@ class NumpyPackedFSLDataset(NumpyFSLDatasetBase):
         return self._num_instances
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
+        # log.info("NumpyPackedFSLDataset __getitem__ called")
+
         index = int(index)  # in case this is a numpy int type.
         pos_index = index if index >= 0 else len(self) + index
 
@@ -1118,16 +1140,19 @@ class NumpyPackedFSLDataset(NumpyFSLDatasetBase):
         return out
 
     def _get_document_indices_path(self, source_path: PathOrStr) -> Path:
+        log.info(f"Getting document indices path for source path: {source_path}")
         return self._get_indices_path(
             source_path, "document-indices", self._long_doc_strategy, self.indices_dtype.__name__
         )
 
     def _get_instance_offsets_path(self, source_path: PathOrStr) -> Path:
+        log.info(f"Getting instance offsets path for source path: {source_path}")
         return self._get_indices_path(
             source_path, "instance-offsets", self._long_doc_strategy, self.indices_dtype.__name__
         )
 
     def _get_docs_by_instance_path(self, source_path: PathOrStr) -> Path:
+        log.info(f"Getting documents by instance path for source path: {source_path}")
         return self._get_indices_path(
             source_path,
             "documents-by-instance",
@@ -1136,6 +1161,7 @@ class NumpyPackedFSLDataset(NumpyFSLDatasetBase):
         )
 
     def _pack_documents_from_source_into_instances(self, source_path: PathOrStr) -> Tuple[int, int]:
+        log.info(f"Packing documents from source path: {source_path}")
         document_indices_path = self._get_document_indices_path(source_path)
         instance_offsets_path = self._get_instance_offsets_path(source_path)
         docs_by_instance_path = self._get_docs_by_instance_path(source_path)
@@ -1171,6 +1197,7 @@ class NumpyPackedFSLDataset(NumpyFSLDatasetBase):
         return len(instances), total_tokens
 
     def _pack_all_documents_into_instances(self):
+        log.info("Packing all documents into instances...")
         paths_needed: List[PathOrStr] = []
         for source_path in self.paths:
             document_indices_path = self._get_document_indices_path(source_path)
@@ -1371,6 +1398,8 @@ class NumpyInterleavedFSLDataset(NumpyPaddedFSLDataset):
         )
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
+        # log.info("NumpyInterleavedFSLDataset __getitem__ called")
+
         index = int(index)  # in case this is a numpy int type.
         pos_index = index if index >= 0 else len(self) + index
 
@@ -1914,6 +1943,8 @@ class NumpyVSLDataset(NumpyDatasetBase, Dataset[Dict[str, Any]]):
         return self._num_instances
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
+        # log.info("NumpyVSLDataset __getitem__ called")
+
         index = int(index)  # in case this is a numpy int type.
         pos_index = index if index >= 0 else len(self) + index
 
@@ -2340,7 +2371,9 @@ class NumpyDatasetConfig(Config):
             raise OLMoConfigurationError(
                 "Missing tokenizer identifier required to construct data mix"
             )
-        return cls(mix=mix, tokenizer=tokenizer, **kwargs)
+        a = cls(mix=mix, tokenizer=tokenizer, **kwargs)
+        return a
+        # return cls(mix=mix, tokenizer=tokenizer, **kwargs)
 
     def get_dtype(
         self,
@@ -2369,7 +2402,6 @@ class NumpyDatasetConfig(Config):
             raise OLMoConfigurationError(
                 "Exactly one of 'paths' or 'mix' or 'source_mixture' is required"
             )
-
         paths: List[str] = []
         metadata = self.metadata
         label_mask_paths: Optional[List[PathOrStr]] = None
@@ -2414,6 +2446,8 @@ class NumpyDatasetConfig(Config):
             if not isinstance(mix, DataMixBase):
                 mix = DataMix(mix)
             paths, labels = mix.build(self.mix_base_dir, self.tokenizer.identifier)
+            # print(self.mix_base_dir)
+            # print(paths)
             if metadata is None:
                 metadata = [{"label": label} for label in labels]
             label_mask_paths = cast(Optional[List[PathOrStr]], self.label_mask_paths)

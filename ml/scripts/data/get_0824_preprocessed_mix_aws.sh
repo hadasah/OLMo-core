@@ -3,9 +3,9 @@ TOKENIZER=allenai/dolma2-tokenizer
 
 PREPROCESSED_DATA_DIR=/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data-aws/OLMoE-mix-0824
 
-# foldername=preprocessed/proof-pile-2/v0_decontaminated/algebraic-stack/train/${TOKENIZER}
-# mkdir -p $PREPROCESSED_DATA_DIR/${foldername}
-# ${COMMAND_PREFIX}/${foldername} ${PREPROCESSED_DATA_DIR}/${foldername} --recursive --exclude "*" --include "*.npy";
+foldername=preprocessed/proof-pile-2/v0_decontaminated/algebraic-stack/train/${TOKENIZER}
+mkdir -p $PREPROCESSED_DATA_DIR/${foldername}
+${COMMAND_PREFIX}/${foldername} ${PREPROCESSED_DATA_DIR}/${foldername} --recursive --exclude "*" --include "*.npy";
 
 # foldername=preprocessed/proof-pile-2/v0_decontaminated/arxiv/train/${TOKENIZER}
 # mkdir -p $PREPROCESSED_DATA_DIR/${foldername}

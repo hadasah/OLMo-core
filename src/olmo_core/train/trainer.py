@@ -245,6 +245,11 @@ class Trainer:
     This is useful for benchmarking.
     """
 
+    eval_only: bool = False
+    """
+    Only run evals
+    """
+
     # Internal bookkeeping
 
     _metrics: Dict[int, Dict[str, torch.Tensor]] = field(default_factory=OrderedDict)
@@ -319,22 +324,23 @@ class Trainer:
                 log.info("Creating new process group for async bookkeeping")
                 self._bookkeeping_pg = dist.new_group()
 
-        # Check data loader configuration.
-        if self.data_loader.dp_world_size != get_world_size(self.dp_process_group):
-            raise OLMoConfigurationError(
-                "data loader's DP world size appears to be configured incorrectly, "
-                f"got {self.data_loader.dp_world_size}, expected {get_world_size(self.dp_process_group)}."
-            )
-        if self.data_loader.dp_rank != get_rank(self.dp_process_group):
-            raise OLMoConfigurationError(
-                "data loader's DP rank appears to be configured incorrectly, "
-                f"got {self.data_loader.dp_rank}, expected {get_rank(self.dp_process_group)}."
-            )
-        if self.data_loader.fs_local_rank != get_fs_local_rank():
-            raise OLMoConfigurationError(
-                "data loader's FS local rank appears to be configured incorrectly, "
-                f"got {self.data_loader.fs_local_rank}, expected {get_fs_local_rank()}."
-            )
+        if self.data_loader is not None:
+            # Check data loader configuration.
+            if self.data_loader.dp_world_size != get_world_size(self.dp_process_group):
+                raise OLMoConfigurationError(
+                    "data loader's DP world size appears to be configured incorrectly, "
+                    f"got {self.data_loader.dp_world_size}, expected {get_world_size(self.dp_process_group)}."
+                )
+            if self.data_loader.dp_rank != get_rank(self.dp_process_group):
+                raise OLMoConfigurationError(
+                    "data loader's DP rank appears to be configured incorrectly, "
+                    f"got {self.data_loader.dp_rank}, expected {get_rank(self.dp_process_group)}."
+                )
+            if self.data_loader.fs_local_rank != get_fs_local_rank():
+                raise OLMoConfigurationError(
+                    "data loader's FS local rank appears to be configured incorrectly, "
+                    f"got {self.data_loader.fs_local_rank}, expected {get_fs_local_rank()}."
+                )
 
         for callback in self.callbacks.values():
             callback.post_attach()
@@ -613,8 +619,16 @@ class Trainer:
         barrier()
 
         # It's possible that we tried restarting a run that had already finished.
-        if self.training_complete:
+        if self.training_complete and not self.eval_only:
             log.warning("Training already complete, ending run now")
+            self._shutdown()
+            return
+
+        log.info(f"Max duration: {self.max_duration}")
+        log.info(f"Global step: {self.global_step}")
+
+        if self.eval_only and not self.training_complete:
+            log.warning("Eval-only mode enabled but training is not complete, ending run now")
             self._shutdown()
             return
 
@@ -656,7 +670,10 @@ class Trainer:
 
         for callback in self._iter_callbacks():
             callback.post_train()
+        
 
+        # for callback in self._iter_callbacks():
+        #     callback.pre_shutdown()
         # Wait for any bookkeeping tasks to finish.
         self._shutdown()
         log.info("Training complete")
@@ -665,6 +682,10 @@ class Trainer:
         self._log_metrics()
         self.thread_pool.shutdown(wait=True, cancel_futures=False)
         self._thread_pool = None
+
+        for callback in self._iter_callbacks():
+            callback.close()
+            
         gc_cuda()
         barrier()
 
@@ -993,6 +1014,7 @@ class Trainer:
         return callbacks
 
     def _duration_due(self, duration: Duration) -> bool:
+        print(self.global_step, self.global_train_tokens_seen, self.epoch)
         return duration.due(
             step=self.global_step, tokens=self.global_train_tokens_seen, epoch=self.epoch
         )
@@ -1116,6 +1138,7 @@ class Trainer:
         data_iterator = iter(self.data_loader)
 
         while True:
+            # log.info("Trainer _iter_batches: pre_load_batch callbacks...")
             for callback in self._iter_callbacks():
                 callback.pre_load_batch()
 
@@ -1153,26 +1176,27 @@ class Trainer:
                 global_num_tokens := self.data_loader.global_num_tokens_in_batch(batch)
             ) is not None:
                 self.global_train_tokens_seen += global_num_tokens
-
             for callback in self._iter_callbacks():
                 callback.pre_step(batch)
-
+            # log.info("pre train batch")
             self.train_module.train_batch(batch)
-
+            # log.info("post train batch")
             for callback in self._iter_callbacks():
                 callback.pre_optim_step()
-
+            # log.info("pre optim step")
             self.train_module.optim_step()
             self.train_module.zero_grads()
-
+            # log.info("post optim step")
             for callback in self._iter_callbacks():
                 callback.post_train_batch()
-
+            # log.info("post train batch")
             for callback in self._iter_callbacks():
                 callback.post_step()
-
+            # log.info("post step")
             if first_batch or self.global_step % self.metrics_collect_interval == 0:
+                # log.info("logging metrics")
                 self._log_metrics()
+                # log.info("logged metrics")
                 if torch.cuda.is_available():
                     torch.cuda.set_sync_debug_mode("warn")
 
@@ -1183,12 +1207,13 @@ class Trainer:
                 # Log any remaining metrics.
                 self._log_metrics()
                 return
+            # log.info("end of batch")
 
         # Log any remaining metrics.
         self._log_metrics()
 
         log.info("Epoch complete")
-
+    
         for callback in self._iter_callbacks():
             callback.post_epoch()
 

@@ -113,6 +113,7 @@ def get_bytes_range(path: PathOrStr, bytes_start: int, num_bytes: int) -> bytes:
     :param bytes_start: Byte offset to start at.
     :param num_bytes: Number of bytes to get.
     """
+    # log.info("Entering get_bytes_range")
     path = normalize_path(path)
 
     if is_url(path):
@@ -521,9 +522,11 @@ def _http_file_size(url: str) -> int:
 
 @retriable(max_attempts=10, retry_condition=lambda exc: isinstance(exc, requests.exceptions.HTTPError))
 def _http_get_bytes_range(url: str, bytes_start: int, num_bytes: int) -> bytes:
+    # log.info("pre response")
     response = requests.get(
         url, headers={"Range": f"bytes={bytes_start}-{bytes_start+num_bytes-1}"}
     )
+    # log.info("post response")
     if response.status_code == 404:
         raise FileNotFoundError(url)
 

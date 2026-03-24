@@ -2,7 +2,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import ClassVar, TYPE_CHECKING, Any, Dict, List, Optional
 
 from olmo_core.distributed.utils import get_rank
 from olmo_core.exceptions import OLMoEnvironmentError
@@ -30,7 +30,7 @@ class WandBCallback(Callback):
         This callback logs metrics from every single step to W&B, regardless of the value
         of :data:`Trainer.metrics_collect_interval <olmo_core.train.Trainer.metrics_collect_interval>`.
     """
-
+    priority: ClassVar[int] = -3
     enabled: bool = True
     """
     Set to false to disable this callback.
@@ -134,9 +134,17 @@ class WandBCallback(Callback):
                 config=self.config,
             )
             self._run_path = self.run.path  # type: ignore
+            # if self.trainer.eval_on_finish:
+            #     self.trainer.wandb.define_metric("final_eval/*", step_metric="inference/inference_step")
+
 
     def log_metrics(self, step: int, metrics: Dict[str, float]):
         if self.enabled and get_rank() == 0:
+            # final_metrics = {k: metrics[k] for k in metrics if 'final_eval/' in k}
+            # metrics = {k: metrics[k] for k in metrics if 'final_eval/' not in k}
+            # self.wandb.log(metrics, step=step)
+            if self.trainer.eval_only:
+                step += 1
             self.wandb.log(metrics, step=step)
 
     def post_step(self):
@@ -144,7 +152,7 @@ class WandBCallback(Callback):
         if self.enabled and get_rank() == 0 and self.step % cancel_check_interval == 0:
             self.trainer.thread_pool.submit(self.check_if_canceled)
 
-    def post_train(self):
+    def close(self):
         if self.enabled and get_rank() == 0 and self.run is not None:
             log.info("Finalizing successful W&B run...")
             self.wandb.finish(exit_code=0, quiet=True)

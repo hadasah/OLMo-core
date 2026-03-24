@@ -1,5 +1,5 @@
 ```
-ENV_NAME=olmoe-core
+ENV_NAME=olmoe-core2
 DATA_FOLDER=/gscratch/zlab/snehark/OLMo-core/data
 OLMO_CORE_PATH=/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/
 

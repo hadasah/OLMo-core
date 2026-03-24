@@ -1,3 +1,4 @@
+import logging
 import gzip
 import math
 import os
@@ -29,6 +30,8 @@ from olmo_core.io import add_cached_path_clients, get_bytes_range, is_url, resou
 from olmo_core.utils import capped_powers_of_2
 
 from .types import LongDocStrategy
+
+log = logging.getLogger(__name__)
 
 
 def split_batch(batch: Dict[str, Any], num_microbatch_instances: int) -> List[Dict[str, Any]]:
@@ -185,6 +188,7 @@ def iter_document_indices(
             use_array_if_local = True
 
     if use_array_if_local and not is_url(data_path):
+        log.info("loading document indices from array mmap for data at '%s'", data_path)
         if eos_token_id is None or dtype is None:
             raise ValueError(
                 "'eos_token_id' and 'dtype' are required to use the local array for finding document indices"
@@ -195,9 +199,11 @@ def iter_document_indices(
         end_idx = 0
         for idx in doc_boundaries:
             end_idx = idx + 1
+            log.info("yielding document indices from array mmap: %d to %d", start_idx, end_idx)
             yield start_idx, end_idx
             start_idx = end_idx
     else:
+        log.info("loading document indices from metadata for data at '%s'", data_path)
         metadata_filename = os.path.basename(data_path).replace(".npy", ".csv.gz")
         try:
             metadata_path = resource_path(
@@ -215,6 +221,7 @@ def iter_document_indices(
         with gzip.open(metadata_path, "rt") as f:
             for line in f:
                 start_index, end_index, *_ = line.split(",")
+                log.info("yielding document indices from metadata: %d to %d", start_idx, end_idx)
                 yield int(start_index), int(end_index)
 
 
@@ -232,6 +239,7 @@ def iter_document_indices_with_max_sequence_length(
     Like :func:`iter_document_indices` but will either truncate or split documents that are
     longer than ``max_sequence_length``.
     """
+    log.info("making document indices with max sequence length %d for data at '%s'", max_sequence_length, data_path)
     for start_idx, end_idx in iter_document_indices(
         data_path,
         local_cache=local_cache,
@@ -257,6 +265,7 @@ def get_document_indices(
     """
     Like :func:`iter_document_indices` but returns a list.
     """
+    log.info("getting document indices for data at '%s'", data_path)
     return list(iter_document_indices(data_path, local_cache=local_cache))
 
 
@@ -442,6 +451,7 @@ def bucket_documents(
 
     Returns the number of original documents and the number of new bucketed documents.
     """
+    log.info("making bucketed document indices for data at '%s'", path)
     max_sequence_length = max(buckets)
     min_sequence_length = min(buckets)
 
@@ -486,6 +496,7 @@ def segment_documents_into_instances(
 
     Returns the number of original documents and the number of resulting instances documents.
     """
+    log.info("making document indices for data at '%s'", path)
     total_og_docs = 0
     idx_gen = (
         idx

@@ -138,6 +138,10 @@ class Callback(Stateful):
         """
         pass
 
+    def close(self):
+        pass
+
+
     def on_error(self, exc: BaseException):
         """
         Called when the training loop exits with an error.

@@ -1,1 +1,0 @@
-everything here is deprecated. Downloading was infeasible, so we stream for all jobs. 

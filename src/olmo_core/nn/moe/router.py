@@ -354,6 +354,7 @@ class MoERouter(nn.Module):
         if self.uniform_expert_assignment:
             expert_indices = _uniform_expert_assignment(expert_indices, self.num_experts)
             expert_weights = scores.gather(-1, expert_indices)
+            expert_weights = torch.ones_like(expert_weights)
 
         return expert_weights, expert_indices
 

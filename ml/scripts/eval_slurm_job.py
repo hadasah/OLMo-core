@@ -12,7 +12,7 @@ import os
 import random
 import subprocess
 import sys
-from utils import dict_update, has_file_been_modified_recently
+from utils import dict_update, filter_eval_done, filter_training_incomplete, get_specs_for_user_and_model
 
 # BASH_IF_CLAUSE = """
 # if [[ "$SLURM_ARRAY_TASK_ID" == "{index}" ]]; then
@@ -20,6 +20,7 @@ from utils import dict_update, has_file_been_modified_recently
 # fi
 # """
 
+TORCHRUN_CMD_TEMPLATE = "CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per-node=gpu --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT"
 BASH_IF_CLAUSE = """
 if [[ "$SLURM_ARRAY_TASK_ID" == "{index}" ]]; then
     bash {SAVE}/run.sh >> {SAVE}/stdout 2>> {SAVE}/stderr
@@ -141,7 +142,7 @@ export OLMO_SHARED_FS=1
 cd {NEW_DIR_PATH}
 export PYTHONPATH={SAVE_ROOT}/{repo_name}:$PYTHONPATH
 if [[ "$SLURM_PROCID" == "0" ]]; then 
-    CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per-node=gpu --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT {cmd} 
+    {cmd} 
 fi
 echo "# -------- FINISHED CALL TO SRUN --------"
 echo
@@ -159,6 +160,7 @@ def run_grid(
     grid,
     default_grid={},
     sweep_name="",
+    train_sweep_path="",
     specs={},
     job_spec_keys=[],
     name_keys=[],
@@ -191,8 +193,6 @@ def run_grid(
     conda_env_name=None,
     bash_setup_file=None,
     include_jobs_indices=None,
-    filter_succeeded=True,
-    filter_running=True,
     sweep_port_start=None,
 ):
     """Generates full commands from a grid.
@@ -226,8 +226,6 @@ def run_grid(
     repo_name -- (str) name of the repository to copy
     conda_env_name -- (str) name of the conda environment to activate
     include_jobs_indices -- (list) list of job indices to include in the sweep
-    filter_succeeded -- (bool) if True, filters out jobs that have already
-        succeeded (i.e. have a log file with "got exitcode: 0")
     sweep_port_start -- (int) starting port for the sweep, if None, a random
         port will be chosen for each job
     """
@@ -283,29 +281,6 @@ def run_grid(
         return args
     
 
-    def check_if_job_succeeded_before(job_name, save_root):
-        """Check if a job has already been run before."""
-        wandb_log_path = os.path.join(save_root, job_name, 'wandb', 'wandb', 'latest-run', 'logs', 'debug.log')
-        if os.path.exists(wandb_log_path):
-            with open(wandb_log_path, 'r') as f:
-                s = f.read()
-                if "got exitcode: 0" in s:
-                    print(f"Job {job_name} already done before, skipping.")
-                    return True
-        return False
-    
-    # if updated in the last 10 minutes, assume it's running
-    # def check_if_job_is_running(job_name, save_root, recent_threshold_seconds=3600):
-    def check_if_job_is_running(job_name, save_root, recent_threshold_seconds=3600):
-        """Check if a job is currently running."""
-        stdout_path = os.path.join(save_root, job_name, 'stdout')
-        running = has_file_been_modified_recently(stdout_path, recent_threshold_seconds=recent_threshold_seconds) 
-        if running:
-            print(f"Job {job_name} may be running right now, skipping.")
-        return running
-
-    
-
     if not prefix:
         raise ValueError('Need prefix command')
     SAVE_ROOT = saveroot
@@ -314,6 +289,7 @@ def run_grid(
     Job = namedtuple('Job', ['cmd', 'name'])
     all_jobs = []
     name_key_lists = {}
+    train_sweep_name = os.path.basename(train_sweep_path.rstrip('/')) if train_sweep_path else ""
 
     import itertools
     def c_prod(d):
@@ -345,32 +321,30 @@ def run_grid(
     else:
         cutoff = None
 
-    final_jobs = []
+    final_jobs_dict = {}
+    final_jobs_names = []
     job_id = job_id_start
 
+    
     for subgrid_name, permutations_dicts in all_permutation_dicts.items():
         name_key_list = name_key_lists[subgrid_name]
         for config_dict in permutations_dicts:
             for _ in range(num_copies):
                 cmd_args = unroll_args(config_dict)
                 cmd_args.update({k: specs[k] for k in specs.keys() if k not in cmd_args and k  in job_spec_keys})
-                name = make_job_name(name_key_list, cmd_args, sweep_name=sweep_name, subgrid_name=subgrid_name)
+                name = make_job_name(name_key_list, cmd_args, sweep_name=train_sweep_name, subgrid_name=subgrid_name)
                 name = name[:cutoff] if cutoff else name
                 name = sha1(name) if hashname else name
-                cmd = f"{prefix} {name} " + ' '.join([f'--{k}={v}' for k, v in cmd_args.items()])
+                cmd = f"{TORCHRUN_CMD_TEMPLATE} {prefix} {name} " + ' '.join([f'--{k}={v}' for k, v in cmd_args.items()])
                 if include_job_id:
                     name += '/_jobid=' + str(job_id)
-                final_jobs.append(Job(cmd=cmd, name=name))
-                job_id += 1
+                # final_jobs.append(Job(cmd=cmd, name=name))
+                final_jobs_names.append(name)
+                final_jobs_dict[name] = cmd
+                # job_id += 1
 
-    # ans = input(
-    #     'About to launch {} jobs for a total of {} GPUs. Continue? (Y/y to proceed) '.format(
-    #         len(final_jobs), nodes * gpus * len(final_jobs)
-    #     )
-    # )
-    # if ans.strip().lower() != 'y':
-    #     print('Aborting...')
-    #     sys.exit(-1)
+    print(f"Generated a total of {len(final_jobs_dict)} jobs from the grid.")
+    # print(f"Example job name: {final_jobs_names[0]}, command: {final_jobs_dict[final_jobs_names[0]]}")
 
     # Copy the directory if needed
     to_copy = [] + copy_dirs
@@ -389,22 +363,31 @@ def run_grid(
 
     # Filter out jobs based on debug mode, indices, and status
     if debug_mode and len(final_jobs) > 1:
-        final_jobs = final_jobs[:1]
+        final_jobs_dict = {k: final_jobs[k] for k in final_jobs.keys()[:1]}
+        final_jobs_names = final_jobs_names[:1]
     elif include_jobs_indices:
-        final_jobs = [final_jobs[i] for i in include_jobs_indices]
-    if filter_succeeded:
-        final_jobs = [job for job in final_jobs if not check_if_job_succeeded_before(job.name, SAVE_ROOT)]
-    if filter_running:
-        final_jobs = [job for job in final_jobs if not check_if_job_is_running(job.name, SAVE_ROOT)]
+        final_jobs_names = [final_jobs_names[i] for i in include_jobs_indices]
+        final_jobs_dict = {k: final_jobs_dict[k] for k in final_jobs_dict.keys() if k in final_jobs_names}
+    final_jobs_names, final_jobs_dict = filter_eval_done(train_sweep_path, final_jobs_dict, final_jobs_names)
+    print(f"After filtering out completed evals, {len(final_jobs_dict)} jobs remain to run.")
+    print(f"Listing the first 10 jobs to run: {final_jobs_names[:10]}")
+    final_jobs_names,final_jobs_dict = filter_training_incomplete(train_sweep_path, final_jobs_dict, final_jobs_names)
+    print(f"After filtering out evals whose training is not complete, {len(final_jobs_dict)} jobs remain to run.")
+    print(f"Listing the first 10 jobs to run: {final_jobs_names[:10]}")
 
     
-    print(f'Found a total of {len(final_jobs)} jobs. \nExample of first job:\n{final_jobs[0].cmd}\n')
-    print(final_jobs)
+    if len(final_jobs_names) == 0:
+        print("0 jobs remain to run, skipping\n\n")
+        return
+
+    print(f'Found a total of {len(final_jobs_dict)} evals which will run as one job. \nExample of first eval command:\n{final_jobs_dict[final_jobs_names[0]]}\n')
+    print(final_jobs_names[:10])
+
 
     if dry_mode:
         return
 
-    print(f'Launching! Your jobs will run for {jobtime}.')
+    print(f'Launching! Your job(s) will run for {jobtime}.\n\n')
 
     # Dump grid, specs, jobs to files
     if not os.path.exists(SAVE_ROOT):
@@ -414,28 +397,26 @@ def run_grid(
         with open(os.path.join(SAVE_ROOT, 'specs.json'), 'w') as f:
             json.dump(specs, f)
         with open(os.path.join(SAVE_ROOT, 'jobs_lookup.jsonl'), 'w') as f:
-            for i, job in enumerate(final_jobs):
-                f.write(json.dumps({'i': i, 'name': job.name, 'cmd': job.cmd}) + '\n')
+            for i, job_name in enumerate(final_jobs_names):
+                f.write(json.dumps({'i': i, 'name': job_name, 'cmd': final_jobs_dict[job_name]}) + '\n')
     
-    jobs_path = []
     sweep_port_start = sweep_port_start or random.randint(10000, 20000)
-    for i, job in enumerate(final_jobs):
-        jobs_path.append(
-            create_job_files(
-                sweep_name,
-                SAVE_ROOT,
-                LOG_ROOT,
-                job.name,
-                job.cmd,
-                gpus=gpus,
-                nodes=nodes,
-                data_parallel=data_parallel,
-                requeue=requeue,
-                NEW_DIR_PATH=NEW_DIR_PATH,
-                repo_name=repo_name,
-                job_port=sweep_port_start+i,
-            )
+   
+    jobs_path = [
+        create_eval_job_files(
+            sweep_name,
+            SAVE_ROOT,
+            LOG_ROOT,
+            final_jobs_dict.values(),
+            gpus=gpus,
+            nodes=nodes,
+            data_parallel=data_parallel,
+            requeue=requeue,
+            NEW_DIR_PATH=NEW_DIR_PATH,
+            repo_name=repo_name,
+            job_port=sweep_port_start,
         )
+    ]
     submit_array_jobs(
         SWEEP_NAME=sweep_name,
         SAVE_ROOT=SAVE_ROOT,
@@ -467,12 +448,11 @@ def bash(bashCommand):
     output = output.lstrip('b').strip('\'').strip('"')
     return output
 
-def create_job_files(
+def create_eval_job_files(
     SWEEP_NAME,
     SAVE_ROOT,
     LOG_ROOT,
-    job_name,
-    cmd,
+    final_jobs_commands,
     job_args=[],
     gpus=1,
     nodes=1,
@@ -485,14 +465,12 @@ def create_job_files(
     """Creates job folders and scripts"""
     
     SHOULD_REQUEUE = str(requeue).lower()
-    SAVE = os.path.join(SAVE_ROOT, job_name)
-    bash('mkdir -p ' + SAVE)
-    LOG = os.path.join(LOG_ROOT, job_name)
-    bash('mkdir -p ' + LOG)
-    SCRIPTFILE = os.path.join(SAVE, 'run.sh')
+    bash('mkdir -p ' + SAVE_ROOT)
+    bash('mkdir -p ' + LOG_ROOT)
+    SCRIPTFILE = os.path.join(SAVE_ROOT, 'run.sh')
     ARGS_STR = ' '.join(job_args)
     job_port = job_port or random.randint(10000, 20000)
-
+    cmd = ';\n'.join(final_jobs_commands)
     if data_parallel or not gpus:
         ntasks_per_node = 1
     else:
@@ -502,7 +480,7 @@ def create_job_files(
             ntasks_per_node = gpus
     with open(SCRIPTFILE, 'w') as fw:
         fw.write(SH_TEMPLATE.format(**locals()).lstrip())
-    return SAVE
+    return SAVE_ROOT
 
 
 def submit_array_jobs(

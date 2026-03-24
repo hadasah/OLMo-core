@@ -138,8 +138,10 @@ class DataLoaderBase(ABC):
         Iterate over the local rank batches.
         """
         for batch in self._iter_batches():
+            # log.info("in iter of DataLoaderBase")
             self.batches_processed += 1
             yield batch
+            # log.info("DONE iter of DataLoaderBase")
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         """
@@ -445,6 +447,7 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
         return torch.utils.data.get_worker_info()
 
     def get_global_indices(self) -> np.ndarray:
+        log.info("Getting global indices")
         if self._global_indices is not None:
             return self._global_indices
         if not self._global_indices_file.is_file():
@@ -452,6 +455,7 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
         return np.memmap(self._global_indices_file, mode="r", dtype=np.uint32)  # type: ignore
 
     def build_and_save_global_indices(self, in_memory: bool = False):
+        log.info("Building and saving global indices")
         if in_memory:
             self._global_indices = self._build_global_indices()
         else:
@@ -516,6 +520,7 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
         current_global_batch_size = self.global_batch_size
 
         def _build_batch_iterator():
+            # log.info("Building batch iterator")
             return iter(
                 torch.utils.data.DataLoader(
                     _IterableDatasetWrapper(self),
@@ -525,25 +530,33 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
                     prefetch_factor=self.prefetch_factor,
                     persistent_workers=False,
                     timeout=0,
+                    # timeout=200,
                 ),
             )
 
         batch_iterator = _build_batch_iterator()
         while (batch := next(batch_iterator, None)) is not None:
+            # log.info("Yielding next batch from data loader")
             yield batch
+            # log.info("Done yielding batch from data loader")
+            # import traceback; traceback.print_stack()
 
             # If batch size has changed, re-initialize the workers.
             if current_global_batch_size != self.global_batch_size:
                 batch_iterator = _build_batch_iterator()
 
     def _get_dataset_item(self, idx: int) -> Dict[str, Any]:
+        # log.info(f"Getting dataset item at index {idx}")
         item = self.dataset[idx]
+        # log.info(f"Done getting dataset item at index {idx}")
         if isinstance(item, dict):
             return dict(**item, index=idx)
         else:
             return {"input_ids": item, "index": idx}
 
     def _format_fname_from_fields(self, prefix: str, **fields) -> str:
+        # log.info(f"Formatting filename from fields: {fields}")
+
         parts = [prefix]
         for key in sorted(fields):
             value = fields[key]
@@ -565,6 +578,7 @@ class NumpyFSLDataLoader(NumpyDataLoaderBase):
         chunk_size: int = 1,
         **kwargs,
     ):
+        # log.info("Initializing NumpyFSLDataLoader")
         assert chunk_size >= 1
         super().__init__(dataset, **kwargs)
         self.chunk_size = chunk_size
@@ -590,6 +604,7 @@ class NumpyFSLDataLoader(NumpyDataLoaderBase):
 
     @property
     def _global_indices_file(self) -> Path:
+        # log.info("Getting global indices file path")
         global_indices_fname = self._format_fname_from_fields(
             "global_indices",
             seed=self.seed if self.shuffle else None,
@@ -600,6 +615,7 @@ class NumpyFSLDataLoader(NumpyDataLoaderBase):
         return Path(self.work_dir) / f"{global_indices_fname}.npy"
 
     def _build_global_indices(self) -> np.ndarray:
+        # log.info("Building global indices for NumpyFSLDataLoader")
         assert len(self.dataset) < np.iinfo(np.uint32).max
 
         rng: Optional[np.random.Generator] = None
@@ -627,6 +643,7 @@ class NumpyFSLDataLoader(NumpyDataLoaderBase):
         return indices
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
+        # log.info("Entering NumpyFSLDataLoader getitem")
         # NOTE: Make sure the logic here matches that in '_get_local_instance_indices()'
 
         # NOTE: 'indices' are global instance indices.
@@ -642,12 +659,15 @@ class NumpyFSLDataLoader(NumpyDataLoaderBase):
         if self.dp_world_size > 1:
             indices = indices[:, self.dp_rank :: self.dp_world_size]
 
+        # log.info("Getting local instance indices")
         # Get instances for the batch.
         instances = [self._get_dataset_item(int(idx)) for idx in indices[index]]
+        # log.info("Done getting local instance indices")
 
         return self.collator(instances)
 
     def _get_local_instance_indices(self, indices: np.ndarray) -> Iterable[int]:
+        # log.info("Getting local instance indices in NumpyFSLDataLoader")
         # NOTE: 'indices' are global instance indices.
         # Make sure the logic here matches that in '__getitem__()'
 
@@ -717,6 +737,7 @@ class NumpyVSLDataLoader(NumpyDataLoaderBase):
         dataset: NumpyVSLDataset,
         **kwargs,
     ):
+        # log.info("Initializing NumpyVSLDataLoader")
         super().__init__(dataset, **kwargs)
         self._batches_per_bucket: Optional[Tuple[Tuple[int, int], ...]] = None
         self._buckets: Optional[Tuple[int, ...]] = None
@@ -832,6 +853,7 @@ class NumpyVSLDataLoader(NumpyDataLoaderBase):
         super().build_and_save_global_indices(in_memory=in_memory)
 
     def _build_global_indices(self) -> np.ndarray:
+        # log.info("Building global batch indices for NumpyVSLDataLoader")
         if self.shuffle:
             assert isinstance(self.dataset, NumpyVSLDataset)
             return self.dataset.curriculum.get_batch_indices(
@@ -841,6 +863,7 @@ class NumpyVSLDataLoader(NumpyDataLoaderBase):
             return np.arange(self.total_batches, dtype=np.uint32)
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
+        # log.info("Entering NumpyVSLDataLoader getitem")
         # NOTE: Make sure the logic here matches that in '_get_local_instance_indices()'
 
         # NOTE: 'indices' are global *batch* indices.
@@ -856,7 +879,7 @@ class NumpyVSLDataLoader(NumpyDataLoaderBase):
 
     def _get_local_instance_indices(self, indices: np.ndarray) -> Iterable[int]:
         # NOTE: 'indices' are *batch* indices at this point.
-
+        # log.info("Getting local instance indices in NumpyVSLDataLoader")
         # Start at the specified batch index.
         if self.batches_processed > 0:
             indices = indices[self.batches_processed :]
@@ -873,6 +896,7 @@ class NumpyVSLDataLoader(NumpyDataLoaderBase):
                 yield instance_index
 
     def _batch_index_to_local_instance_indices(self, batch_index: int) -> np.ndarray:
+        log.info(f"Mapping batch index {batch_index} to local instance indices")
         bucket_seq_len, bucket_batch_index = self._batch_index_to_bucket_batch_index(batch_index)
         instances_per_batch = self.global_batch_size // bucket_seq_len
         instance_start_index = bucket_batch_index * instances_per_batch
@@ -946,20 +970,24 @@ class NumpyVSLDataLoader(NumpyDataLoaderBase):
 
 class _IterableDatasetWrapper(torch.utils.data.IterableDataset[Dict[str, Any]]):
     def __init__(self, data_loader: NumpyDataLoaderBase):
+        # log.info("_IterableDatasetWrapper made dataloader wrapper")
         self.data_loader = data_loader
 
     @property
     def dataset(self) -> NumpyDatasetBase:
+        # log.info("_IterableDatasetWrapper Accessing dataset property")
         return self.data_loader.dataset
 
     @property
     def worker_info(self):
+        # log.info("_IterableDatasetWrapper Accessing worker_info property")
         return torch.utils.data.get_worker_info()
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         """
         Iterate over the local rank+worker instances.
         """
+        # log.info("_IterableDatasetWrapper Entering IterableDatasetWrapper iterator")
         global_indices = self.data_loader.get_global_indices()
 
         num_threads = self.data_loader.num_threads
@@ -1007,11 +1035,16 @@ class _IterableDatasetWrapper(torch.utils.data.IterableDataset[Dict[str, Any]]):
         else:
             indices = self.data_loader._get_local_instance_indices(global_indices)
             instance_iterator = (self.data_loader._get_dataset_item(int(idx)) for idx in indices)
-
-        return (
+        # return (
+        #     self.data_loader.collator(batch)
+        #     for batch in iter_batched(instance_iterator, self.data_loader.rank_batch_size)
+        # )
+        ret = (
             self.data_loader.collator(batch)
             for batch in iter_batched(instance_iterator, self.data_loader.rank_batch_size)
         )
+        # log.info("_IterableDatasetWrapper Exiting IterableDatasetWrapper iterator")
+        return ret
 
 
 @dataclass

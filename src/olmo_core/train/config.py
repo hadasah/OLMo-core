@@ -46,6 +46,7 @@ class TrainerConfig(Config):
     async_bookkeeping: Optional[bool] = None
     no_checkpoints: bool = False
     no_evals: bool = False
+    eval_only: bool = False
 
     def add_callback(self, name: str, callback: Callback):
         """

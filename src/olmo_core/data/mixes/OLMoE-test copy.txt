@@ -1,0 +1,11 @@
+######### WEB DATA #########
+
+c4_en,preprocessed/eval-data/perplexity/{TOKENIZER}/c4_en/val/part-0-00000.npy
+dolma_books,preprocessed/eval-data/perplexity/{TOKENIZER}/dolma_books/val/part-0-00000.npy
+dolma_commoncrawl,preprocessed/eval-data/perplexity/{TOKENIZER}/dolma_common-crawl/val/part-0-00000.npy
+dolma_pes2o,preprocessed/eval-data/perplexity/{TOKENIZER}/dolma_pes2o/val/part-0-00000.npy
+dolma_reddit,preprocessed/eval-data/perplexity/{TOKENIZER}/dolma_reddit/val/part-0-00000.npy
+dolma_stack,preprocessed/eval-data/perplexity/{TOKENIZER}/dolma_stack/val/part-0-00000.npy
+dolma_wiki,preprocessed/eval-data/perplexity/{TOKENIZER}/dolma_wiki/val/part-0-00000.npy
+ice,preprocessed/eval-data/perplexity/{TOKENIZER}/ice/val/part-0-00000.npy
+m2d2_s2orc,preprocessed/eval-data/perplexity/{TOKENIZER}/m2d2_s2orc/val/part-0-00000.npy

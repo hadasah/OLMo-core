@@ -1,3 +1,5 @@
+import os
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -44,6 +46,7 @@ class EvaluatorCallback(Callback):
     Runs in-loop evaluations for a :class:`~olmo_core.train.train_module.TransformerTrainModule`
     periodically during training.
     """
+    name: str = "eval"
 
     evaluators: List[Evaluator] = field(default_factory=list)
     """
@@ -58,6 +61,11 @@ class EvaluatorCallback(Callback):
     eval_on_startup: bool = False
     """
     Whether to run an evaluation when the trainer starts up.
+    """
+
+    eval_on_finish: bool = False
+    """
+    Whether to run an evaluation when training completes.
     """
 
     cancel_after_first_eval: bool = False
@@ -93,7 +101,24 @@ class EvaluatorCallback(Callback):
 
         self._perform_eval()
 
-    def _perform_eval(self):
+    def post_train(self):
+        eval_done_file = os.path.join(self.trainer.save_folder, "final_eval_done.txt")
+        if os.path.exists(eval_done_file):
+            return
+        if self.eval_on_finish: # and self.step % self.eval_interval != 0:
+            # if training just completed and we haven't done an eval recently, do one final eval at the end of training.
+            self._perform_eval(evaluator_name_prefix="final/")
+            # with open(eval_done_file, "w") as f:
+            #     f.write("")
+    
+    def close(self):
+        eval_done_file = os.path.join(self.trainer.save_folder, "final_eval_done.txt")
+        if self.eval_on_finish and self.step % self.eval_interval != 0:
+            # if training just completed and we haven't done an eval recently, do one final eval at the end of training.
+            with open(eval_done_file, "w") as f:
+                f.write("")
+
+    def _perform_eval(self, evaluator_name_prefix=""):
         # Put model in eval train mode.
         # TODO: make sure grads will be zeroed at this point
         #  self.trainer.optim.zero_grad(set_to_none=True)
@@ -142,7 +167,8 @@ class EvaluatorCallback(Callback):
                 for name, value in metrics.items():
                     evaluation_names.append(name)
                     metrics_str.append(f"    {name}={format_float(value.item())}")
-                    self.trainer.record_metric(f"eval/{evaluator.name}/{name}", value)
+                    # self.trainer.record_metric(f"eval/{evaluator.name}/{name}", value)
+                    self.trainer.record_metric(f"{self.name}/{evaluator_name_prefix}{evaluator.name}/{name}", value)
 
             evaluator_times.append(time.monotonic() - start_time)
             evaluator_names.append(evaluation_names)
@@ -193,8 +219,10 @@ class EvaluatorCallback(Callback):
 @dataclass
 class LMEvaluatorCallbackConfig(CallbackConfig):
     eval_dataset: NumpyDatasetConfig
+    name: str = "lm"
     eval_interval: int = 1000
     eval_on_startup: bool = False
+    eval_on_finish: bool = False
     cancel_after_first_eval: bool = False
     eval_duration: Duration = field(default_factory=lambda: Duration.epochs(1))
     log_interval: int = 5
@@ -241,7 +269,7 @@ class LMEvaluatorCallbackConfig(CallbackConfig):
 
         evaluator = LMEvaluator.from_numpy_dataset(
             dataset,
-            name="lm",
+            name=self.name,
             global_batch_size=global_eval_batch_size,
             collator=trainer.data_loader.collator,
             device=trainer.device,
@@ -252,6 +280,7 @@ class LMEvaluatorCallbackConfig(CallbackConfig):
             eval_interval=self.eval_interval,
             log_interval=self.log_interval,
             eval_on_startup=self.eval_on_startup,
+            eval_on_finish=self.eval_on_finish,
             cancel_after_first_eval=self.cancel_after_first_eval,
             eval_duration=self.eval_duration,
         )
@@ -384,9 +413,11 @@ class DownstreamEvaluator(Evaluator):
 class DownstreamEvaluatorCallbackConfig(CallbackConfig):
     tasks: List[str]
     tokenizer: TokenizerConfig
+    name: str = "downstream"
     eval_interval: int = 1000
     eval_duration: Duration = field(default_factory=lambda: Duration.epochs(1))
     eval_on_startup: bool = False
+    eval_on_finish: bool = False
     cancel_after_first_eval: bool = False
     log_interval: int = 5
     enabled: bool = True
@@ -413,7 +444,7 @@ class DownstreamEvaluatorCallbackConfig(CallbackConfig):
         for task in self.tasks:
             evaluators.append(
                 DownstreamEvaluator(
-                    name="downstream",
+                    name=self.name,
                     task=task,
                     batch_spec=trainer.train_module.eval_batch_spec,
                     tokenizer=tokenizer,
@@ -426,6 +457,7 @@ class DownstreamEvaluatorCallbackConfig(CallbackConfig):
             evaluators=evaluators,
             eval_interval=self.eval_interval,
             eval_on_startup=self.eval_on_startup,
+            eval_on_finish=self.eval_on_finish,
             cancel_after_first_eval=self.cancel_after_first_eval,
             log_interval=self.log_interval,
             eval_duration=self.eval_duration,

@@ -108,17 +108,14 @@ def get_wandb_tags(
         raise ValueError("moe_num_experts_list must contain at least one element")
     if moe_type == "dropless":
         wandb_tags.append("dropless")
-    if "5XD" in run_name:
-        wandb_tags.append("Data=5C")
-    else:
-        wandb_tags.append("Data=1C")
+    # if "5XD" in run_name:
+    #     wandb_tags.append("Data=5C")
+    # else:
+    #     wandb_tags.append("Data=1C")
     if moe_generalist_hidden_multiplier > 0:
         wandb_tags.append(f"{moe_generalist_hidden_multiplier}gen")
     else:
         wandb_tags.append("nogen")
-
-    if "uniform" in run_name:
-        wandb_tags.append("uniform")
     
     wandb_tags.append(model_name.split('_')[1])  # e.g., "100M", "1B"
 
@@ -172,7 +169,6 @@ def build_config(
     moe_z_loss_weight: float = 0.001,
     # moe_z_loss_weight: float = 0,
     moe_lb_loss_weight: float = 0.01,
-    expert_assignment: str = "learned",
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS['WANDB_ENTITY'],
     wandb_project: str = USER_PROJECT_SPECS['WANDB_PROJECT'],
@@ -192,7 +188,6 @@ def build_config(
         bias_gamma=moe_bias_gamma,
         z_loss_weight=moe_z_loss_weight,
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
-        uniform_expert_assignment=True if expert_assignment == "uniform" else False,
     )
 
     dataset_config = NumpyDatasetConfig.from_data_mix(
@@ -241,6 +236,7 @@ def build_config(
             metrics_collect_interval=metrics_collect_interval,
             cancel_check_interval=1,  # Updated from small-moe.py
             max_duration=Duration.tokens(train_tokens),
+            eval_only=True,  # Set to True to only run evaluations without training
         )
         .with_callback("gpu_monitor", GPUMemoryMonitorCallback())
         .with_callback(
@@ -263,6 +259,7 @@ def build_config(
         .with_callback(
             "lm_evaluator",
             LMEvaluatorCallbackConfig(
+                name="lm",
                 eval_dataset=NumpyDatasetConfig.from_data_mix(
                     DATAMIX_LOOKUP[valid_datamix_name],
                     name=NumpyDatasetType.padded_fsl,
@@ -278,6 +275,7 @@ def build_config(
         .with_callback(
             "downstream_evaluator",
             DownstreamEvaluatorCallbackConfig(
+                name="downstream",
                 tasks=[
                     "mmlu_stem_mc_5shot_test",
                     "mmlu_humanities_mc_5shot_test",
@@ -291,6 +289,7 @@ def build_config(
                 eval_on_finish=True,
             ),
         )
+        # THE ORDER HERE MATTERS: WANDB should be last so that it logs metrics from all other callbacks
         .with_callback(
             "wandb",
             WandBCallback(
@@ -359,7 +358,6 @@ def main(
             moe_bias_gamma=args.moe_bias_gamma,
             moe_z_loss_weight=args.moe_z_loss_weight,
             moe_lb_loss_weight=args.moe_lb_loss_weight,
-            expert_assignment=args.expert_assignment,
             overrides=overrides)
         # config = build_config(run_name)
         logger.info("Config built successfully")
@@ -427,7 +425,6 @@ if __name__ == "__main__":
     parser.add_argument("--moe_bias_gamma", type=float, default=None, help="Gamma value for MoE bias")
     parser.add_argument("--moe_z_loss_weight", type=float, default=0.001, help="Weight for the z-loss in MoE")
     parser.add_argument("--moe_lb_loss_weight", type=float, default=0.01, help="Weight for the LB loss in MoE")
-    parser.add_argument("--expert_assignment", type=str, default="learned", choices=["learned", "uniform"])
     args, overrides = parser.parse_known_args()
 
     # run_name, *overrides = sys.argv[1:]
