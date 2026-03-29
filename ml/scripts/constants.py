@@ -119,6 +119,24 @@ PROJECT_SPECS = {
         "DATA_DIR": "/gscratch/zlab/snehark/OLMo-core/data/",
         "NAME_KEYS": [],
     },
+    "kmarathe": {
+        'DEFAULT_SAVE_PATH': os.path.join(DEFAULT_DIR_PATH, 'models'),
+        'DATA_WORK_DIR': "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data",
+        'VALID_DATA_DIR': "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed",
+        "WANDB_PROJECT": "moe",
+        "WANDB_ENTITY": "olmoe-core",
+        "CONDA_ENV_NAME": "moe",
+        "PROJECT_DIR": DEFAULT_DIR_PATH,
+        "SLURM_ACCOUNT": "zlab",
+        "SLURM_PARTITION": "ckpt-g2",
+        "COMMAND_PREFIX": f"{DEFAULT_DIR_PATH}/ml/scripts/single_train_launch.py",
+        "NUM_GPUS": 4,
+        "MODEL": [],
+        "DATAROOT": "https://olmo-data.org/",
+        "DATA_DIR": "/gscratch/zlab/snehark/OLMo-core/data/",
+        "NAME_KEYS": [],
+    },
+
 }
 
 HARDWARE_SPECS_DICT = {
@@ -149,7 +167,7 @@ HARDWARE_SPECS_DICT = {
             "per_gpu_batch_size": 8,
         }, 
         "gpu-a40": {
-            "per_gpu_batch_size": 8,
+            "per_gpu_batch_size": 4,
         }, 
         "gpu-h200": {
             "per_gpu_batch_size": 16,

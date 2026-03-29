@@ -389,7 +389,7 @@ if __name__ == "__main__":
     parser.add_argument("run_name", type=str, help="Name of the run")
     parser.add_argument("--tokenizer_name", type=str, default="dolma2", help="Name of the tokenizer to use")
     parser.add_argument("--model_name", type=str, default="olmo2_100M_moe_32_16", help="Name of the model configuration to use")
-    parser.add_argument("--train_datamix_name", type=str, default="OLMoE_mix_0824", help="Name of the training data mix")
+    parser.add_argument("--train_datamix_name", type=str, default="OLMoE_mix_0824_math", help="Name of the training data mix")
     parser.add_argument("--valid_datamix_name", type=str, default="v3_small_ppl_validation", help="Name of the validation data mix")
     parser.add_argument("--data_root", type=str, default="https://olmo-data.org/", help="Root URL for the data")
     parser.add_argument("--save_root", type=str, default=USER_PROJECT_SPECS['DEFAULT_SAVE_PATH'], help="Parent directory for saving the model")

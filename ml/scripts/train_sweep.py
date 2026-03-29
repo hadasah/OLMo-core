@@ -8,14 +8,14 @@ from constants import PROJECT_SPECS, HARDWARE_SPECS_DICT, MODEL_HP_DEFAULTS
 from utils import dict_update
 
 
-SWEEP_NAME_DEFAULT = 'lr_sweep_5XD'
+SWEEP_NAME_DEFAULT = 'sweep_200m_50m'
 project = 'moe'
 MODELS = [
     # 'olmo2_200M',
     # 'olmo2_100M',
-    # 'olmo2_50M',
+     'olmo2_50M',
     # 'olmo2_20M',
-    'olmo2_10M',
+    # 'olmo2_10M',
 ]
 
 def main(
@@ -155,6 +155,29 @@ def main(
                 },
                 # allows you to bundle multiple hyperparameters together
                 "subgrids": {
+                    # Option 1: 8 experts, top-2 routing (2/8 = 25% active)
+                    "e4x1c1_nogen": {
+                        "moe_num_experts_list": ["4"],
+                        "moe_hidden_multipliers_list": ["1"],    # full-size experts
+                        "moe_router_top_ks_list": ["1"],         # activate 2 experts
+                        "moe_generalist_hidden_multiplier": ["0"]
+                    },
+
+                    # Option 2: 16 experts, top-4 routing (4/16 = 25% active)
+                    # "e16x1c4_nogen": {
+                    #     "moe_num_experts_list": ["16"],
+                    #     "moe_hidden_multipliers_list": ["1"],
+                    #     "moe_router_top_ks_list": ["4"],
+                    #     "moe_generalist_hidden_multiplier": ["0"]
+                    # },
+
+                    # # Option 3: 32 experts, top-8 routing (8/32 = 25% active)
+                    # "e32x1c8_nogen": {
+                    #     "moe_num_experts_list": ["32"],
+                    #     "moe_hidden_multipliers_list": ["1"],
+                    #     "moe_router_top_ks_list": ["8"],
+                    #     "moe_generalist_hidden_multiplier": ["0"]
+                    # },
                     # "e1x1c1": {"moe_num_experts_list": ["1"]},
                     ### no generalist models
                     # "e2x1c1_nogen": {"moe_num_experts_list": ["2"], "moe_hidden_multipliers_list": ["1"], "moe_router_top_ks_list": ["1"], "moe_generalist_hidden_multiplier": ["0"]},
@@ -170,14 +193,14 @@ def main(
                     # "e4,8x0.5,0.25c1,2_nogen": {"moe_num_experts_list": ["4,8"], "moe_hidden_multipliers_list": ["0.5,0.25"], "moe_router_top_ks_list": ["1,2"], "moe_generalist_hidden_multiplier": ["0"]},
                     # "e8,16x0.25,0.125c2,4_nogen": {"moe_num_experts_list": ["8,16"], "moe_hidden_multipliers_list": ["0.25,0.125"], "moe_router_top_ks_list": ["2,4"], "moe_generalist_hidden_multiplier": ["0"]},
                     # "e4,16x0.5,0.125c1,4_nogen": {"moe_num_experts_list": ["4,16"], "moe_hidden_multipliers_list": ["0.5,0.125"], "moe_router_top_ks_list": ["1,4"], "moe_generalist_hidden_multiplier": ["0"]},
-                    "e32x0.25c4_nogen": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]},
-                    "e64x0.25c4_nogen": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]},
+                    #"e32x0.25c4_nogen": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]},
+                    #"e64x0.25c4_nogen": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]},
                     # "e32x0.125c8_nogen": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.125"], "moe_router_top_ks_list": ["8"], "moe_generalist_hidden_multiplier": ["0"]},
                     # "e64x0.125c8_nogen": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.125"], "moe_router_top_ks_list": ["8"], "moe_generalist_hidden_multiplier": ["0"]},
                     # "e8,32x0.25,0.125c2,4_nogen": {"moe_num_experts_list": ["8,32"], "moe_hidden_multipliers_list": ["0.25,0.125"], "moe_router_top_ks_list": ["2,4"], "moe_generalist_hidden_multiplier": ["0.5"]},
                     # "e16,32x0.25,0.125c2,4_nogen": {"moe_num_experts_list": ["16,32"], "moe_hidden_multipliers_list": ["0.25,0.125"], "moe_router_top_ks_list": ["2,4"], "moe_generalist_hidden_multiplier": ["0"]},
-                    "e32,32x0.25,0.125c2,4_nogen": {"moe_num_experts_list": ["32,32"], "moe_hidden_multipliers_list": ["0.25,0.125"], "moe_router_top_ks_list": ["2,4"], "moe_generalist_hidden_multiplier": ["0"]},
-                    "e32,64x0.25,0.125c2,4_nogen": {"moe_num_experts_list": ["32,64"], "moe_hidden_multipliers_list": ["0.25,0.125"], "moe_router_top_ks_list": ["2,4"], "moe_generalist_hidden_multiplier": ["0"]},
+                    #"e32,32x0.25,0.125c2,4_nogen": {"moe_num_experts_list": ["32,32"], "moe_hidden_multipliers_list": ["0.25,0.125"], "moe_router_top_ks_list": ["2,4"], "moe_generalist_hidden_multiplier": ["0"]},
+                    #"e32,64x0.25,0.125c2,4_nogen": {"moe_num_experts_list": ["32,64"], "moe_hidden_multipliers_list": ["0.25,0.125"], "moe_router_top_ks_list": ["2,4"], "moe_generalist_hidden_multiplier": ["0"]},
                     ## 0.5 generalist models
                     # "e4x0.5c1_0.5gen": {"moe_num_experts_list": ["4"], "moe_hidden_multipliers_list": ["0.5"], "moe_router_top_ks_list": ["1"], "moe_generalist_hidden_multiplier": ["0.5"]},
                     # "e8x0.5c1_0.5gen": {"moe_num_experts_list": ["8"], "moe_hidden_multipliers_list": ["0.5"], "moe_router_top_ks_list": ["1"], "moe_generalist_hidden_multiplier": ["0.5"]},
