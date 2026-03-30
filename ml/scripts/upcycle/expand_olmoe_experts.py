@@ -382,7 +382,7 @@ def verify(olmocore_sd: dict, original_n: int, expanded_n: int, d_model: int, n_
             else:
                 stride = t.shape[0] // expanded_n
                 # Sanity: stride should be either d_model or hidden_size
-                expected_strides = {d_model, t.shape[1]}  # d_model or the other dim
+                expected_strides = {t.shape[0] // expanded_n, t.shape[1]}  # d_model or the other dim
                 if stride not in expected_strides:
                     issues.append(
                         f"{key}: unexpected stride {stride}, expected one of {expected_strides}"
