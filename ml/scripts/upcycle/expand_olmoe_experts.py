@@ -296,23 +296,30 @@ def expand_batched_expert_weight(
 
 def expand_router_weight(
     tensor: torch.Tensor,
-    # original_n: int,
     n_to_add: int,
     d_model: int,
+    init: str = "clone_with_noise",
+    noise_scale: float = 0.01,
 ) -> torch.Tensor:
-    """
-    Router weight in olmo_core is stored flattened: [original_n * d_model]
-    (same packing convention as expert weights, not [original_n, d_model]).
-    
-    Expand by appending n_to_add * d_model zeros.
-    """
-    """
-    Router shape: [num_experts, d_model]
-    """
-    assert tensor.ndim == 2, f"Expected [N, d_model], got {tensor.shape}"
+    assert tensor.ndim == 2
+    original_n = tensor.shape[0]
 
-    new_rows = torch.zeros(n_to_add, d_model, dtype=tensor.dtype)
-    return torch.cat([tensor, new_rows], dim=0)
+    new_rows = []
+    for i in range(n_to_add):
+        src = tensor[i % original_n]  # clone from corresponding original expert
+        if init == "clone_with_noise":
+            new_row = src.clone() + torch.randn_like(src) * noise_scale
+        elif init == "clone":
+            new_row = src.clone()
+        elif init == "random":
+            new_row = torch.randn_like(src) * src.std().item()
+        elif init == "zeros":
+            new_row = torch.zeros_like(src)
+        else:
+            raise ValueError(f"Unknown init: {init}")
+        new_rows.append(new_row)
+
+    return torch.cat([tensor, torch.stack(new_rows)], dim=0)
 
 
 def expand_state_dict(
@@ -322,6 +329,8 @@ def expand_state_dict(
     d_model: int,
     init: str,
     noise_scale: float,
+    router_init: str,           # new
+    router_noise_scale: float,  # new    
 ) -> dict:
     """
     Takes an olmo_core state dict with original_n experts and returns
@@ -335,16 +344,20 @@ def expand_state_dict(
         is_router = ROUTER_KEY in key
 
         if is_expert:
-            log.info(f"[expert] expanding {key}: {tensor.shape}", )
+            log.info(f"[expert] expanding {key}: {tensor.shape}")
             new_tensor = expand_batched_expert_weight(
-                tensor, original_n, n_to_add, init, noise_scale  # new - d_model removed
+                tensor, original_n, n_to_add, init, noise_scale
             )
             log.info(f"  -> {new_tensor.shape}")
             new_sd[key] = new_tensor
 
         elif is_router:
-            log.info(f"[router] expanding {key}: {tensor.shape}", )
-            new_tensor = expand_router_weight(tensor, n_to_add, d_model)
+            log.info(f"[router] expanding {key}: {tensor.shape}")
+            new_tensor = expand_router_weight(
+                tensor, n_to_add, d_model,
+                init=router_init,
+                noise_scale=router_noise_scale,
+            )
             log.info(f"  -> {new_tensor.shape}")
             new_sd[key] = new_tensor
 
@@ -356,7 +369,7 @@ def expand_state_dict(
 
 # ── Verification ──────────────────────────────────────────────────────────────
 
-def verify(olmocore_sd: dict, original_n: int, expanded_n: int, d_model: int, n_layers: int):
+def verify(olmocore_sd: dict, original_n: int, expanded_n: int, d_model: int, n_layers: int, router_init):
     print("\n=== Verification ===")
     issues = []
 
@@ -398,9 +411,10 @@ def verify(olmocore_sd: dict, original_n: int, expanded_n: int, d_model: int, n_
             )
         else:
             router = olmocore_sd[router_key]
-            new_rows = router[original_n:]
-            if not torch.all(new_rows == 0):
-                issues.append(f"{router_key}: new router rows are not zero-initialized")
+            if router_init == "zeros":
+                new_rows = router[original_n:]
+                if not torch.all(new_rows == 0):
+                    issues.append(f"{router_key}: new router rows are not zero-initialized")
 
     if issues:
         print("❌ Issues found:")
@@ -408,7 +422,7 @@ def verify(olmocore_sd: dict, original_n: int, expanded_n: int, d_model: int, n_
             print(f"   {issue}")
     else:
         print(f"✓ All {n_layers} layers have correct expert shapes")
-        print(f"✓ All routers have shape [{expanded_n}, {d_model}] with zero-init new rows")
+        print(f"✓ All routers have shape [{expanded_n}, {d_model}] with new rows")
         print(f"✓ Expanded from {original_n} -> {expanded_n} experts")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -429,7 +443,7 @@ def parse_args():
                         help="Model hidden dim (2048 for OLMoE-1B-7B)")
     parser.add_argument("--n_layers",              type=int, default=16,
                         help="Number of transformer layers (16 for OLMoE-1B-7B)")
-    parser.add_argument("--init", default="clone_with_noise",
+    parser.add_argument("--init", default="clone",
                         choices=["clone_with_noise", "clone", "random", "zeros"],
                         help=(
                             "clone_with_noise: copy existing expert weights + small gaussian noise (recommended)\n"
@@ -438,6 +452,13 @@ def parse_args():
                             "zeros:            zero init (experts completely inactive at start)"
                         ))
     parser.add_argument("--noise_scale",    type=float, default=0.01)
+
+    parser.add_argument("--router_init", default=None,
+                        choices=["clone_with_noise", "clone", "random", "zeros"],
+                        help="Init method for new router rows. Defaults to --init if not set.")
+    parser.add_argument("--router_noise_scale", type=float, default=None,
+                        help="Noise scale for router clone_with_noise. Defaults to --noise_scale if not set.")
+
     parser.add_argument("--inspect_only",   action="store_true",
                         help="Print expert-related keys and shapes, then exit")
     return parser.parse_args()
@@ -483,6 +504,8 @@ if __name__ == "__main__":
         d_model=args.d_model,
         init=args.init,
         noise_scale=args.noise_scale,
+        router_init        = args.router_init,        
+        router_noise_scale = args.router_noise_scale 
     )
 
     # ── Verify ────────────────────────────────────────────────────────────
@@ -492,6 +515,7 @@ if __name__ == "__main__":
         expanded_n=args.expanded_num_experts,
         d_model=args.d_model,
         n_layers=args.n_layers,
+        router_init=args.router_init,
     )
 
     # ── Save in olmo_core format ──────────────────────────────────────────
