@@ -45,6 +45,8 @@ SLRM_JOB_ARRAY_TEMPLATE = """
 source ~/.bashrc
 {conda_command}
 
+export WANDB_API_KEY="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"
+
 echo "# -------- BEGIN CALL TO run.sh --------"
 # -K kills all subtasks if one particular task crashes. This is necessary for
 # distributed training
@@ -104,7 +106,7 @@ echo
 nvidia-smi
 
 source ~/.bashrc
-
+{conda_command}
 echo "SLURM_PROCID"=$SLURM_PROCID
 echo "node-list: $SLURM_JOB_NODELIST"
 
@@ -183,7 +185,7 @@ def run_grid(
     dry_mode=False,
     dependencies=[],
     repo_name="code",
-    conda_env_name=None,
+    conda_env_name="moe",
     include_jobs_indices=None,
     filter_succeeded=True,
     filter_running=True,
@@ -417,6 +419,7 @@ def run_grid(
                 NEW_DIR_PATH=NEW_DIR_PATH,
                 repo_name=repo_name,
                 job_port=sweep_port_start+i,
+                conda_env_name=conda_env_name,
             )
         )
     submit_array_jobs(
@@ -459,6 +462,7 @@ def create_job_files(
     NEW_DIR_PATH="",
     repo_name="",
     job_port=None,
+    conda_env_name=None
 ):
     """Creates job folders and scripts"""
     
@@ -470,6 +474,7 @@ def create_job_files(
     SCRIPTFILE = os.path.join(SAVE, 'run.sh')
     ARGS_STR = ' '.join(job_args)
     job_port = job_port or random.randint(RANDOM_PORT_MIN, RANDOM_PORT_MAX)
+    conda_command = f'conda activate {conda_env_name}' if conda_env_name else ''
 
     if data_parallel or not gpus:
         ntasks_per_node = 1
@@ -501,7 +506,7 @@ def submit_array_jobs(
     NEW_DIR_PATH="",
     jobs_path=[],
     dependencies=[],
-    conda_env_name=None,
+    conda_env_name='moe',
     append_to_sbatch_str=None,
 ):  
     """Submits the jobs as a SLURM job array."""

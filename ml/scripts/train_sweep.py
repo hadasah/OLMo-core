@@ -13,9 +13,10 @@ project = 'moe'
 MODELS = [
     # 'olmo2_200M',
     # 'olmo2_100M',
-     'olmo2_50M',
+    # 'olmo2_50M',
     # 'olmo2_20M',
     # 'olmo2_10M',
+    "olmoe_2B_14B",
 ]
 
 def main(
@@ -139,8 +140,37 @@ def main(
                     "save_root": [f"{SPECS['DEFAULT_SAVE_PATH']}/{model_sweep_name}"],
                     # "scheduler": ["wsd"],
                     "moe_type": ["dropless"],
+                    "load_path": ["/gscratch/zlab/kmarathe/olmocore/OLMo-core/ml/scripts/upcycle/olmoe_128experts/model.pt"], 
+                    "ep_degree": [None],
+                    "dp_num_replicas": [None],
+                    "freeze_experts": ["first_half"],
                     # "moe_bias_gamma": [0.001],  # None for default, or specify a float value
                     # "moe_lb_loss_weight": [0.0001],  # Weight for the lb-loss in MoE
+
+                    # -------------------------------------------------------
+                    # Checkpoint: path to the upcycled OLMoE 1B→2x7B checkpoint
+                    # produced by dense_to_expert_moe.py.  Set to None to start
+                    # from random initialisation (no checkpoint loading).
+                    # -------------------------------------------------------
+                    #"load_path": [None],   # e.g. ["/path/to/olmoe-2x7b-public-news"]
+ 
+                    # -------------------------------------------------------
+                    # Expert parallelism.
+                    # ep_degree should equal the number of experts in the
+                    # expanded model (2 for OLMoE 1B→2x7B).
+                    # dp_num_replicas = world_size // ep_degree; set to None
+                    # to let train.py default it to 1.
+                    # Both are ignored (no EP) when ep_degree is None.
+                    # -------------------------------------------------------
+                    "ep_degree": [8],           # e.g. [2] for 2-expert model
+                    "dp_num_replicas": [1],     # e.g. [4] for 8-GPU run with ep_degree=2
+ 
+                    # -------------------------------------------------------
+                    # Freeze: zero out gradients for the first half of
+                    # expert/router params.  Set to "none" to disable.
+                    # -------------------------------------------------------
+                    "freeze_experts": ["first_half"],
+
                     'train_module': {
                         'optim': {
                             # 'lr': [4e-3, 1e-2],
@@ -155,13 +185,14 @@ def main(
                 },
                 # allows you to bundle multiple hyperparameters together
                 "subgrids": {
+                    "default": {},
                     # Option 1: 8 experts, top-2 routing (2/8 = 25% active)
-                    "e4x1c1_nogen": {
-                        "moe_num_experts_list": ["4"],
-                        "moe_hidden_multipliers_list": ["1"],    # full-size experts
-                        "moe_router_top_ks_list": ["1"],         # activate 2 experts
-                        "moe_generalist_hidden_multiplier": ["0"]
-                    },
+                    # "e4x1c1_nogen": {
+                    #     "moe_num_experts_list": ["4"],
+                    #     "moe_hidden_multipliers_list": ["1"],    # full-size experts
+                    #     "moe_router_top_ks_list": ["1"],         # activate 2 experts
+                    #     "moe_generalist_hidden_multiplier": ["0"]
+                    # },
 
                     # Option 2: 16 experts, top-4 routing (4/16 = 25% active)
                     # "e16x1c4_nogen": {

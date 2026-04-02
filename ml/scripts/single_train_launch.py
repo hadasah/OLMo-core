@@ -17,7 +17,8 @@ from olmo_core.data import (
     DataMix,
     NumpyDataLoaderConfig,
     NumpyDatasetConfig,
-    NumpyDatasetType,
+    NumpyFSLDatasetConfig,
+    #NumpyDatasetType,
     TokenizerConfig,
 )
 from olmo_core.distributed.parallel import DataParallelType
@@ -47,22 +48,25 @@ from olmo_core.train.train_module import (
     TransformerDataParallelConfig,
     TransformerDataParallelWrappingStrategy,
     TransformerTrainModuleConfig,
+    TransformerExpertParallelConfig,
 )
 from olmo_core.utils import seed_all
 
 from constants import (
     PROJECT_SPECS,
 )
+from freeze_transformer import FreezeTransformerTrainModuleConfig
 
 
 MODEL_CONFIG_LOOKUP = {
-    "olmo2_10M": TransformerConfig.olmo2_10M,
-    "olmo2_20M": TransformerConfig.olmo2_20M,
-    "olmo2_50M": TransformerConfig.olmo2_50M,
-    "olmo2_100M": TransformerConfig.olmo2_100M,
-    "olmo2_200M": TransformerConfig.olmo2_200M,
-    "olmo2_400M": TransformerConfig.olmo2_400M,
-    "olmo2_1B": TransformerConfig.olmo2_1B,
+    # "olmo2_10M": TransformerConfig.olmo2_10M,
+    # "olmo2_20M": TransformerConfig.olmo2_20M,
+    # "olmo2_50M": TransformerConfig.olmo2_50M,
+    # "olmo2_100M": TransformerConfig.olmo2_100M,
+    # "olmo2_200M": TransformerConfig.olmo2_200M,
+    # "olmo2_400M": TransformerConfig.olmo2_400M,
+    # "olmo2_1B": TransformerConfig.olmo2_1B,
+    "olmoe_2B_14B": TransformerConfig.olmoe_2B_14B,
 }
 
 TOKENIZER_LOOKUP = {
@@ -71,8 +75,9 @@ TOKENIZER_LOOKUP = {
 }
 
 DATAMIX_LOOKUP = {
-    "OLMoE_mix_1124": DataMix.OLMoE_mix_1124,
+    #"OLMoE_mix_1124": DataMix.OLMoE_mix_1124,
     "OLMoE_mix_0824": DataMix.OLMoE_mix_0824,
+    "OLMoE_mix_0824_math": DataMix.OLMoE_mix_0824_MATH,
     "v3_small_ppl_validation": DataMix.v3_small_ppl_validation,
 }
 
@@ -135,7 +140,7 @@ def build_config(
     run_name: str, 
     tokenizer_name: str = "dolma2", 
     model_name: str = "olmo2_100M_moe_32_16",
-    train_datamix_name: str = "OLMoE_mix_0824",
+    train_datamix_name: str = "OLMoE_mix_0824_math",
     valid_datamix_name: str = "v3_small_ppl_validation",
     data_root: str = USER_PROJECT_SPECS['DATAROOT'],
     save_root: str = USER_PROJECT_SPECS['DEFAULT_SAVE_PATH'],
@@ -170,25 +175,38 @@ def build_config(
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS['WANDB_ENTITY'],
     wandb_project: str = USER_PROJECT_SPECS['WANDB_PROJECT'],
+    #-------freeze settings----- Set to None (or remove the arg) to fall back to the standard train module.
+    freeze_experts: Optional[str] = "first_half",
+    load_path: Optional[str] = None,
+    ep_degree: Optional[int] = None,
+    # Number of HSDP data-parallel replica groups alongside the EP groups.
+    # Should equal world_size // ep_degree. Defaults to 1 if omitted.
+    dp_num_replicas: Optional[int] = None,
     overrides: List[str] = [],
 ) -> ExperimentConfig:
     
     tokenizer_config = TOKENIZER_LOOKUP[tokenizer_name]()
 
-    model_config = MODEL_CONFIG_LOOKUP[model_name](
-        vocab_size=tokenizer_config.padded_vocab_size(),
-        use_moe=False if moe_num_experts_list == [1] else True,
-        num_experts_list=moe_num_experts_list,
-        hidden_multipliers_list=moe_hidden_multipliers_list,
-        router_top_ks_list=moe_router_top_ks_list,
-        moe_generalist_hidden_multiplier=moe_generalist_hidden_multiplier,
-        dropless_moe=(moe_type == "dropless"),
-        bias_gamma=moe_bias_gamma,
-        z_loss_weight=moe_z_loss_weight,
-        lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
-    )
+    # olmoe_2B_14B has its MoE config baked in — don't pass conflicting kwargs
+    if model_name == "olmoe_2B_14B":
+        model_config = MODEL_CONFIG_LOOKUP[model_name](
+            vocab_size=tokenizer_config.padded_vocab_size(),
+        )
+    else:
+        model_config = MODEL_CONFIG_LOOKUP[model_name](
+            vocab_size=tokenizer_config.padded_vocab_size(),
+            use_moe=False if moe_num_experts_list == [1] else True,
+            num_experts_list=moe_num_experts_list,
+            hidden_multipliers_list=moe_hidden_multipliers_list,
+            router_top_ks_list=moe_router_top_ks_list,
+            moe_generalist_hidden_multiplier=moe_generalist_hidden_multiplier,
+            dropless_moe=(moe_type == "dropless"),
+            bias_gamma=moe_bias_gamma,
+            z_loss_weight=moe_z_loss_weight,
+            lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
+        )
 
-    dataset_config = NumpyDatasetConfig.from_data_mix(
+    dataset_config = NumpyFSLDatasetConfig.from_data_mix(
         DATAMIX_LOOKUP[train_datamix_name],
         tokenizer=tokenizer_config,
         mix_base_dir=data_root,
@@ -203,7 +221,36 @@ def build_config(
         num_workers=num_data_workers,
     )
 
-    train_module_config = TransformerTrainModuleConfig(
+
+    # ------------------------------------------------------------------
+    # Data-parallel + expert-parallel config.
+    # EP requires HSDP (FSDP does not support expert sharding), so we
+    # switch dp_config automatically when ep_degree is provided.
+    # ------------------------------------------------------------------
+    if ep_degree is not None:
+        resolved_replicas = dp_num_replicas if dp_num_replicas is not None else 1
+        dp_config = TransformerDataParallelConfig(
+            name=DataParallelType.hsdp,
+            param_dtype=DType.bfloat16,
+            reduce_dtype=DType.float32,
+            wrapping_strategy=TransformerDataParallelWrappingStrategy.fine_grained,
+            num_replicas=resolved_replicas,
+        )
+        ep_config: Optional[TransformerExpertParallelConfig] = TransformerExpertParallelConfig(
+            degree=ep_degree,
+        )
+    else:
+        dp_config = TransformerDataParallelConfig(
+            name=DataParallelType.fsdp,
+            param_dtype=DType.bfloat16,
+            reduce_dtype=DType.float32,
+            wrapping_strategy=TransformerDataParallelWrappingStrategy.full,
+        )
+        ep_config = None
+
+
+    # Shared kwargs for both config flavours.
+    train_module_kwargs = dict(
         rank_microbatch_size=per_gpu_batch_size * sequence_length,
         max_sequence_length=dataset_config.effective_sequence_length,
         optim=AdamWConfig(
@@ -211,30 +258,53 @@ def build_config(
             weight_decay=weight_decay,
             betas=adam_betas,
             group_overrides=[
-                OptimGroupOverride(params=["embeddings.weight"], opts=dict(weight_decay=embedding_weight_decay))
+                OptimGroupOverride(
+                    params=["embeddings.weight"],
+                    opts=dict(weight_decay=embedding_weight_decay),
+                )
             ],
             fused=True,
         ),
-        scheduler=WSD(warmup_steps=warmup_steps, decay=decay_steps, decay_fraction=None) if scheduler == 'wsd' else CosWithWarmup(warmup_steps=warmup_steps),
-        compile_model=True,
-        dp_config=TransformerDataParallelConfig(
-            name=DataParallelType.fsdp,  
-            param_dtype=DType.bfloat16,
-            reduce_dtype=DType.float32,
-            wrapping_strategy=TransformerDataParallelWrappingStrategy.full,  # Added from small-moe.py
+        scheduler=(
+            WSD(warmup_steps=warmup_steps, decay=decay_steps, decay_fraction=None)
+            if scheduler == 'wsd'
+            else CosWithWarmup(warmup_steps=warmup_steps)
         ),
+        compile_model=True,
+        dp_config=dp_config,
+        ep_config=ep_config,
+        # dp_config=TransformerDataParallelConfig(
+        #     name=DataParallelType.fsdp,
+        #     param_dtype=DType.bfloat16,
+        #     reduce_dtype=DType.float32,
+        #     wrapping_strategy=TransformerDataParallelWrappingStrategy.full,
+        # ),
         z_loss_multiplier=z_loss_multiplier,
         max_grad_norm=max_grad_norm,
     )
+ 
+    if freeze_experts is not None:
+        # Use the freeze-aware subclass so that first-half expert grads are zeroed.
+        train_module_config: TransformerTrainModuleConfig = FreezeTransformerTrainModuleConfig(
+            freeze_experts=freeze_experts,
+            **train_module_kwargs,
+        )
+    else:
+        # Standard training — no expert freezing.
+        train_module_config = TransformerTrainModuleConfig(**train_module_kwargs)
+    
+    
+    trainer_config = TrainerConfig(
+        save_folder=f"{save_root}/{run_name}",
+        save_overwrite=True,
+        metrics_collect_interval=metrics_collect_interval,
+        cancel_check_interval=1,
+        max_duration=Duration.tokens(train_tokens),
+        load_path=load_path,
+    )
 
     trainer_config = (
-        TrainerConfig(
-            save_folder=f"{save_root}/{run_name}",
-            save_overwrite=True,
-            metrics_collect_interval=metrics_collect_interval,
-            cancel_check_interval=1,  # Updated from small-moe.py
-            max_duration=Duration.tokens(train_tokens),
-        )
+        trainer_config
         .with_callback("gpu_monitor", GPUMemoryMonitorCallback())
         .with_callback(
             "checkpointer",
@@ -267,9 +337,9 @@ def build_config(
         .with_callback(
             "lm_evaluator",
             LMEvaluatorCallbackConfig(
-                eval_dataset=NumpyDatasetConfig.from_data_mix(
+                eval_dataset=NumpyFSLDatasetConfig.from_data_mix(
                     DATAMIX_LOOKUP[valid_datamix_name],
-                    name=NumpyDatasetType.padded_fsl,
+                    # name=NumpyDatasetType.padded_fsl,
                     mix_base_dir=valid_data_dir,
                     sequence_length=dataset_config.effective_sequence_length,
                     tokenizer=tokenizer_config,
@@ -346,6 +416,12 @@ def main(
             moe_bias_gamma=args.moe_bias_gamma,
             moe_z_loss_weight=args.moe_z_loss_weight,
             moe_lb_loss_weight=args.moe_lb_loss_weight,
+            freeze_experts=args.freeze_experts,   # was missing
+            load_path=args.load_path,             # was missing
+            ep_degree=args.ep_degree,             # was missing
+            dp_num_replicas=args.dp_num_replicas, # was missing
+
+
             overrides=overrides)
         logger.info("Config built successfully")
 
@@ -407,7 +483,60 @@ if __name__ == "__main__":
     parser.add_argument("--moe_bias_gamma", type=float, default=None, help="Gamma value for MoE bias")
     parser.add_argument("--moe_z_loss_weight", type=float, default=0.001, help="Weight for the z-loss in MoE")
     parser.add_argument("--moe_lb_loss_weight", type=float, default=0.01, help="Weight for the LB loss in MoE")
+    # ----- freeze settings -----
+    parser.add_argument(
+        "--freeze_experts",
+        type=str,
+        default="first_half",
+        choices=["first_half", "none"],
+        help=(
+            "Which experts to freeze during continued training. "
+            "'first_half' zeros gradients for the first half of expert/router params. "
+            "'none' disables freezing and uses the standard train module."
+        ),
+    )
+    # ----- end freeze settings -----
+ 
+    # ----- checkpoint settings -----
+    parser.add_argument(
+        "--load_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to an olmo-core checkpoint directory to initialise weights from "
+            "before training begins. For the expanded OLMoE 1B→2x7B model, point "
+            "this at the directory produced by dense_to_expert_moe.py. "
+            "Equivalent to --trainer.load_path in the reference torchrun script."
+        ),
+    )
+ 
+    # ----- expert parallelism settings -----
+    parser.add_argument(
+        "--ep_degree",
+        type=int,
+        default=8,
+        help=(
+            "Degree of expert parallelism. For the 2-expert expanded OLMoE model "
+            "use --ep_degree=2. When set, HSDP is used automatically instead of FSDP. "
+            "Leave unset to disable expert parallelism entirely."
+        ),
+    )
+    # Add the missing dp_num_replicas arg:
+    parser.add_argument(
+        "--dp_num_replicas",
+        type=int,
+        default=1,
+        help="Number of HSDP data-parallel replica groups alongside EP groups.",
+    )
+
+
+
+
     args, overrides = parser.parse_known_args()
+    # Normalise "none" → Python None so build_config falls back to standard module.
+    if args.freeze_experts == "none":
+        args.freeze_experts = None
+
 
     prepare_training_environment()
     try:

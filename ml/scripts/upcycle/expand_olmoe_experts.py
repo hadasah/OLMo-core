@@ -99,27 +99,26 @@ HF_TO_OLMOCORE = {
 
 # ── Model config ─────────────────────────────────────────────────────────────
 
-def build_expanded_model_config(num_experts: int) -> TransformerConfig:
+def build_expanded_model_config(num_experts: int, top_k: int = 8) -> TransformerConfig:
     """
-    Builds the OLMoE-1B-7B config with an expanded expert count.
-    Uses olmoe_1B_7B classmethod with num_experts override.
-    freeze_params patterns for original experts set in train.py separately.
+    Builds an olmo_core model config matching the given expert count.
+    - num_experts=64,  top_k=8  → uses olmoe_1B_7B  (for loading the HF source)
+    - num_experts=128, top_k=16 → uses olmoe_2B_14B (for the expanded model)
     """
     tokenizer = TokenizerConfig.dolma2()
-    return TransformerConfig.olmoe_1B_7B(
-        vocab_size=tokenizer.padded_vocab_size(),
-        # Override the MoEConfig's num_experts via the feed_forward_moe kwarg.
-        # olmoe_1B_7B passes **kwargs through llama_like -> feed_forward_moe,
-        # but since MoEConfig is built inline, we need to pass it explicitly:
-        feed_forward_moe=MoEConfig(
-            name="dropless",           # OLMoE uses dropless
-            num_experts=num_experts,
-            hidden_size=1024,          # 0.5 * d_model (d_model=2048 for 1B-7B)
-            router=dict(top_k=8),      # keep same top_k; adjust if scaling active fraction
-            lb_loss_weight=0.01,
-            z_loss_weight=0.001,
-        ),
-    )
+    if num_experts == 64:
+        return TransformerConfig.olmoe_1B_7B(
+            vocab_size=tokenizer.padded_vocab_size(),
+        )
+    elif num_experts == 128:
+        return TransformerConfig.olmoe_2B_14B(
+            vocab_size=tokenizer.padded_vocab_size(),
+        )
+    else:
+        raise ValueError(
+            f"Unsupported num_experts={num_experts}. "
+            "Add a matching TransformerConfig classmethod for this expert count."
+        )
 
 
 # ── HF loading and conversion ─────────────────────────────────────────────────

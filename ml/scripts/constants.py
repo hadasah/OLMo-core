@@ -182,5 +182,10 @@ HARDWARE_SPECS_DICT = {
         "gpu-a40": {
             "per_gpu_batch_size": 8,
         }, 
+    },
+    "olmoe_2B_14B":{
+        "gpu-h200":{
+             "per_gpu_batch_size": 2,
+        }
     }
 }
