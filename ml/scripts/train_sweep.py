@@ -142,8 +142,7 @@ def main(
                     'train_module': {
                         'optim': {
                             # 'lr': [4e-3, 1e-2],
-                            # 'lr': [4e-4],
-                            'lr': [1e-2],  # LR sanity check for 10M runs (Margaret's suggestion)
+                            'lr': [4e-4],
                         },
                     },
                     "trainer": {
@@ -208,26 +207,41 @@ def main(
                     # "e32,64x0.25,0.125c2,2_0.25gen": {"moe_num_experts_list": ["32,64"], "moe_hidden_multipliers_list": ["0.25,0.125"], "moe_router_top_ks_list": ["2,2"], "moe_generalist_hidden_multiplier": ["0.25"]},
                     ## === Data repetition experiments (A+C) ===
                     ## Dense baselines at different repetition levels
-                    "dense_rep1x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["1.0"], "num_repetitions": ["1"]},
+                    # "dense_rep1x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["1.0"], "num_repetitions": ["1"]},
                     # "dense_rep2x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.5"], "num_repetitions": ["2"]},
                     # "dense_rep4x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.25"], "num_repetitions": ["4"]},
-                    "dense_rep8x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.125"], "num_repetitions": ["8"]},
+                    # "dense_rep8x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.125"], "num_repetitions": ["8"]},
                     # "dense_rep16x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.0625"], "num_repetitions": ["16"]},
-                    "dense_rep32x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.03125"], "num_repetitions": ["32"]},
+                    # "dense_rep32x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.03125"], "num_repetitions": ["32"]},
+                    "dense_rep64x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.015625"], "num_repetitions": ["64"]},
+                    "dense_rep128x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.0078125"], "num_repetitions": ["128"]},
+                    "dense_rep256x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.00390625"], "num_repetitions": ["256"]},
+                    "dense_rep512x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.001953125"], "num_repetitions": ["512"]},
+                    "dense_rep1024x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.0009765625"], "num_repetitions": ["1024"]},
                     ## MoE 32 experts at different repetition levels
-                    "moe32_rep1x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["1.0"], "num_repetitions": ["1"]},
+                    # "moe32_rep1x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["1.0"], "num_repetitions": ["1"]},
                     # "moe32_rep2x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.5"], "num_repetitions": ["2"]},
                     # "moe32_rep4x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.25"], "num_repetitions": ["4"]},
-                    "moe32_rep8x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.125"], "num_repetitions": ["8"]},
+                    # "moe32_rep8x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.125"], "num_repetitions": ["8"]},
                     # "moe32_rep16x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0625"], "num_repetitions": ["16"]},
-                    "moe32_rep32x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.03125"], "num_repetitions": ["32"]},
+                    # "moe32_rep32x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.03125"], "num_repetitions": ["32"]},
+                    "moe32_rep64x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.015625"], "num_repetitions": ["64"]},
+                    "moe32_rep128x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0078125"], "num_repetitions": ["128"]},
+                    "moe32_rep256x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.00390625"], "num_repetitions": ["256"]},
+                    "moe32_rep512x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.001953125"], "num_repetitions": ["512"]},
+                    "moe32_rep1024x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0009765625"], "num_repetitions": ["1024"]},
                     ## MoE 64 experts at different repetition levels
-                    "moe64_rep1x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["1.0"], "num_repetitions": ["1"]},
+                    # "moe64_rep1x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["1.0"], "num_repetitions": ["1"]},
                     # "moe64_rep2x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.5"], "num_repetitions": ["2"]},
                     # "moe64_rep4x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.25"], "num_repetitions": ["4"]},
-                    "moe64_rep8x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.125"], "num_repetitions": ["8"]},
+                    # "moe64_rep8x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.125"], "num_repetitions": ["8"]},
                     # "moe64_rep16x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0625"], "num_repetitions": ["16"]},
-                    "moe64_rep32x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.03125"], "num_repetitions": ["32"]},
+                    # "moe64_rep32x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.03125"], "num_repetitions": ["32"]},
+                    "moe64_rep64x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.015625"], "num_repetitions": ["64"]},
+                    "moe64_rep128x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0078125"], "num_repetitions": ["128"]},
+                    "moe64_rep256x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.00390625"], "num_repetitions": ["256"]},
+                    "moe64_rep512x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.001953125"], "num_repetitions": ["512"]},
+                    "moe64_rep1024x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0009765625"], "num_repetitions": ["1024"]},
                 },
             }
 
