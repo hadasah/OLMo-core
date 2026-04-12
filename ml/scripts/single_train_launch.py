@@ -240,13 +240,12 @@ def build_config(
         ]
 
         requested_unique_tokens = int(train_tokens * unique_data_fraction)
-        # Cap alignment granularity so that batch-boundary rounding doesn't
-        # inflate the token budget beyond what's actually available.
-        src_mix_batch_size = min(global_batch_size * sequence_length,
-                                requested_unique_tokens)
-        # Must still be a multiple of sequence_length
+        # Set batch size for SourceMixtureDatasetConfig to the requested
+        # unique token count (rounded up to sequence_length). This forces
+        # training_steps=1 inside the source mixture, avoiding ceil-rounding
+        # that can inflate the required tokens beyond what's available.
         src_mix_batch_size = max(sequence_length,
-                                (src_mix_batch_size // sequence_length) * sequence_length)
+                                ((requested_unique_tokens + sequence_length - 1) // sequence_length) * sequence_length)
 
         src_mix_config = SourceMixtureDatasetConfig(
             source_list=SourceMixtureList(sources=source_configs),
