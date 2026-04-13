@@ -258,7 +258,8 @@ def build_config(
             src_mix_config,
             tokenizer=tokenizer_config,
             sequence_length=sequence_length,
-            max_target_sequence_length=max(4096, sequence_length),
+            # max_target_sequence_length=max(4096, sequence_length),  # Breaks at 128x+ rep: per-file tokens < 4096 → 0 instances
+            max_target_sequence_length=sequence_length,
             work_dir=data_work_dir,
         )
 
