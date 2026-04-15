@@ -254,12 +254,16 @@ def build_config(
             seed=DATA_SEED,
         )
 
+        # For extreme repetition (128x+), per-file token allocation can drop below 4096,
+        # causing 0 instances with max_target_sequence_length=4096. Use sequence_length
+        # in that case. For moderate repetition, keep 4096 for checkpoint compatibility.
+        max_tgt_seq_len = sequence_length if requested_unique_tokens < 4096 * 1000 else max(4096, sequence_length)
+
         dataset_config = NumpyFSLDatasetConfig.from_src_mix(
             src_mix_config,
             tokenizer=tokenizer_config,
             sequence_length=sequence_length,
-            # max_target_sequence_length=max(4096, sequence_length),  # Breaks at 128x+ rep: per-file tokens < 4096 → 0 instances
-            max_target_sequence_length=sequence_length,
+            max_target_sequence_length=max_tgt_seq_len,
             work_dir=data_work_dir,
         )
 
