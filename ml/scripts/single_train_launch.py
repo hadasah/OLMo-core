@@ -240,12 +240,14 @@ def build_config(
         ]
 
         requested_unique_tokens = int(train_tokens * unique_data_fraction)
-        # Set batch size for SourceMixtureDatasetConfig to the requested
-        # unique token count (rounded up to sequence_length). This forces
-        # training_steps=1 inside the source mixture, avoiding ceil-rounding
-        # that can inflate the required tokens beyond what's available.
-        src_mix_batch_size = max(sequence_length,
-                                ((requested_unique_tokens + sequence_length - 1) // sequence_length) * sequence_length)
+        # For extreme repetition (128x+), use requested tokens as batch size
+        # to avoid ceil-rounding inflation. For moderate repetition, keep
+        # original batch size for checkpoint compatibility.
+        if requested_unique_tokens < 4096 * 1000:
+            src_mix_batch_size = max(sequence_length,
+                                    ((requested_unique_tokens + sequence_length - 1) // sequence_length) * sequence_length)
+        else:
+            src_mix_batch_size = global_batch_size * sequence_length
 
         src_mix_config = SourceMixtureDatasetConfig(
             source_list=SourceMixtureList(sources=source_configs),
