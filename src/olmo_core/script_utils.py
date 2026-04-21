@@ -8,7 +8,13 @@ import rich
 
 from olmo_core.aliases import PathOrStr
 from olmo_core.config import Config
-from olmo_core.data import NumpyDataLoaderConfig, NumpyDatasetConfig
+from olmo_core.data import (
+    NumpyDataLoaderConfig,
+    NumpyDatasetConfig,
+    NumpyFSLDatasetConfig,
+    ReplayCacheManifest,
+    apply_replay_cache,
+)
 from olmo_core.distributed.checkpoint import get_checkpoint_metadata, load_state_dict
 from olmo_core.io import is_url, join_path, normalize_path
 from olmo_core.nn.transformer import TransformerConfig
@@ -78,6 +84,13 @@ def get_cli_parser() -> argparse.ArgumentParser:
         If not set this will be inferred from the save folder.""",
     )
     parser.add_argument(
+        "--replay-root",
+        type=str,
+        help="""Optional local replay-cache directory for training data. When set, the training dataset
+        is loaded from local replay shards and training-data shuffling is disabled. Eval data continues
+        to load from '--data-root'.""",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="""Print the config and exit.""",
@@ -108,6 +121,17 @@ def main(
 
     config = config_builder(opts, overrides)
 
+    replay_manifest: Optional[ReplayCacheManifest] = None
+    if opts.replay_root is not None:
+        if not isinstance(config.dataset, NumpyFSLDatasetConfig):
+            raise RuntimeError(
+                f"'--replay-root' only supports fixed-sequence datasets, got {type(config.dataset)}"
+            )
+        replay_manifest, replay_dataset_config = apply_replay_cache(
+            config.dataset, config.data_loader, opts.replay_root
+        )
+        config.dataset = replay_dataset_config
+
     if opts.dry_run:
         rich.print(config)
         return
@@ -121,6 +145,11 @@ def main(
     model = config.model.build(init_device="meta")
     train_module = config.train_module.build(model)
     dataset = config.dataset.build()
+    if replay_manifest is not None and dataset.fingerprint != replay_manifest.replay_dataset_fingerprint:
+        raise RuntimeError(
+            "Replay cache fingerprint does not match the loaded local dataset: "
+            f"{replay_manifest.replay_dataset_fingerprint!r} != {dataset.fingerprint!r}"
+        )
     data_loader = config.data_loader.build(dataset, dp_process_group=train_module.dp_process_group)
     trainer = config.trainer.build(train_module, data_loader)
 

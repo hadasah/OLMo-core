@@ -47,6 +47,14 @@ from .numpy_dataset import (
     VSLGrowthCurriculum,
     VSLNaturalCurriculum,
 )
+from .replay_cache import (
+    NumpyReplayFSLDataset,
+    NumpyReplayFSLDatasetConfig,
+    ReplayCacheManifest,
+    apply_replay_cache,
+    build_replay_cache,
+    load_replay_manifest,
+)
 from .tokenizer import TokenizerConfig, TokenizerName
 from .types import LongDocStrategy, NumpyDatasetDType
 
@@ -75,6 +83,12 @@ __all__ = [
     "NumpyDatasetDType",
     "TokenizerConfig",
     "TokenizerName",
+    "ReplayCacheManifest",
+    "NumpyReplayFSLDataset",
+    "NumpyReplayFSLDatasetConfig",
+    "build_replay_cache",
+    "load_replay_manifest",
+    "apply_replay_cache",
     "DataMixBase",
     "DataMix",
     "DataCollator",

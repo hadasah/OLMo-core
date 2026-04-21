@@ -1116,6 +1116,7 @@ class NumpyDataLoaderConfig(DataLoaderConfig[NumpyDataLoaderBase]):
     num_workers: int = 0
     prefetch_factor: Optional[int] = None
     target_device_type: Optional[str] = None
+    shuffle: bool = True
     ignore_fingerprint_mismatch: bool = False
 
     def build(
@@ -1161,6 +1162,7 @@ class NumpyDataLoaderConfig(DataLoaderConfig[NumpyDataLoaderBase]):
             num_workers=self.num_workers,
             prefetch_factor=self.prefetch_factor,
             target_device_type=self.target_device_type or get_default_device().type,
+            shuffle=self.shuffle,
             ignore_fingerprint_mismatch=self.ignore_fingerprint_mismatch,
         )
         return data_loader
