@@ -2,6 +2,7 @@ from pathlib import Path
 import time
 
 import numpy as np
+import pytest
 
 from olmo_core.data import NumpyDataLoaderConfig, NumpyFSLDatasetConfig, TokenizerConfig
 from olmo_core.data import replay_cache as replay_cache_module
@@ -306,16 +307,19 @@ def test_build_replay_cache_parallel_reads_handle_out_of_order_completion(
 def test_replay_cache_cli_build_passes_parallel_read_options(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    class _Manifest:
-        total_tokens_written = 123
-        shard_paths = ["shards/part-00000.npy"]
-
     def fake_prepare_cli_environment() -> None:
         return None
 
     def fake_build_replay_cache(dataset_config, **kwargs):
         captured["dataset_config"] = dataset_config
         captured["kwargs"] = kwargs
+
+        class _Manifest:
+            total_tokens_written = 123
+            shard_paths = ["shards/part-00000.npy"]
+            complete = True
+            source_dataset_fingerprint = dataset_config.build().fingerprint
+
         return _Manifest()
 
     monkeypatch.setattr(
@@ -343,3 +347,94 @@ def test_replay_cache_cli_build_passes_parallel_read_options(monkeypatch) -> Non
     assert isinstance(dataset_config, NumpyFSLDatasetConfig)
     assert kwargs["read_workers"] == 7
     assert kwargs["lookahead_instances"] == 123
+
+
+def test_replay_cache_cli_build_propagates_build_replay_cache_errors(monkeypatch) -> None:
+    def fake_prepare_cli_environment() -> None:
+        return None
+
+    def fake_build_replay_cache(dataset_config, **kwargs):
+        raise RuntimeError("missing manifest")
+
+    monkeypatch.setattr(replay_cache_cli, "prepare_cli_environment", fake_prepare_cli_environment)
+    monkeypatch.setattr(replay_cache_cli, "build_replay_cache", fake_build_replay_cache)
+
+    with pytest.raises(RuntimeError, match="missing manifest"):
+        replay_cache_cli.build(
+            output_root="data/replay",
+            data_root="https://olmo-data.org",
+            work_dir=None,
+            source_mix=DataMix.OLMoE_mix_0824,
+            source_sequence_length=4096,
+            data_seed=34521,
+            epoch=1,
+            max_tokens=100,
+            shard_size_tokens=50,
+            read_workers=7,
+            lookahead_instances=123,
+        )
+
+
+def test_replay_cache_cli_build_rejects_manifest_source_fingerprint_mismatch(monkeypatch) -> None:
+    def fake_prepare_cli_environment() -> None:
+        return None
+
+    def fake_build_replay_cache(dataset_config, **kwargs):
+        class _Manifest:
+            total_tokens_written = 1
+            shard_paths = ["shards/part-00000.npy"]
+            complete = True
+            source_dataset_fingerprint = "definitely-not-the-source-fingerprint"
+
+        return _Manifest()
+
+    monkeypatch.setattr(replay_cache_cli, "prepare_cli_environment", fake_prepare_cli_environment)
+    monkeypatch.setattr(replay_cache_cli, "build_replay_cache", fake_build_replay_cache)
+
+    with pytest.raises(RuntimeError, match="source dataset fingerprint"):
+        replay_cache_cli.build(
+            output_root="data/replay",
+            data_root="https://olmo-data.org",
+            work_dir=None,
+            source_mix=DataMix.OLMoE_mix_0824,
+            source_sequence_length=4096,
+            data_seed=34521,
+            epoch=1,
+            max_tokens=100,
+            shard_size_tokens=50,
+            read_workers=7,
+            lookahead_instances=123,
+        )
+
+
+def test_replay_cache_cli_build_rejects_incomplete_manifest(monkeypatch) -> None:
+    def fake_prepare_cli_environment() -> None:
+        return None
+
+    def fake_build_replay_cache(dataset_config, **kwargs):
+
+        class _Manifest:
+            total_tokens_written = 0
+            shard_paths = []
+            complete = False
+            source_dataset_fingerprint = dataset_config.build().fingerprint
+
+        return _Manifest()
+
+    monkeypatch.setattr(replay_cache_cli, "prepare_cli_environment", fake_prepare_cli_environment)
+    monkeypatch.setattr(replay_cache_cli, "build_replay_cache", fake_build_replay_cache)
+
+    with pytest.raises(RuntimeError, match="complete manifest"):
+        replay_cache_cli.build(
+            output_root="data/replay",
+            data_root="https://olmo-data.org",
+            work_dir=None,
+            source_mix=DataMix.OLMoE_mix_0824,
+            source_sequence_length=4096,
+            data_seed=34521,
+            epoch=1,
+            max_tokens=100,
+            shard_size_tokens=50,
+            read_workers=7,
+            lookahead_instances=123,
+        )

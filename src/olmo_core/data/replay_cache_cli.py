@@ -69,6 +69,8 @@ def build(
 ) -> None:
     prepare_cli_environment()
 
+    resolved_work_dir = work_dir or f"{output_root.rstrip('/')}/work"
+
     tokenizer = TokenizerConfig.dolma2()
     dataset_config = NumpyFSLDatasetConfig.from_data_mix(
         source_mix,
@@ -76,7 +78,7 @@ def build(
         mix_base_dir=data_root,
         sequence_length=source_sequence_length,
         max_target_sequence_length=max(8192, source_sequence_length),
-        work_dir=work_dir or f"{output_root.rstrip('/')}/work",
+        work_dir=resolved_work_dir,
     )
 
     manifest = build_replay_cache(
@@ -86,10 +88,20 @@ def build(
         output_root=output_root,
         epoch=epoch,
         shard_size_tokens=shard_size_tokens,
-        work_dir=work_dir or f"{output_root.rstrip('/')}/work",
+        work_dir=resolved_work_dir,
         read_workers=read_workers,
         lookahead_instances=lookahead_instances,
     )
+    source_dataset = dataset_config.build()
+    if not manifest.complete:
+        raise RuntimeError(
+            f"Replay cache build did not produce a complete manifest under '{output_root}'"
+        )
+    if manifest.source_dataset_fingerprint != source_dataset.fingerprint:
+        raise RuntimeError(
+            "Replay cache manifest source dataset fingerprint does not match the configured source stream: "
+            f"{manifest.source_dataset_fingerprint!r} != {source_dataset.fingerprint!r}"
+        )
     log.info(
         "Replay cache ready at '%s' with %s tokens across %d shards",
         output_root,

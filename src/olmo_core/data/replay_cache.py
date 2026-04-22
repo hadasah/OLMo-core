@@ -6,7 +6,7 @@ import logging
 import math
 import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -88,7 +88,13 @@ def apply_replay_cache(
     dataset_config: NumpyFSLDatasetConfig,
     data_loader_config: NumpyDataLoaderConfig,
     replay_root: PathOrStr,
-) -> tuple[ReplayCacheManifest, "NumpyReplayFSLDatasetConfig"]:
+) -> tuple[ReplayCacheManifest, "NumpyReplayFSLDatasetConfig", NumpyDataLoaderConfig]:
+    """
+    Load replay manifest and configs for training on a materialized replay cache.
+
+    Returns a copy of ``data_loader_config`` with ``shuffle=False`` so iteration matches
+    the deterministic replay order; the caller's ``data_loader_config`` is not modified.
+    """
     manifest = load_replay_manifest(replay_root)
     if not manifest.complete:
         raise RuntimeError(
@@ -122,7 +128,7 @@ def apply_replay_cache(
             f"{manifest.source_dataset_fingerprint!r} != {source_dataset.fingerprint!r}"
         )
 
-    data_loader_config.shuffle = False
+    replay_data_loader_config = replace(data_loader_config, shuffle=False)
     replay_dataset_config = NumpyReplayFSLDatasetConfig(
         paths=manifest.resolved_shard_paths(replay_root),
         tokenizer=dataset_config.tokenizer,
@@ -132,7 +138,7 @@ def apply_replay_cache(
         instance_filter_config=dataset_config.instance_filter_config,
         work_dir=dataset_config.work_dir,
     )
-    return manifest, replay_dataset_config
+    return manifest, replay_dataset_config, replay_data_loader_config
 
 
 def build_replay_cache(
@@ -642,11 +648,13 @@ class _ReplayShardWriter:
                 f"expected {self.target_tokens:,d} tokens, wrote {self.position:,d}"
             )
         self._mmap.flush()
+        self._mmap._mmap.close()
         del self._mmap
         self.tmp_path.replace(self.path)
 
     def abort(self) -> None:
         try:
+            self._mmap._mmap.close()
             del self._mmap
         finally:
             self.tmp_path.unlink(missing_ok=True)
@@ -681,6 +689,7 @@ class NumpyReplayFSLDataset(NumpyFSLDatasetBase):
             instance_filter_config=instance_filter_config,
         )
         self._source_offsets: Optional[tuple[tuple[int, int], ...]] = None
+        self._source_ends: Optional[np.ndarray] = None
         self._num_instances: Optional[int] = None
 
     @property
@@ -700,6 +709,9 @@ class NumpyReplayFSLDataset(NumpyFSLDatasetBase):
                 offsets.append((start, end))
                 start = end
             self._source_offsets = tuple(offsets)
+            self._source_ends = np.array(
+                [end for _, end in self._source_offsets], dtype=np.int64
+            )
         return self._source_offsets
 
     def prepare(self):
@@ -721,12 +733,16 @@ class NumpyReplayFSLDataset(NumpyFSLDatasetBase):
 
         start_token = pos_index * self.sequence_length
         end_token = start_token + self.sequence_length
+        _ = self.source_offsets
+        source_ends = self._source_ends
+        if source_ends is None:
+            raise RuntimeError("Replay dataset source end offsets are uninitialized")
+        first_source = int(np.searchsorted(source_ends, start_token, side="right"))
         chunks = []
         first_source_index: Optional[int] = None
         last_source_index: Optional[int] = None
-        for source_index, (source_start, source_end) in enumerate(self.source_offsets):
-            if source_end <= start_token:
-                continue
+        for source_index in range(first_source, len(self.source_offsets)):
+            source_start, source_end = self.source_offsets[source_index]
             if source_start >= end_token:
                 break
             local_start = max(start_token, source_start) - source_start

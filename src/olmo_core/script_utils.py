@@ -139,7 +139,9 @@ def main(
             raise RuntimeError(
                 f"'--replay-root' only supports fixed-sequence datasets, got {type(config.dataset)}"
             )
-        replay_manifest, replay_dataset_config = apply_replay_cache(
+        # apply_replay_cache returns a data loader config with shuffle=False; we assign it to config.data_loader
+        # so training follows deterministic replay order.
+        replay_manifest, replay_dataset_config, config.data_loader = apply_replay_cache(
             config.dataset, config.data_loader, opts.replay_root
         )
         config.dataset = replay_dataset_config
