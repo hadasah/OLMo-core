@@ -607,6 +607,27 @@ def retriable(
 ######################
 
 
+_RETRIABLE_HTTP_STATUS_CODES = {
+    408,
+    429,
+    500,
+    502,
+    503,
+    504,
+    520,
+    522,
+    524,
+}
+
+
+def _is_retriable_http_error(exc: Exception) -> bool:
+    return (
+        isinstance(exc, requests.exceptions.HTTPError)
+        and exc.response is not None
+        and exc.response.status_code in _RETRIABLE_HTTP_STATUS_CODES
+    )
+
+
 @cache
 def _get_http_session() -> requests.Session:
     """
@@ -635,14 +656,7 @@ def _http_file_size(url: str) -> int:
     return int(content_length)
 
 
-@retriable(
-    max_attempts=10,
-    retry_condition=lambda exc: (
-        isinstance(exc, requests.exceptions.HTTPError)
-        and exc.response is not None
-        and exc.response.status_code == 502
-    ),
-)
+@retriable(max_attempts=10, retry_condition=_is_retriable_http_error)
 def _http_get_bytes_range(url: str, bytes_start: int, num_bytes: int) -> bytes:
     session = _get_http_session()
     response = session.get(
