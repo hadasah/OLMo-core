@@ -56,6 +56,16 @@ def build(
         "--shard-size-tokens",
         help="Target number of tokens per replay shard.",
     ),
+    read_workers: int = typer.Option(
+        32,
+        "--read-workers",
+        help="Number of parallel workers for remote sparse reads.",
+    ),
+    lookahead_instances: int = typer.Option(
+        10_000,
+        "--lookahead-instances",
+        help="Replay instances to plan ahead when regrouping reads by source shard.",
+    ),
 ) -> None:
     prepare_cli_environment()
 
@@ -77,6 +87,8 @@ def build(
         epoch=epoch,
         shard_size_tokens=shard_size_tokens,
         work_dir=work_dir or f"{output_root.rstrip('/')}/work",
+        read_workers=read_workers,
+        lookahead_instances=lookahead_instances,
     )
     log.info(
         "Replay cache ready at '%s' with %s tokens across %d shards",

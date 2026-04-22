@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import math
@@ -15,16 +16,17 @@ import torch
 
 from olmo_core.aliases import PathOrStr
 from olmo_core.exceptions import OLMoConfigurationError
-from olmo_core.io import normalize_path
+from olmo_core.io import is_url, normalize_path
 
 from .data_loader import NumpyDataLoaderConfig
 from .numpy_dataset import (
     NumpyDatasetBase,
     NumpyDatasetConfig,
+    NumpyFSLDataset,
     NumpyFSLDatasetBase,
     NumpyFSLDatasetConfig,
 )
-from .utils import get_document_lengths, load_array_slice_into_tensor
+from .utils import get_document_lengths, load_array_slice, load_array_slice_into_tensor
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +144,8 @@ def build_replay_cache(
     epoch: int = 1,
     shard_size_tokens: int = 500_000_000,
     work_dir: Optional[PathOrStr] = None,
+    read_workers: int = 32,
+    lookahead_instances: int = 10_000,
 ) -> ReplayCacheManifest:
     if max_tokens <= 0:
         raise ValueError("'max_tokens' must be positive")
@@ -149,6 +153,10 @@ def build_replay_cache(
         raise ValueError("'epoch' must be positive")
     if shard_size_tokens <= 0:
         raise ValueError("'shard_size_tokens' must be positive")
+    if read_workers <= 0:
+        raise ValueError("'read_workers' must be positive")
+    if lookahead_instances <= 0:
+        raise ValueError("'lookahead_instances' must be positive")
     if dataset_config.tokenizer.identifier is None:
         raise ValueError("Replay cache generation requires a tokenizer identifier")
     if dataset_config.sequence_length <= 0:
@@ -211,6 +219,78 @@ def build_replay_cache(
     instance_index = token_offset // dataset_config.sequence_length
     intra_instance_offset = token_offset % dataset_config.sequence_length
 
+    if _should_use_parallel_sparse_reads(
+        source_dataset, read_workers=read_workers, lookahead_instances=lookahead_instances
+    ):
+        log.info(
+            "Using parallel sparse replay reads with %d workers and %d-instance lookahead",
+            read_workers,
+            lookahead_instances,
+        )
+        _build_replay_cache_parallel(
+            source_dataset,
+            global_indices=global_indices,
+            output_dir=output_dir,
+            manifest=manifest,
+            max_tokens=max_tokens,
+            shard_size_tokens=shard_size_tokens,
+            dtype=npdtype,
+            item_size=item_size,
+            token_offset=token_offset,
+            instance_index=instance_index,
+            intra_instance_offset=intra_instance_offset,
+            read_workers=read_workers,
+            lookahead_instances=lookahead_instances,
+        )
+    else:
+        _build_replay_cache_serial(
+            source_dataset,
+            global_indices=global_indices,
+            output_dir=output_dir,
+            manifest=manifest,
+            max_tokens=max_tokens,
+            shard_size_tokens=shard_size_tokens,
+            dtype=npdtype,
+            token_offset=token_offset,
+            instance_index=instance_index,
+            intra_instance_offset=intra_instance_offset,
+        )
+
+    replay_dataset_config = NumpyReplayFSLDatasetConfig(
+        paths=manifest.resolved_shard_paths(output_dir),
+        tokenizer=dataset_config.tokenizer,
+        sequence_length=dataset_config.sequence_length,
+    )
+    replay_dataset = replay_dataset_config.build()
+    manifest.replay_dataset_fingerprint = replay_dataset.fingerprint
+    manifest.complete = True
+    save_replay_manifest(output_dir, manifest)
+    return manifest
+
+
+def _should_use_parallel_sparse_reads(
+    source_dataset: NumpyDatasetBase, *, read_workers: int, lookahead_instances: int
+) -> bool:
+    if read_workers <= 1 or lookahead_instances <= 1:
+        return False
+    if type(source_dataset) is not NumpyFSLDataset:
+        return False
+    return all(is_url(path) for path in source_dataset.paths)
+
+
+def _build_replay_cache_serial(
+    source_dataset: NumpyFSLDatasetBase,
+    *,
+    global_indices: np.ndarray,
+    output_dir: Path,
+    manifest: ReplayCacheManifest,
+    max_tokens: int,
+    shard_size_tokens: int,
+    dtype,
+    token_offset: int,
+    instance_index: int,
+    intra_instance_offset: int,
+) -> None:
     while token_offset < max_tokens:
         remaining_tokens = max_tokens - token_offset
         target_shard_tokens = min(shard_size_tokens, remaining_tokens)
@@ -218,13 +298,13 @@ def build_replay_cache(
         shard_rel_path = str(Path("shards") / f"part-{shard_index:05d}.npy")
         shard_abs_path = output_dir / shard_rel_path
 
-        writer = _ReplayShardWriter(shard_abs_path, target_tokens=target_shard_tokens, dtype=npdtype)
+        writer = _ReplayShardWriter(shard_abs_path, target_tokens=target_shard_tokens, dtype=dtype)
         shard_tokens_written = 0
         try:
             while not writer.is_full:
                 source_idx = int(global_indices[instance_index])
                 instance_tokens = source_dataset[source_idx]["input_ids"].numpy().astype(
-                    npdtype, copy=False
+                    dtype, copy=False
                 )
                 if intra_instance_offset > 0:
                     instance_tokens = instance_tokens[intra_instance_offset:]
@@ -256,16 +336,177 @@ def build_replay_cache(
             f"{max_tokens:,d}",
         )
 
-    replay_dataset_config = NumpyReplayFSLDatasetConfig(
-        paths=manifest.resolved_shard_paths(output_dir),
-        tokenizer=dataset_config.tokenizer,
-        sequence_length=dataset_config.sequence_length,
+
+def _build_replay_cache_parallel(
+    source_dataset: NumpyFSLDataset,
+    *,
+    global_indices: np.ndarray,
+    output_dir: Path,
+    manifest: ReplayCacheManifest,
+    max_tokens: int,
+    shard_size_tokens: int,
+    dtype,
+    item_size: int,
+    token_offset: int,
+    instance_index: int,
+    intra_instance_offset: int,
+    read_workers: int,
+    lookahead_instances: int,
+) -> None:
+    total_instances = len(global_indices)
+    source_path_indices, local_instance_indices = _build_replay_source_plan(
+        source_dataset, global_indices
     )
-    replay_dataset = replay_dataset_config.build()
-    manifest.replay_dataset_fingerprint = replay_dataset.fingerprint
-    manifest.complete = True
-    save_replay_manifest(output_dir, manifest)
-    return manifest
+    next_output_position = instance_index
+    next_submission_position = instance_index
+    pending_results: dict[int, np.ndarray] = {}
+
+    with ThreadPoolExecutor(max_workers=read_workers) as executor:
+        while token_offset < max_tokens:
+            remaining_tokens = max_tokens - token_offset
+            target_shard_tokens = min(shard_size_tokens, remaining_tokens)
+            shard_index = len(manifest.shard_paths)
+            shard_rel_path = str(Path("shards") / f"part-{shard_index:05d}.npy")
+            shard_abs_path = output_dir / shard_rel_path
+
+            writer = _ReplayShardWriter(shard_abs_path, target_tokens=target_shard_tokens, dtype=dtype)
+            shard_tokens_written = 0
+            try:
+                while not writer.is_full:
+                    (
+                        token_offset,
+                        shard_tokens_written,
+                        next_output_position,
+                        intra_instance_offset,
+                    ) = _drain_pending_replay_results(
+                        writer,
+                        pending_results,
+                        token_offset=token_offset,
+                        shard_tokens_written=shard_tokens_written,
+                        next_output_position=next_output_position,
+                        intra_instance_offset=intra_instance_offset,
+                    )
+                    if writer.is_full:
+                        break
+
+                    if next_submission_position >= total_instances:
+                        raise RuntimeError(
+                            "Replay planner ran out of source instances before filling the cache"
+                        )
+
+                    window_end = min(total_instances, next_submission_position + lookahead_instances)
+                    window_positions = np.arange(next_submission_position, window_end, dtype=np.int64)
+                    submit_order = np.lexsort(
+                        (
+                            local_instance_indices[window_positions],
+                            source_path_indices[window_positions],
+                        )
+                    )
+
+                    futures = {
+                        executor.submit(
+                            _fetch_replay_source_instance,
+                            source_dataset.paths[int(source_path_indices[pos])],
+                            int(local_instance_indices[pos]),
+                            sequence_length=source_dataset.sequence_length,
+                            dtype=dtype,
+                        ): int(pos)
+                        for pos in window_positions[submit_order]
+                    }
+                    try:
+                        for future in as_completed(futures):
+                            output_position = futures[future]
+                            pending_results[output_position] = future.result()
+                            (
+                                token_offset,
+                                shard_tokens_written,
+                                next_output_position,
+                                intra_instance_offset,
+                            ) = _drain_pending_replay_results(
+                                writer,
+                                pending_results,
+                                token_offset=token_offset,
+                                shard_tokens_written=shard_tokens_written,
+                                next_output_position=next_output_position,
+                                intra_instance_offset=intra_instance_offset,
+                            )
+                    except BaseException:
+                        for future in futures:
+                            future.cancel()
+                        raise
+
+                    next_submission_position = window_end
+
+                writer.finalize()
+            except BaseException:
+                writer.abort()
+                raise
+
+            manifest.shard_paths.append(shard_rel_path)
+            manifest.shard_token_counts.append(shard_tokens_written)
+            manifest.total_tokens_written = token_offset
+            save_replay_manifest(output_dir, manifest)
+            log.info(
+                "Wrote replay shard %s with %s tokens (%s / %s total)",
+                shard_rel_path,
+                f"{shard_tokens_written:,d}",
+                f"{manifest.total_tokens_written:,d}",
+                f"{max_tokens:,d}",
+            )
+
+
+def _build_replay_source_plan(
+    source_dataset: NumpyFSLDataset, global_indices: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    offsets = np.asarray(source_dataset.offsets, dtype=np.int64)
+    global_instance_indices = global_indices.astype(np.int64, copy=False)
+    offset_starts = offsets[:, 0]
+    offset_ends = offsets[:, 1]
+    source_path_indices = np.searchsorted(offset_ends, global_instance_indices, side="right")
+
+    if np.any(source_path_indices >= len(source_dataset.paths)):
+        raise RuntimeError("Replay planner produced an invalid source path index")
+
+    local_instance_indices = global_instance_indices - offset_starts[source_path_indices]
+    return source_path_indices, local_instance_indices
+
+
+def _fetch_replay_source_instance(
+    path: PathOrStr, local_instance_index: int, *, sequence_length: int, dtype
+) -> np.ndarray:
+    start_idx = local_instance_index * sequence_length
+    return load_array_slice(path, start_idx, start_idx + sequence_length, dtype)
+
+
+def _drain_pending_replay_results(
+    writer: _ReplayShardWriter,
+    pending_results: dict[int, np.ndarray],
+    *,
+    token_offset: int,
+    shard_tokens_written: int,
+    next_output_position: int,
+    intra_instance_offset: int,
+) -> tuple[int, int, int, int]:
+    while not writer.is_full and next_output_position in pending_results:
+        instance_tokens = pending_results[next_output_position]
+        tokens_to_write = (
+            instance_tokens[intra_instance_offset:]
+            if intra_instance_offset > 0
+            else instance_tokens
+        )
+        consumed = writer.write(tokens_to_write)
+        shard_tokens_written += consumed
+        token_offset += consumed
+
+        if consumed < len(tokens_to_write):
+            intra_instance_offset += consumed
+            break
+
+        intra_instance_offset = 0
+        del pending_results[next_output_position]
+        next_output_position += 1
+
+    return token_offset, shard_tokens_written, next_output_position, intra_instance_offset
 
 
 def _cleanup_global_indices_file(data_loader) -> None:
