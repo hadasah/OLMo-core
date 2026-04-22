@@ -207,6 +207,19 @@ def build_config(
     )
 
     if unique_data_fraction < 1.0:
+        # Use the actual training token budget (from overrides) instead of the
+        # default train_tokens, which is only 200M and wrong for 80M/200M models.
+        actual_train_tokens = train_tokens
+        for ov in overrides:
+            if ov.startswith("--trainer.max_duration.value="):
+                actual_train_tokens = int(ov.split("=")[1])
+            elif ov.startswith("trainer.max_duration.value="):
+                actual_train_tokens = int(ov.split("=")[1])
+        if actual_train_tokens != train_tokens:
+            log.info(f"Using actual training budget {actual_train_tokens} tokens "
+                     f"(from override) instead of default {train_tokens}")
+        train_tokens = actual_train_tokens
+
         mix = DATAMIX_LOOKUP[train_datamix_name]
         paths, labels = mix.build(data_root, tokenizer_config.identifier)
 
