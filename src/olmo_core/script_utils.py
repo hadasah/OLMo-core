@@ -13,7 +13,9 @@ from olmo_core.data import (
     NumpyDatasetConfig,
     NumpyFSLDatasetConfig,
     ReplayCacheManifest,
+    SourceSubsetManifest,
     apply_replay_cache,
+    apply_source_subset_cache,
 )
 from olmo_core.distributed.checkpoint import get_checkpoint_metadata, load_state_dict
 from olmo_core.io import is_url, join_path, normalize_path
@@ -91,6 +93,13 @@ def get_cli_parser() -> argparse.ArgumentParser:
         to load from '--data-root'.""",
     )
     parser.add_argument(
+        "--source-subset-root",
+        type=str,
+        help="""Optional local source-subset cache directory for training data. When set, the training dataset
+        is loaded from local subset shards and training-data shuffling remains enabled. Eval data continues
+        to load from '--data-root'.""",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="""Print the config and exit.""",
@@ -122,6 +131,9 @@ def main(
     config = config_builder(opts, overrides)
 
     replay_manifest: Optional[ReplayCacheManifest] = None
+    source_subset_manifest: Optional[SourceSubsetManifest] = None
+    if opts.replay_root is not None and opts.source_subset_root is not None:
+        raise RuntimeError("Only one of '--replay-root' or '--source-subset-root' may be set")
     if opts.replay_root is not None:
         if not isinstance(config.dataset, NumpyFSLDatasetConfig):
             raise RuntimeError(
@@ -131,6 +143,15 @@ def main(
             config.dataset, config.data_loader, opts.replay_root
         )
         config.dataset = replay_dataset_config
+    elif opts.source_subset_root is not None:
+        if not isinstance(config.dataset, NumpyFSLDatasetConfig):
+            raise RuntimeError(
+                f"'--source-subset-root' only supports fixed-sequence datasets, got {type(config.dataset)}"
+            )
+        source_subset_manifest, subset_dataset_config = apply_source_subset_cache(
+            config.dataset, opts.source_subset_root
+        )
+        config.dataset = subset_dataset_config
 
     if opts.dry_run:
         rich.print(config)
@@ -149,6 +170,14 @@ def main(
         raise RuntimeError(
             "Replay cache fingerprint does not match the loaded local dataset: "
             f"{replay_manifest.replay_dataset_fingerprint!r} != {dataset.fingerprint!r}"
+        )
+    if (
+        source_subset_manifest is not None
+        and dataset.fingerprint != source_subset_manifest.subset_dataset_fingerprint
+    ):
+        raise RuntimeError(
+            "Source subset cache fingerprint does not match the loaded local dataset: "
+            f"{source_subset_manifest.subset_dataset_fingerprint!r} != {dataset.fingerprint!r}"
         )
     data_loader = config.data_loader.build(dataset, dp_process_group=train_module.dp_process_group)
     trainer = config.trainer.build(train_module, data_loader)

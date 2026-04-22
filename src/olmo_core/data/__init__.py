@@ -55,6 +55,12 @@ from .replay_cache import (
     build_replay_cache,
     load_replay_manifest,
 )
+from .source_subset_cache import (
+    SourceSubsetManifest,
+    apply_source_subset_cache,
+    build_source_subset_cache,
+    load_source_subset_manifest,
+)
 from .tokenizer import TokenizerConfig, TokenizerName
 from .types import LongDocStrategy, NumpyDatasetDType
 
@@ -84,11 +90,15 @@ __all__ = [
     "TokenizerConfig",
     "TokenizerName",
     "ReplayCacheManifest",
+    "SourceSubsetManifest",
     "NumpyReplayFSLDataset",
     "NumpyReplayFSLDatasetConfig",
     "build_replay_cache",
+    "build_source_subset_cache",
     "load_replay_manifest",
+    "load_source_subset_manifest",
     "apply_replay_cache",
+    "apply_source_subset_cache",
     "DataMixBase",
     "DataMix",
     "DataCollator",

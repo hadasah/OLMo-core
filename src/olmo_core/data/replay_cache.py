@@ -312,27 +312,33 @@ def _load_or_init_manifest(
         return manifest
 
     manifest = load_replay_manifest(replay_root)
-    expected = ReplayCacheManifest(
-        source_mix=_mix_value(dataset_config.mix),
-        source_data_root=dataset_config.mix_base_dir,
-        tokenizer_identifier=dataset_config.tokenizer.identifier,
-        source_sequence_length=dataset_config.sequence_length,
-        source_data_seed=data_seed,
-        source_epoch=epoch,
-        source_dataset_fingerprint=source_dataset_fingerprint,
-        replay_dtype=replay_dtype,
-        max_tokens_requested=max_tokens,
-        shard_size_tokens=shard_size_tokens,
-        total_tokens_written=manifest.total_tokens_written,
-        shard_paths=manifest.shard_paths,
-        shard_token_counts=manifest.shard_token_counts,
-        complete=manifest.complete,
-        replay_dataset_fingerprint=manifest.replay_dataset_fingerprint,
-    )
-    if manifest != expected:
+    immutable_fields = {
+        "source_mix": _mix_value(dataset_config.mix),
+        "source_data_root": dataset_config.mix_base_dir,
+        "tokenizer_identifier": dataset_config.tokenizer.identifier,
+        "source_sequence_length": dataset_config.sequence_length,
+        "source_data_seed": data_seed,
+        "source_epoch": epoch,
+        "source_dataset_fingerprint": source_dataset_fingerprint,
+        "replay_dtype": replay_dtype,
+        "shard_size_tokens": shard_size_tokens,
+    }
+    for field_name, expected_value in immutable_fields.items():
+        if getattr(manifest, field_name) != expected_value:
+            raise RuntimeError(
+                f"Existing replay manifest at '{manifest_path}' does not match the requested cache parameters"
+            )
+
+    if max_tokens < manifest.max_tokens_requested:
         raise RuntimeError(
             f"Existing replay manifest at '{manifest_path}' does not match the requested cache parameters"
         )
+
+    if max_tokens > manifest.max_tokens_requested:
+        manifest.max_tokens_requested = max_tokens
+        manifest.complete = manifest.total_tokens_written >= max_tokens
+        save_replay_manifest(replay_root, manifest)
+
     return manifest
 
 

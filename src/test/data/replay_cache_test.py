@@ -136,3 +136,52 @@ def test_apply_replay_cache_switches_training_to_local_stream(tmp_path: Path) ->
         len(expected_tokens) // training_dataset_config.sequence_length
     ) * training_dataset_config.sequence_length
     assert replay_tokens == expected_tokens[:usable_tokens]
+
+
+def test_build_replay_cache_can_extend_existing_cache(tmp_path: Path) -> None:
+    _write_tokens(tmp_path / "tokens_a.npy", list(range(0, 48)))
+    _write_tokens(tmp_path / "tokens_b.npy", list(range(48, 96)))
+
+    tokenizer = TokenizerConfig.gpt2()
+    dataset_config = NumpyFSLDatasetConfig(
+        paths=[str(tmp_path / "tokens_a.npy"), str(tmp_path / "tokens_b.npy")],
+        tokenizer=tokenizer,
+        sequence_length=4,
+        work_dir=str(tmp_path / "dataset-work"),
+    )
+
+    initial_manifest = build_replay_cache(
+        dataset_config,
+        data_seed=34521,
+        max_tokens=10,
+        output_root=tmp_path / "replay-cache",
+        epoch=1,
+        shard_size_tokens=6,
+        work_dir=tmp_path / "replay-work",
+    )
+    extended_manifest = build_replay_cache(
+        dataset_config,
+        data_seed=34521,
+        max_tokens=18,
+        output_root=tmp_path / "replay-cache",
+        epoch=1,
+        shard_size_tokens=6,
+        work_dir=tmp_path / "replay-work",
+    )
+
+    expected_tokens = _flatten_source_tokens(
+        dataset_config, data_seed=34521, epoch=1, max_tokens=18
+    )
+    replay_dataset_config = NumpyReplayFSLDatasetConfig(
+        paths=extended_manifest.resolved_shard_paths(tmp_path / "replay-cache"),
+        tokenizer=tokenizer,
+        sequence_length=4,
+    )
+    replay_tokens = _flatten_replay_tokens(replay_dataset_config)
+    usable_tokens = (len(expected_tokens) // replay_dataset_config.sequence_length) * replay_dataset_config.sequence_length
+
+    assert initial_manifest.shard_token_counts == [6, 4]
+    assert extended_manifest.max_tokens_requested == 18
+    assert extended_manifest.total_tokens_written == 18
+    assert extended_manifest.shard_token_counts == [6, 4, 6, 2]
+    assert replay_tokens == expected_tokens[:usable_tokens]
