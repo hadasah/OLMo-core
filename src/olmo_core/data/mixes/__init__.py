@@ -59,6 +59,9 @@ class DataMix(DataMixBase):
     v3_small_ppl_validation = "v3-small-ppl-validation"
     OLMoE_mix_1124 = "OLMoE-mix-1124"
 
+    # Single-source mixes (for data repetition experiments)
+    c4_only = "c4-only"
+
     @classmethod
     def _missing_(cls, value: object) -> "DataMix | None":
         """Handle alias lookups."""
