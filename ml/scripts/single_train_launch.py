@@ -6,8 +6,11 @@ import sys
 import os
 import logging
 import traceback
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, cast, Optional
+
+import numpy as np
 
 import torch
 import torch.distributed as dist
@@ -20,6 +23,8 @@ from olmo_core.data import (
     NumpyPaddedFSLDatasetConfig,
     TokenizerConfig,
 )
+from olmo_core.data.source_mixture import SourceMixtureConfig, SourceMixtureList, SourceMixtureDatasetConfig
+from olmo_core.io import get_file_size
 from olmo_core.distributed.parallel import DataParallelType
 from olmo_core.distributed.utils import get_world_size
 from olmo_core.nn.transformer import (
@@ -54,6 +59,7 @@ from constants import (
     PROJECT_SPECS,
 )
 
+log = logging.getLogger(__name__)
 
 MODEL_CONFIG_LOOKUP = {
     "olmo2_ml_10M": TransformerConfig.olmo2_ml_10M,
@@ -76,6 +82,8 @@ DATAMIX_LOOKUP = {
     "OLMoE_mix_1124": DataMix.OLMoE_mix_1124,
     "OLMoE_mix_0824": DataMix.OLMoE_mix_0824,
     "v3_small_ppl_validation": DataMix.v3_small_ppl_validation,
+    "c4_only": DataMix.c4_only,
+    "dclm_only": DataMix.dclm_only,
 }
 
 _user = os.environ.get('USER', '')
@@ -93,6 +101,8 @@ def get_wandb_tags(
     moe_num_experts_list,
     moe_generalist_hidden_multiplier,
     moe_type,
+    unique_data_fraction=1.0,
+    num_repetitions=1,
 ):
     """
     Returns a list of tags for W&B runs based on the current configuration.
@@ -119,6 +129,12 @@ def get_wandb_tags(
         wandb_tags.append("nogen")
     
     wandb_tags.append(model_name.split('_')[1])  # e.g., "100M", "1B"
+
+    if unique_data_fraction < 1.0:
+        wandb_tags.append(f"frac{unique_data_fraction}")
+        wandb_tags.append(f"rep{num_repetitions}x")
+    else:
+        wandb_tags.append("rep1x")
 
     return wandb_tags
 
@@ -169,6 +185,8 @@ def build_config(
     max_grad_norm: float = 1.0,
     moe_z_loss_weight: float = 0.001,
     moe_lb_loss_weight: float = 0.01,
+    unique_data_fraction: float = 1.0,
+    num_repetitions: int = 1,
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS['WANDB_ENTITY'],
     wandb_project: str = USER_PROJECT_SPECS['WANDB_PROJECT'],
@@ -190,14 +208,94 @@ def build_config(
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
     )
 
-    dataset_config = NumpyFSLDatasetConfig.from_data_mix(
-        DATAMIX_LOOKUP[train_datamix_name],
-        tokenizer=tokenizer_config,
-        mix_base_dir=data_root,
-        sequence_length=sequence_length,
-        max_target_sequence_length=max(4096, sequence_length),
-        work_dir=data_work_dir,
-    )
+    if unique_data_fraction < 1.0:
+        # Use the actual training token budget (from overrides) instead of the
+        # default train_tokens, which is only 200M and wrong for 80M/200M models.
+        actual_train_tokens = train_tokens
+        for ov in overrides:
+            if ov.startswith("--trainer.max_duration.value="):
+                actual_train_tokens = int(ov.split("=")[1])
+            elif ov.startswith("trainer.max_duration.value="):
+                actual_train_tokens = int(ov.split("=")[1])
+        if actual_train_tokens != train_tokens:
+            log.info(f"Using actual training budget {actual_train_tokens} tokens "
+                     f"(from override) instead of default {train_tokens}")
+        train_tokens = actual_train_tokens
+
+        mix = DATAMIX_LOOKUP[train_datamix_name]
+        paths, labels = mix.build(data_root, tokenizer_config.identifier)
+
+        source_paths = defaultdict(list)
+        for path, label in zip(paths, labels):
+            source_paths[label].append(path)
+
+        # Infer dtype from vocab size (same logic as NumpyDatasetConfig.get_dtype)
+        npdtype = np.uint32  # safe fallback
+        for dt in (np.uint8, np.uint16, np.uint32, np.uint64):
+            if (tokenizer_config.vocab_size - 1) <= np.iinfo(dt).max:
+                npdtype = dt
+                break
+        itemsize = npdtype(0).itemsize
+
+        source_token_counts = {}
+        for name, spaths in source_paths.items():
+            source_token_counts[name] = sum(get_file_size(p) // itemsize for p in spaths)
+        total_tokens_available = sum(source_token_counts.values())
+
+        ratios = {name: source_token_counts[name] / total_tokens_available
+                  for name in source_paths}
+
+        source_configs = [
+            SourceMixtureConfig(
+                source_name=name,
+                target_ratio=ratios[name],
+                paths=source_paths[name],
+            )
+            for name in source_paths
+        ]
+
+        requested_unique_tokens = int(train_tokens * unique_data_fraction)
+        # For extreme repetition (128x+), use requested tokens as batch size
+        # to avoid ceil-rounding inflation. For moderate repetition, keep
+        # original batch size for checkpoint compatibility.
+        if requested_unique_tokens < 4096 * 1000:
+            src_mix_batch_size = max(sequence_length,
+                                    ((requested_unique_tokens + sequence_length - 1) // sequence_length) * sequence_length)
+        else:
+            src_mix_batch_size = global_batch_size * sequence_length
+
+        src_mix_config = SourceMixtureDatasetConfig(
+            source_list=SourceMixtureList(sources=source_configs),
+            requested_tokens=requested_unique_tokens,
+            global_batch_size=src_mix_batch_size,
+            seed=DATA_SEED,
+        )
+
+        # For extreme repetition (128x+), per-file token allocation can drop below 4096,
+        # causing 0 instances with max_target_sequence_length=4096. Use sequence_length
+        # in that case. For moderate repetition, keep 4096 for checkpoint compatibility.
+        max_tgt_seq_len = sequence_length if requested_unique_tokens < 4096 * 1000 else max(4096, sequence_length)
+
+        dataset_config = NumpyFSLDatasetConfig.from_src_mix(
+            src_mix_config,
+            tokenizer=tokenizer_config,
+            sequence_length=sequence_length,
+            max_target_sequence_length=max_tgt_seq_len,
+            work_dir=data_work_dir,
+        )
+
+        log.info(f"Data repetition: using {int(train_tokens * unique_data_fraction)} unique tokens "
+                 f"from {len(source_paths)} sources "
+                 f"(fraction={unique_data_fraction}, expected ~{num_repetitions}x repetition)")
+    else:
+        dataset_config = NumpyFSLDatasetConfig.from_data_mix(
+            DATAMIX_LOOKUP[train_datamix_name],
+            tokenizer=tokenizer_config,
+            mix_base_dir=data_root,
+            sequence_length=sequence_length,
+            max_target_sequence_length=max(4096, sequence_length),
+            work_dir=data_work_dir,
+        )
 
     data_loader_config = NumpyDataLoaderConfig(
         global_batch_size=global_batch_size * sequence_length,
@@ -261,39 +359,41 @@ def build_config(
                 entity=wandb_entity,
                 project=wandb_project,
                 cancel_check_interval=10,
-                tags=get_wandb_tags(run_name, model_name, moe_num_experts_list, moe_generalist_hidden_multiplier, moe_type),
+                tags=get_wandb_tags(run_name, model_name, moe_num_experts_list, moe_generalist_hidden_multiplier, moe_type, unique_data_fraction, num_repetitions),
                 enabled=True,  # NOTE: change to true to enable
             ),
         )
         .with_callback("config_saver", ConfigSaverCallback())
-        # .with_callback(
-        #     "lm_evaluator",
-        #     LMEvaluatorCallbackConfig(
-        #         eval_dataset=NumpyPaddedFSLDatasetConfig.from_data_mix(
-        #             DATAMIX_LOOKUP[valid_datamix_name],
-        #             mix_base_dir=valid_data_dir,
-        #             sequence_length=dataset_config.sequence_length,
-        #             tokenizer=tokenizer_config,
-        #             work_dir=data_work_dir,
-        #         ),
-        #         eval_interval=eval_interval,
-        #     ),
-        # )
-        # .with_callback(
-        #     "downstream_evaluator",
-        #     DownstreamEvaluatorCallbackConfig(
-        #         tasks=[
-        #             "mmlu_stem_mc_5shot_test",
-        #             "mmlu_humanities_mc_5shot_test",
-        #             "mmlu_social_sciences_mc_5shot_test",
-        #             "mmlu_other_mc_5shot_test",
-        #             "boolq",
-        #             "hellaswag",
-        #         ],
-        #         tokenizer=tokenizer_config,
-        #         eval_interval=eval_interval,
-        #     ),
-        # )
+        .with_callback(
+            "lm_evaluator",
+            LMEvaluatorCallbackConfig(
+                eval_dataset=NumpyPaddedFSLDatasetConfig.from_data_mix(
+                    DATAMIX_LOOKUP[valid_datamix_name],
+                    mix_base_dir=valid_data_dir,
+                    sequence_length=dataset_config.sequence_length,
+                    tokenizer=tokenizer_config,
+                    work_dir=data_work_dir,
+                ),
+                eval_interval=eval_interval,
+                eval_on_finish=True,
+            ),
+        )
+        .with_callback(
+            "downstream_evaluator",
+            DownstreamEvaluatorCallbackConfig(
+                tasks=[
+                    "mmlu_stem_mc_5shot_test",
+                    "mmlu_humanities_mc_5shot_test",
+                    "mmlu_social_sciences_mc_5shot_test",
+                    "mmlu_other_mc_5shot_test",
+                    "boolq",
+                    "hellaswag",
+                ],
+                tokenizer=tokenizer_config,
+                eval_interval=eval_interval,
+                eval_on_finish=True,
+            ),
+        )
     )
 
     return ExperimentConfig(
@@ -347,6 +447,8 @@ def main(
             moe_bias_gamma=args.moe_bias_gamma,
             moe_z_loss_weight=args.moe_z_loss_weight,
             moe_lb_loss_weight=args.moe_lb_loss_weight,
+            unique_data_fraction=args.unique_data_fraction,
+            num_repetitions=args.num_repetitions,
             overrides=overrides)
         logger.info("Config built successfully")
 
@@ -408,6 +510,11 @@ if __name__ == "__main__":
     parser.add_argument("--moe_bias_gamma", type=float, default=None, help="Gamma value for MoE bias")
     parser.add_argument("--moe_z_loss_weight", type=float, default=0.001, help="Weight for the z-loss in MoE")
     parser.add_argument("--moe_lb_loss_weight", type=float, default=0.01, help="Weight for the LB loss in MoE")
+    parser.add_argument("--unique_data_fraction", type=float, default=1.0,
+        help="Fraction of source data paths to use (1.0=full, 0.5=half, 0.25=quarter, 0.125=eighth). "
+             "Lower fraction + same max_duration = more data repetition.")
+    parser.add_argument("--num_repetitions", type=int, default=1,
+        help="Expected number of data repetitions (for naming/tagging only, does not affect training)")
     args, overrides = parser.parse_known_args()
 
     prepare_training_environment()
