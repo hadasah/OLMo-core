@@ -12,8 +12,8 @@ SWEEP_NAME_DEFAULT = 'data_rep_AC'
 project = 'moe'
 MODELS = [
     # 'olmo2_ml_10M',
-    # 'olmo2_ml_80M',
-    'olmo2_ml_200M',
+    'olmo2_ml_80M',
+    # 'olmo2_ml_200M',
 ]
 
 def main(
@@ -132,11 +132,13 @@ def main(
             grid = {
                 # main_grid is the top-level grid, the sweep will run over all combinations of these hyperparameters, 
                 # combined with the subgrids
-                "main_grid": { 
+                "main_grid": {
                     "model_name": [model],
                     "save_root": [f"{SPECS['DEFAULT_SAVE_PATH']}/{model_sweep_name}"],
                     # "scheduler": ["wsd"],
                     "moe_type": ["dropless"],
+                    # Switch to "c4_only" to use C4 dataset, "OLMoE_mix_0824" for the default OLMo mix
+                    "train_datamix_name": ["c4_only"],
                     # "moe_bias_gamma": [0.001],  # None for default, or specify a float value
                     # "moe_lb_loss_weight": [0.0001],  # Weight for the lb-loss in MoE
                     'train_module': {
