@@ -83,6 +83,7 @@ DATAMIX_LOOKUP = {
     "OLMoE_mix_0824": DataMix.OLMoE_mix_0824,
     "v3_small_ppl_validation": DataMix.v3_small_ppl_validation,
     "c4_only": DataMix.c4_only,
+    "dclm_only": DataMix.dclm_only,
 }
 
 _user = os.environ.get('USER', '')
