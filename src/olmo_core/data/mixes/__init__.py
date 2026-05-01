@@ -61,6 +61,7 @@ class DataMix(DataMixBase):
 
     # Single-source mixes (for data repetition experiments)
     c4_only = "c4-only"
+    dclm_only = "dclm-only"
 
     @classmethod
     def _missing_(cls, value: object) -> "DataMix | None":
