@@ -137,8 +137,9 @@ def main(
                     "save_root": [f"{SPECS['DEFAULT_SAVE_PATH']}/{model_sweep_name}"],
                     # "scheduler": ["wsd"],
                     "moe_type": ["dropless"],
-                    # Switch to "c4_only" to use C4 dataset, "OLMoE_mix_0824" for the default OLMo mix
-                    "train_datamix_name": ["c4_only"],
+                    # Single-source web mixes for repetition experiments: "dclm_only" or "c4_only"
+                    # (C4 is not on olmo-data.org; use "OLMoE_mix_0824" for the default OLMo mix)
+                    "train_datamix_name": ["dclm_only"],
                     # "moe_bias_gamma": [0.001],  # None for default, or specify a float value
                     # "moe_lb_loss_weight": [0.0001],  # Weight for the lb-loss in MoE
                     'train_module': {
