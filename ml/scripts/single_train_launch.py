@@ -84,6 +84,9 @@ DATAMIX_LOOKUP = {
     "v3_small_ppl_validation": DataMix.v3_small_ppl_validation,
     "c4_only": DataMix.c4_only,
     "dclm_only": DataMix.dclm_only,
+    "starcoder_only": DataMix.starcoder_only,
+    "wikipedia_only": DataMix.wikipedia_only,
+    "pes2o_only": DataMix.pes2o_only,
 }
 
 _user = os.environ.get('USER', '')
