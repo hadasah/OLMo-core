@@ -137,9 +137,17 @@ def main(
                     "save_root": [f"{SPECS['DEFAULT_SAVE_PATH']}/{model_sweep_name}"],
                     # "scheduler": ["wsd"],
                     "moe_type": ["dropless"],
-                    # Single-source web mixes for repetition experiments: "dclm_only" or "c4_only"
-                    # (C4 is not on olmo-data.org; use "OLMoE_mix_0824" for the default OLMo mix)
-                    "train_datamix_name": ["dclm_only"],
+                    # Single-source mixes — pick ONE per sweep. Available options:
+                    #   "starcoder_only"  (100 files, code)
+                    #   "wikipedia_only"  (63 files, encyclopedic prose)
+                    #   "pes2o_only"      (26 files, academic papers)
+                    #   "dclm_only"       (945 files, filtered web)
+                    # Use "OLMoE_mix_0824" for the default full OLMo mix.
+                    # ("c4_only" is registered but C4 is not on olmo-data.org — won't work.)
+                    "train_datamix_name": ["starcoder_only"],
+                    # "train_datamix_name": ["dclm_only"],
+                    # "train_datamix_name": ["wikipedia_only"],
+                    # "train_datamix_name": ["pes2o_only"],
                     # "moe_bias_gamma": [0.001],  # None for default, or specify a float value
                     # "moe_lb_loss_weight": [0.0001],  # Weight for the lb-loss in MoE
                     'train_module': {
