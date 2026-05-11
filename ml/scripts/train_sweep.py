@@ -360,6 +360,45 @@ def main(
                     # "moe64_rep256x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.00390625"], "num_repetitions": ["256"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "moe64_rep512x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.001953125"], "num_repetitions": ["512"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "moe64_rep1024x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0009765625"], "num_repetitions": ["1024"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
+                    ## === Shared-block MoE experiments ===
+                    ## Share routers + experts across the middle range of layers. start_layer is the first
+                    ## layer in the shared range (inclusive); n_layers is the number of contiguous layers
+                    ## to share over (must be >= 2). Each share_* flag is independent — see SharedBlockConfig.
+                    ## NOTE: layer indexing is model-specific; pick start_layer/n_layers to span the *middle*
+                    ## of the network for your model size. Examples below assume an 80M model with depth ~12;
+                    ## adjust for other sizes.
+                    # "moe32_shared_R_mid4": {
+                    #     "moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"],
+                    #     "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"],
+                    #     "shared_blocks_start_layer": ["4"], "shared_blocks_n_layers": ["4"],
+                    #     "shared_blocks_share_routers": ["True"], "shared_blocks_share_experts": ["False"],
+                    # },
+                    # "moe32_shared_E_mid4": {
+                    #     "moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"],
+                    #     "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"],
+                    #     "shared_blocks_start_layer": ["4"], "shared_blocks_n_layers": ["4"],
+                    #     "shared_blocks_share_routers": ["False"], "shared_blocks_share_experts": ["True"],
+                    # },
+                    # "moe32_shared_RE_mid4": {
+                    #     "moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"],
+                    #     "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"],
+                    #     "shared_blocks_start_layer": ["4"], "shared_blocks_n_layers": ["4"],
+                    #     "shared_blocks_share_routers": ["True"], "shared_blocks_share_experts": ["True"],
+                    # },
+                    # "moe32_shared_RE_mid6": {
+                    #     "moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"],
+                    #     "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"],
+                    #     "shared_blocks_start_layer": ["3"], "shared_blocks_n_layers": ["6"],
+                    #     "shared_blocks_share_routers": ["True"], "shared_blocks_share_experts": ["True"],
+                    # },
+                    # Optional: also share attention / norms across the middle range.
+                    # "moe32_shared_REAN_mid4": {
+                    #     "moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"],
+                    #     "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"],
+                    #     "shared_blocks_start_layer": ["4"], "shared_blocks_n_layers": ["4"],
+                    #     "shared_blocks_share_routers": ["True"], "shared_blocks_share_experts": ["True"],
+                    #     "shared_blocks_share_attention": ["True"], "shared_blocks_share_norms": ["True"],
+                    # },
                 },
             }
 

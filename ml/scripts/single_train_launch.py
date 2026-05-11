@@ -29,6 +29,7 @@ from olmo_core.data.source_mixture import (
 from olmo_core.distributed.parallel import DataParallelType
 from olmo_core.io import get_file_size
 from olmo_core.nn.transformer import TransformerConfig
+from olmo_core.nn.transformer.config import SharedBlockConfig
 from olmo_core.optim import WSD, AdamWConfig, CosWithWarmup, OptimGroupOverride
 from olmo_core.train import (
     Duration,
@@ -68,6 +69,21 @@ MODEL_CONFIG_LOOKUP = {
     "olmo2_ml_500M": TransformerConfig.olmo2_ml_500M,
 }
 
+
+def str2bool(v) -> bool:
+    """Parse a boolean from a CLI string (argparse + sweep passes values as strings).
+
+    Accepts: True/False, true/false, 1/0, yes/no. Bare bool passthrough also supported.
+    """
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("true", "1", "yes", "y", "t"):
+        return True
+    if s in ("false", "0", "no", "n", "f", "", "none"):
+        return False
+    raise argparse.ArgumentTypeError(f"Expected boolean-like value, got: {v!r}")
+
 TOKENIZER_LOOKUP = {
     "dolma2": TokenizerConfig.dolma2,
     "gpt_neox_olmo_dolma_v1_5": TokenizerConfig.gpt_neox_olmo_dolma_v1_5,
@@ -99,6 +115,7 @@ def get_wandb_tags(
     moe_type,
     unique_data_fraction=1.0,
     num_repetitions=1,
+    shared_blocks: Optional[SharedBlockConfig] = None,
 ):
     """
     Returns a list of tags for W&B runs based on the current configuration.
@@ -131,6 +148,23 @@ def get_wandb_tags(
         wandb_tags.append(f"rep{num_repetitions}x")
     else:
         wandb_tags.append("rep1x")
+
+    if shared_blocks is not None:
+        sb_parts = []
+        if shared_blocks.share_routers:
+            sb_parts.append("R")
+        if shared_blocks.share_experts:
+            sb_parts.append("E")
+        if shared_blocks.share_shared_mlp:
+            sb_parts.append("S")
+        if shared_blocks.share_attention:
+            sb_parts.append("A")
+        if shared_blocks.share_norms:
+            sb_parts.append("N")
+        wandb_tags.append("sharedMoE")
+        wandb_tags.append(
+            f"share[{''.join(sb_parts)}]@{shared_blocks.start_layer}+{shared_blocks.n_layers}"
+        )
 
     return wandb_tags
 
@@ -183,6 +217,13 @@ def build_config(
     moe_lb_loss_weight: float = 0.01,
     unique_data_fraction: float = 1.0,
     num_repetitions: int = 1,
+    shared_blocks_start_layer: Optional[int] = None,
+    shared_blocks_n_layers: int = 2,
+    shared_blocks_share_routers: bool = False,
+    shared_blocks_share_experts: bool = False,
+    shared_blocks_share_shared_mlp: bool = False,
+    shared_blocks_share_attention: bool = False,
+    shared_blocks_share_norms: bool = False,
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS["WANDB_ENTITY"],
     wandb_project: str = USER_PROJECT_SPECS["WANDB_PROJECT"],
@@ -202,6 +243,28 @@ def build_config(
         z_loss_weight=moe_z_loss_weight,
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
     )
+
+    # Optionally enable physical parameter sharing across a contiguous range of layers.
+    # Off unless shared_blocks_start_layer is set.
+    if shared_blocks_start_layer is not None:
+        model_config.shared_blocks = SharedBlockConfig(
+            start_layer=shared_blocks_start_layer,
+            n_layers=shared_blocks_n_layers,
+            share_routers=shared_blocks_share_routers,
+            share_experts=shared_blocks_share_experts,
+            share_shared_mlp=shared_blocks_share_shared_mlp,
+            share_attention=shared_blocks_share_attention,
+            share_norms=shared_blocks_share_norms,
+        )
+        log.info(
+            f"Shared blocks enabled: start={shared_blocks_start_layer}, "
+            f"n={shared_blocks_n_layers}, "
+            f"share(routers={shared_blocks_share_routers}, "
+            f"experts={shared_blocks_share_experts}, "
+            f"shared_mlp={shared_blocks_share_shared_mlp}, "
+            f"attention={shared_blocks_share_attention}, "
+            f"norms={shared_blocks_share_norms})"
+        )
 
     if unique_data_fraction < 1.0:
         # Use the actual training token budget (from overrides) instead of the
@@ -374,6 +437,7 @@ def build_config(
                     moe_type,
                     unique_data_fraction,
                     num_repetitions,
+                    shared_blocks=model_config.shared_blocks,
                 ),
                 enabled=True,  # NOTE: change to true to enable
             ),
@@ -462,6 +526,13 @@ def main(args: argparse.Namespace, overrides: List[str]) -> None:
             moe_lb_loss_weight=args.moe_lb_loss_weight,
             unique_data_fraction=args.unique_data_fraction,
             num_repetitions=args.num_repetitions,
+            shared_blocks_start_layer=args.shared_blocks_start_layer,
+            shared_blocks_n_layers=args.shared_blocks_n_layers,
+            shared_blocks_share_routers=args.shared_blocks_share_routers,
+            shared_blocks_share_experts=args.shared_blocks_share_experts,
+            shared_blocks_share_shared_mlp=args.shared_blocks_share_shared_mlp,
+            shared_blocks_share_attention=args.shared_blocks_share_attention,
+            shared_blocks_share_norms=args.shared_blocks_share_norms,
             overrides=overrides,
         )
         logger.info("Config built successfully")
@@ -612,6 +683,50 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Expected number of data repetitions (for naming/tagging only, does not affect training)",
+    )
+    # Shared-block parameter sharing across a contiguous range of transformer layers.
+    parser.add_argument(
+        "--shared_blocks_start_layer",
+        type=int,
+        default=None,
+        help="First layer index in the shared range. Set to enable shared-block training; "
+        "leave unset for the default (no sharing).",
+    )
+    parser.add_argument(
+        "--shared_blocks_n_layers",
+        type=int,
+        default=2,
+        help="Number of contiguous layers in the shared range (must be >= 2).",
+    )
+    parser.add_argument(
+        "--shared_blocks_share_routers",
+        type=str2bool,
+        default=False,
+        help="If true, share the MoE routers across the shared range.",
+    )
+    parser.add_argument(
+        "--shared_blocks_share_experts",
+        type=str2bool,
+        default=False,
+        help="If true, share the MoE experts across the shared range.",
+    )
+    parser.add_argument(
+        "--shared_blocks_share_shared_mlp",
+        type=str2bool,
+        default=False,
+        help="If true, share the optional dense shared_mlp (hybrid MoE) across the shared range.",
+    )
+    parser.add_argument(
+        "--shared_blocks_share_attention",
+        type=str2bool,
+        default=False,
+        help="If true, share attention/sequence-mixer across the shared range.",
+    )
+    parser.add_argument(
+        "--shared_blocks_share_norms",
+        type=str2bool,
+        default=False,
+        help="If true, share both attention_norm and feed_forward_norm across the shared range.",
     )
     args, overrides = parser.parse_known_args()
 
