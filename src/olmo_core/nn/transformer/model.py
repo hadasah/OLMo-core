@@ -332,6 +332,17 @@ class Transformer(nn.Module):
                 generator=generator,
             )
 
+        # When `shared_blocks` is set, multiple blocks alias the same submodule
+        # (attention, feed_forward, feed_forward_moe, etc.). Running per-block init
+        # against an already-initialized shared submodule would re-roll the RNG and,
+        # under depth-scaled InitMethods (e.g. llama_depth scales std by
+        # 1/sqrt(2*(block_idx+1))), silently overwrite with the wrong std. Track
+        # which submodules have already been initialized and skip them; iteration
+        # order matches block index, so the canonical (lowest block_idx) wins.
+        seen_attn: Set[int] = set()
+        seen_ff: Set[int] = set()
+        seen_moe: Set[int] = set()
+        seen_warmup: Set[int] = set()
         for block in self.blocks.values():
             # This might fail if it's wrapped.
             #  assert isinstance(block, TransformerBlock)
@@ -339,17 +350,20 @@ class Transformer(nn.Module):
             att = cast(Union[Attention, FusedAttention], block.attention)
 
             # Attention weights.
-            self.init_method.init_attention(
-                att,
-                d_model=self.d_model,
-                block_idx=block.block_idx,
-                num_blocks=self.n_layers,
-                std=self.init_std,
-                generator=generator,
-            )
+            if id(att) not in seen_attn:
+                seen_attn.add(id(att))
+                self.init_method.init_attention(
+                    att,
+                    d_model=self.d_model,
+                    block_idx=block.block_idx,
+                    num_blocks=self.n_layers,
+                    std=self.init_std,
+                    generator=generator,
+                )
 
             # Feed-forward weights.
-            if hasattr(block, "feed_forward"):
+            if hasattr(block, "feed_forward") and id(block.feed_forward) not in seen_ff:
+                seen_ff.add(id(block.feed_forward))
                 self.init_method.init_feed_forward(
                     block.feed_forward,
                     d_model=self.d_model,
@@ -360,7 +374,8 @@ class Transformer(nn.Module):
                 )
 
             # MoE weights.
-            if hasattr(block, "feed_forward_moe"):
+            if hasattr(block, "feed_forward_moe") and id(block.feed_forward_moe) not in seen_moe:
+                seen_moe.add(id(block.feed_forward_moe))
                 block = cast(MoETransformerBlock, block)
                 if max_local_microbatch_size is not None:
                     block.feed_forward_moe.warmup_cache(max_local_microbatch_size)
@@ -374,11 +389,13 @@ class Transformer(nn.Module):
                 )
 
             # Warm up attention backend cache.
-            if max_seq_len is not None and att.backend is not None:
+            if max_seq_len is not None and att.backend is not None and id(att.backend) not in seen_warmup:
+                seen_warmup.add(id(att.backend))
                 att.backend.warmup_cache(max_seq_len, device)
 
             # Warm up RoPE cache.
-            if max_seq_len is not None and att.rope is not None:
+            if max_seq_len is not None and att.rope is not None and id(att.rope) not in seen_warmup:
+                seen_warmup.add(id(att.rope))
                 att.rope.warmup_cache(max_seq_len, device)
 
         if self.lm_head is not None:

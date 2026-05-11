@@ -45,6 +45,7 @@ from olmo_core.nn.transformer import (
     TransformerType,
 )
 from olmo_core.nn.transformer.config import SharedBlockConfig
+from olmo_core.nn.transformer.init import InitMethod
 from olmo_core.testing import (
     BACKENDS,
     FLASH_2_MARKS,
@@ -818,6 +819,85 @@ def test_shared_blocks_num_param_uses():
     # (since sharing only changes physical storage, not the per-layer parameter "usage").
     assert config.num_param_uses == unshared_config.num_params
     assert model.num_param_uses == unshared_model.num_params
+
+
+def test_shared_blocks_init_uses_canonical_block_idx():
+    """
+    Under InitMethod.llama_depth the init std scales as 1/sqrt(2*(block_idx+1)). If
+    init_weights walks every block and re-initializes shared submodules, the highest
+    block_idx in the shared range silently wins. After the dedup fix in init_weights,
+    the canonical (lowest) block_idx should drive the init.
+    """
+    import math
+
+    init_std = 0.02
+    start_layer = 1
+    n_shared = 3  # shared range: [1, 2, 3]
+    sb = SharedBlockConfig(
+        start_layer=start_layer,
+        n_layers=n_shared,
+        share_routers=True,
+        share_experts=True,
+    )
+    config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    config.init_method = InitMethod.llama_depth
+    config.init_std = init_std
+
+    model = config.build(init_device="cpu")
+    model.init_weights(device=torch.device("cpu"))
+
+    # Inspect the shared expert weight matrix (large enough for tight sample-std).
+    shared_w1 = model.blocks[str(start_layer)].feed_forward_moe.experts_list[0].mlp.w1
+    empirical_std = shared_w1.detach().float().std().item()
+
+    # llama_depth: std = init_std / sqrt(2*(block_idx+1)).
+    canonical_std = init_std / math.sqrt(2 * (start_layer + 1))
+    last_in_range_std = init_std / math.sqrt(2 * (start_layer + n_shared - 1 + 1))
+    # trunc_normal_ at ±3*std has variance ~0.991*std^2, so empirical std is close
+    # to but slightly below the analytical std. Compare on relative error.
+    assert abs(empirical_std - canonical_std) / canonical_std < 0.05, (
+        f"empirical_std={empirical_std:.6f} should be near canonical_std={canonical_std:.6f}, "
+        f"NOT last-in-range_std={last_in_range_std:.6f}"
+    )
+    # Sanity: the two candidates are far enough apart that this comparison is meaningful.
+    assert abs(empirical_std - last_in_range_std) / last_in_range_std > 0.1
+
+
+def test_shared_blocks_init_called_once_per_shared_submodule():
+    """
+    Directly count how many times init_method.init_feed_forward_moe runs on the shared
+    submodule. Should be exactly 1, not n_shared.
+    """
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=4, share_routers=True, share_experts=True
+    )
+    config = _small_shared_moe_config(n_layers=6, shared_blocks=sb)
+    config.init_method = InitMethod.llama_depth
+
+    model = config.build(init_device="cpu")
+
+    call_log: list[tuple[int, int]] = []  # (block_idx, id(submodule))
+    original = type(model.init_method).init_feed_forward_moe
+
+    def recording(self, m, *, block_idx, **kw):
+        call_log.append((block_idx, id(m)))
+        return original(self, m, block_idx=block_idx, **kw)
+
+    type(model.init_method).init_feed_forward_moe = recording  # type: ignore[assignment]
+    try:
+        model.init_weights(device=torch.device("cpu"))
+    finally:
+        type(model.init_method).init_feed_forward_moe = original  # type: ignore[assignment]
+
+    shared_id = id(model.blocks[str(sb.start_layer)].feed_forward_moe)
+    shared_calls = [(idx, mid) for idx, mid in call_log if mid == shared_id]
+    assert len(shared_calls) == 1, (
+        f"shared MoE should be inited exactly once, got {len(shared_calls)} calls: {shared_calls}"
+    )
+    assert shared_calls[0][0] == sb.start_layer, (
+        f"canonical (lowest) block_idx={sb.start_layer} should drive init, "
+        f"got block_idx={shared_calls[0][0]}"
+    )
 
 
 def test_shared_blocks_validates_range():
