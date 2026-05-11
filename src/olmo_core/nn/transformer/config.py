@@ -5,7 +5,7 @@ from dataclasses import InitVar, dataclass, field
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Dict, List, Optional, cast
 
-from olmo_core.config import UNSET, DType, StrEnum
+from olmo_core.config import UNSET, Config, DType, StrEnum
 from olmo_core.doc_utils import beta_feature
 from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.nn.attention.base import SequenceMixerConfig
@@ -302,6 +302,70 @@ class TransformerBlockConfig(ModuleConfig):
 
 
 @dataclass
+class SharedBlockConfig(Config):
+    """
+    Configures physical parameter sharing across a contiguous range of transformer blocks.
+
+    When set, the submodules indicated by the ``share_*`` flags are taken from the canonical
+    block (the one at ``start_layer``) and reused — same ``nn.Module`` instance — across all
+    layers in ``[start_layer, start_layer + n_layers)``. Each call through a shared submodule
+    counts as one logical layer for auxiliary-loss scaling.
+    """
+
+    start_layer: int
+    """The first layer index in the shared range (inclusive)."""
+    n_layers: int
+    """The number of contiguous layers to share over (must be >= 2)."""
+    share_routers: bool = False
+    """Share the entire ``routers_list`` of the MoE feed-forward."""
+    share_experts: bool = False
+    """Share the entire ``experts_list`` of the MoE feed-forward."""
+    share_shared_mlp: bool = False
+    """Share the optional dense ``shared_mlp`` inside hybrid MoE blocks."""
+    share_attention: bool = False
+    """Share the attention / sequence-mixer submodule."""
+    share_norms: bool = False
+    """Share both the attention norm and the feed-forward norm."""
+
+    def __post_init__(self):
+        if self.n_layers < 2:
+            raise OLMoConfigurationError(
+                f"SharedBlockConfig.n_layers must be >= 2 (got {self.n_layers})"
+            )
+        if self.start_layer < 0:
+            raise OLMoConfigurationError(
+                f"SharedBlockConfig.start_layer must be >= 0 (got {self.start_layer})"
+            )
+        if not any(
+            (
+                self.share_routers,
+                self.share_experts,
+                self.share_shared_mlp,
+                self.share_attention,
+                self.share_norms,
+            )
+        ):
+            raise OLMoConfigurationError(
+                "SharedBlockConfig must enable at least one share_* flag"
+            )
+
+    @property
+    def end_layer(self) -> int:
+        """The last shared layer index (inclusive)."""
+        return self.start_layer + self.n_layers - 1
+
+    def layer_indices(self) -> range:
+        return range(self.start_layer, self.start_layer + self.n_layers)
+
+    def validate_against(self, total_n_layers: int) -> None:
+        if self.end_layer >= total_n_layers:
+            raise OLMoConfigurationError(
+                f"SharedBlockConfig range [{self.start_layer}, {self.end_layer}] "
+                f"exceeds n_layers={total_n_layers}"
+            )
+
+
+@dataclass
 class TransformerConfig(ModelConfig):
     """
     A config for easily building transformer models.
@@ -326,6 +390,10 @@ class TransformerConfig(ModelConfig):
     freeze_params: Optional[List[str]] = None
     block_overrides: Optional[Dict[int, TransformerBlockConfig]] = None
     embed_scale: Optional[float] = None
+    shared_blocks: Optional[SharedBlockConfig] = None
+    """
+    Optional config for sharing routers/experts/etc. across a contiguous range of layers.
+    """
 
     def build(
         self,
@@ -344,6 +412,9 @@ class TransformerConfig(ModelConfig):
             f"Building transformer with {self.num_params:,d} total params, "
             f"{self.num_non_embedding_params:,d} non-embedding params"
         )
+        if self.shared_blocks is not None:
+            self.shared_blocks.validate_against(self.n_layers)
+
         model: Transformer
         if self.name == TransformerType.default:
             model = Transformer(
@@ -361,6 +432,7 @@ class TransformerConfig(ModelConfig):
                 embedding_init_std=self.embedding_init_std,
                 block_overrides=self.block_overrides,
                 embed_scale=self.embed_scale,
+                shared_blocks=self.shared_blocks,
             )
         elif self.name == TransformerType.normalized:
             assert self.embedding_norm is None
@@ -377,6 +449,7 @@ class TransformerConfig(ModelConfig):
                 init_std=self.init_std,
                 embedding_init_std=self.embedding_init_std,
                 block_overrides=self.block_overrides,
+                shared_blocks=self.shared_blocks,
             )
         elif self.name == TransformerType.moe:
             model = MoETransformer(
@@ -393,6 +466,7 @@ class TransformerConfig(ModelConfig):
                 init_std=self.init_std,
                 embedding_init_std=self.embedding_init_std,
                 block_overrides=self.block_overrides,
+                shared_blocks=self.shared_blocks,
             )
         else:
             raise NotImplementedError(self.name)
@@ -417,6 +491,51 @@ class TransformerConfig(ModelConfig):
 
         return model
 
+    def _shared_block_param_savings(self, active: bool = False) -> int:
+        """
+        Compute the parameter savings from ``shared_blocks``: the size of the shared submodules
+        of the canonical (start) block multiplied by ``(n_shared - 1)``.
+        """
+        if self.shared_blocks is None:
+            return 0
+        sb = self.shared_blocks
+        canonical_cfg = self.block
+        if self.block_overrides is not None and sb.start_layer in self.block_overrides:
+            canonical_cfg = self.block_overrides[sb.start_layer]
+
+        per_layer = 0
+        moe_cfg = canonical_cfg.feed_forward_moe
+        if moe_cfg is not None:
+            if sb.share_routers:
+                for router, num_experts in zip(moe_cfg.routers_list, moe_cfg.num_experts_list):
+                    per_layer += router.num_params(self.d_model, num_experts)
+            if sb.share_experts:
+                expert_params = 0
+                for num_experts, hidden_size in zip(
+                    moe_cfg.num_experts_list, moe_cfg.hidden_sizes_list
+                ):
+                    expert_params += 3 * self.d_model * hidden_size * num_experts
+                if active:
+                    active_expert_params = 0
+                    for router, num_experts, hidden_size in zip(
+                        moe_cfg.routers_list,
+                        moe_cfg.num_experts_list,
+                        moe_cfg.hidden_sizes_list,
+                    ):
+                        active_expert_params += 3 * self.d_model * hidden_size * router.top_k
+                    per_layer += active_expert_params
+                else:
+                    per_layer += expert_params
+            if sb.share_shared_mlp and moe_cfg.shared_mlp is not None:
+                per_layer += moe_cfg.shared_mlp.num_params(self.d_model)
+
+        if sb.share_attention:
+            per_layer += canonical_cfg.sequence_mixer.num_params(self.d_model)
+        if sb.share_norms and canonical_cfg.layer_norm is not None:
+            per_layer += 2 * canonical_cfg.layer_norm.num_params(self.d_model)
+
+        return (sb.n_layers - 1) * per_layer
+
     @property
     def num_params(self) -> int:
         """
@@ -439,6 +558,9 @@ class TransformerConfig(ModelConfig):
                     num_params += self.block_overrides[idx].num_params(self.d_model)
                 else:
                     num_params += num_block_params
+
+        # Subtract duplicates for shared submodules.
+        num_params -= self._shared_block_param_savings(active=False)
 
         # LM head.
         num_params += self.lm_head.num_params(self.d_model, self.vocab_size)
@@ -468,6 +590,9 @@ class TransformerConfig(ModelConfig):
                 else:
                     num_active_params += num_active_block_params
 
+        # Subtract duplicates for shared submodules.
+        num_active_params -= self._shared_block_param_savings(active=True)
+
         # LM head.
         num_active_params += self.lm_head.num_params(self.d_model, self.vocab_size)
 
@@ -486,6 +611,33 @@ class TransformerConfig(ModelConfig):
         The number of active parameters excluding embedding parameters.
         """
         return self.num_active_params - self.d_model * self.vocab_size
+
+    @property
+    def num_param_uses(self) -> int:
+        """
+        Like :attr:`num_params`, but counts every shared submodule once per layer that
+        references it. With no sharing this equals :attr:`num_params`. Useful for FLOPs
+        estimation (``~6 × num_active_param_uses × num_tokens``), since each layer
+        application performs work proportional to its block's parameter count regardless
+        of whether those parameters are physically shared with other layers.
+        """
+        return self.num_params + self._shared_block_param_savings(active=False)
+
+    @property
+    def num_active_param_uses(self) -> int:
+        """
+        Like :attr:`num_active_params`, but counts every shared submodule once per layer
+        that references it. Use this for FLOPs estimation in MoE models with shared blocks.
+        """
+        return self.num_active_params + self._shared_block_param_savings(active=True)
+
+    @property
+    def num_non_embedding_param_uses(self) -> int:
+        return self.num_param_uses - self.d_model * self.vocab_size
+
+    @property
+    def num_active_non_embedding_param_uses(self) -> int:
+        return self.num_active_param_uses - self.d_model * self.vocab_size
 
     @classmethod
     def olmo2_1M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":

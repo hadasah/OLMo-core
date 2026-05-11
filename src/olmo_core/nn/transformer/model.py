@@ -52,6 +52,7 @@ from .block import (
     TransformerBlockBase,
 )
 from .config import (
+    SharedBlockConfig,
     TransformerActivationCheckpointingMode,
     TransformerBlockConfig,
     TransformerDataParallelWrappingStrategy,
@@ -104,6 +105,7 @@ class Transformer(nn.Module):
         embedding_init_std: Optional[float] = None,
         block_overrides: Optional[Dict[int, TransformerBlockConfig]] = None,
         embed_scale: Optional[float] = None,
+        shared_blocks: Optional["SharedBlockConfig"] = None,
     ):
         super().__init__()
 
@@ -114,6 +116,9 @@ class Transformer(nn.Module):
         self.n_layers = n_layers
         self.dtype = dtype
         self.embed_scale = embed_scale
+        self.shared_blocks = shared_blocks
+        if shared_blocks is not None:
+            shared_blocks.validate_against(n_layers)
 
         self.embeddings = nn.Embedding(vocab_size, d_model, dtype=dtype, device=init_device)
         self.embedding_norm = (
@@ -138,6 +143,10 @@ class Transformer(nn.Module):
                     cache=cache,
                 )
             )
+
+        if shared_blocks is not None:
+            self._apply_shared_blocks(shared_blocks)
+
         self.lm_head = lm_head.build(
             d_model=d_model, vocab_size=vocab_size, init_device=init_device
         )
@@ -167,6 +176,62 @@ class Transformer(nn.Module):
 
     def _validate_block(self, block: TransformerBlockBase) -> TransformerBlockBase:
         return block
+
+    def _apply_shared_blocks(self, shared_blocks: "SharedBlockConfig") -> None:
+        """
+        Reassign submodule references for layers in ``shared_blocks.layer_indices()`` so they
+        point to the corresponding submodule(s) of the canonical (start) block. The discarded
+        modules become unreferenced and are released by GC.
+        """
+        canonical = self.blocks[str(shared_blocks.start_layer)]
+        canonical_moe = getattr(canonical, "feed_forward_moe", None)
+        wants_moe_sharing = (
+            shared_blocks.share_routers
+            or shared_blocks.share_experts
+            or shared_blocks.share_shared_mlp
+        )
+        if wants_moe_sharing and canonical_moe is None:
+            raise OLMoConfigurationError(
+                f"SharedBlockConfig requested MoE sharing but the canonical block "
+                f"{shared_blocks.start_layer} has no feed_forward_moe"
+            )
+
+        has_shared_mlp = canonical_moe is not None and getattr(
+            canonical_moe, "shared_mlp", None
+        ) is not None
+        share_whole_moe = (
+            shared_blocks.share_routers
+            and shared_blocks.share_experts
+            and (shared_blocks.share_shared_mlp or not has_shared_mlp)
+        )
+
+        for idx in shared_blocks.layer_indices():
+            if idx == shared_blocks.start_layer:
+                continue
+            block = self.blocks[str(idx)]
+
+            if wants_moe_sharing:
+                if not hasattr(block, "feed_forward_moe"):
+                    raise OLMoConfigurationError(
+                        f"SharedBlockConfig requested MoE sharing but block {idx} has no "
+                        f"feed_forward_moe"
+                    )
+                if share_whole_moe:
+                    block.feed_forward_moe = canonical_moe
+                else:
+                    if shared_blocks.share_routers:
+                        block.feed_forward_moe.routers_list = canonical_moe.routers_list
+                    if shared_blocks.share_experts:
+                        block.feed_forward_moe.experts_list = canonical_moe.experts_list
+                    if shared_blocks.share_shared_mlp:
+                        block.feed_forward_moe.shared_mlp = canonical_moe.shared_mlp
+
+            if shared_blocks.share_attention:
+                block.attention = canonical.attention
+            if shared_blocks.share_norms:
+                block.attention_norm = canonical.attention_norm
+                if hasattr(block, "feed_forward_norm"):
+                    block.feed_forward_norm = canonical.feed_forward_norm
 
     def compute_auxiliary_metrics(
         self, reset: bool = True
@@ -785,6 +850,16 @@ class Transformer(nn.Module):
             in more aggressive prefetching.
         :wrapping_strategy: The wrapping strategy.
         """
+        if (
+            self.shared_blocks is not None
+            and wrapping_strategy == TransformerDataParallelWrappingStrategy.fine_grained
+        ):
+            raise OLMoConfigurationError(
+                "wrapping_strategy='fine_grained' is not supported together with shared_blocks; "
+                "fine-grained wrapping would FSDP-shard the shared submodule(s) more than once. "
+                "Use 'blocks' or 'full' instead."
+            )
+
         mp_policy = MixedPrecisionPolicy(
             param_dtype=param_dtype or self.dtype, reduce_dtype=reduce_dtype
         )
@@ -882,6 +957,20 @@ class Transformer(nn.Module):
     def num_non_embedding_params(self) -> int:
         return self.num_params - self.embeddings.weight.numel()
 
+    @cached_property
+    def num_param_uses(self) -> int:
+        """
+        Sum of ``param.numel()`` counted once per module that references each ``Parameter``.
+        When parameters are shared across modules (e.g. via :class:`SharedBlockConfig`), each
+        shared ``Parameter`` contributes its size once for each referencing module. For models
+        without parameter sharing this equals :attr:`num_params`. Useful for FLOPs estimation.
+        """
+        return sum(p.numel() for _, p in self.named_parameters(remove_duplicate=False))
+
+    @cached_property
+    def num_non_embedding_param_uses(self) -> int:
+        return self.num_param_uses - self.embeddings.weight.numel()
+
     def num_flops_per_token(self, seq_len: int) -> int:
         """
         Returns the idealized number of flops per token for the given sequence length. Purposefully
@@ -933,6 +1022,7 @@ class NormalizedTransformer(Transformer):
         init_std: float = 0.02,
         embedding_init_std: Optional[float] = None,
         block_overrides: Optional[Dict[int, TransformerBlockConfig]] = None,
+        shared_blocks: Optional[SharedBlockConfig] = None,
     ):
         super().__init__(
             d_model=d_model,
@@ -947,6 +1037,7 @@ class NormalizedTransformer(Transformer):
             init_std=init_std,
             embedding_init_std=embedding_init_std,
             block_overrides=block_overrides,
+            shared_blocks=shared_blocks,
         )
 
     def _validate_block(self, block: TransformerBlockBase) -> TransformerBlockBase:
@@ -1023,10 +1114,18 @@ class MoETransformer(Transformer):
             mean_offset = self._pp_group_size
 
         out: Dict[str, Tuple[torch.Tensor, Optional["ReduceType"]]] = {}
+        seen_moes: Set[int] = set()
         for block_idx, block in self.blocks.items():
             if not block.is_moe:
                 continue
             block = cast(MoETransformerBlock, block)
+            moe_id = id(block.feed_forward_moe)
+            # Compute metrics only once per unique MoE module; otherwise resetting after
+            # the first read would yield zeros for subsequent shared-block iterations,
+            # and globally aggregating already-accumulated state would double-count.
+            if moe_id in seen_moes:
+                continue
+            seen_moes.add(moe_id)
             block_metrics = block.compute_metrics(reset=reset)
             for metric_name, (metric_val, reduce_type) in block_metrics.items():
                 out[f"block {int(block_idx):02d}/{metric_name}"] = (
@@ -1054,17 +1153,28 @@ class MoETransformer(Transformer):
         return out
 
     def reset_auxiliary_metrics(self):
-        for block in self.blocks.values():
-            if not block.is_moe:
-                continue
-            cast(MoETransformerBlock, block).reset_metrics()
-
-    def apply_ep(self, ep_mesh: DeviceMesh, **kwargs):
+        seen_moes: Set[int] = set()
         for block in self.blocks.values():
             if not block.is_moe:
                 continue
             block = cast(MoETransformerBlock, block)
-            block.apply_ep(ep_mesh, **kwargs)
+            moe_id = id(block.feed_forward_moe)
+            if moe_id in seen_moes:
+                continue
+            seen_moes.add(moe_id)
+            block.reset_metrics()
+
+    def apply_ep(self, ep_mesh: DeviceMesh, **kwargs):
+        seen_moes: Set[int] = set()
+        for block in self.blocks.values():
+            if not block.is_moe:
+                continue
+            block = cast(MoETransformerBlock, block)
+            moe_id = id(block.feed_forward_moe)
+            if moe_id not in seen_moes:
+                block.feed_forward_moe.apply_ep(ep_mesh, **kwargs)
+                seen_moes.add(moe_id)
+            block._ep_enabled = True
 
     def prepare_experts_for_fsdp(
         self,
@@ -1073,10 +1183,15 @@ class MoETransformer(Transformer):
         reduce_dtype: torch.dtype = torch.float32,
         pp_enabled: bool = False,
     ):
+        seen_moes: Set[int] = set()
         for block in self.blocks.values():
             if not block.is_moe:
                 continue
             block = cast(MoETransformerBlock, block)
+            moe_id = id(block.feed_forward_moe)
+            if moe_id in seen_moes:
+                continue
+            seen_moes.add(moe_id)
             reshard_after_forward = True
             if pp_enabled or block.ep_enabled or block.tp_enabled:
                 reshard_after_forward = False
@@ -1089,18 +1204,29 @@ class MoETransformer(Transformer):
             )
 
     def prepare_experts_for_ddp(self, world_mesh: DeviceMesh):
-        for block in self.blocks.values():
-            if not block.is_moe:
-                continue
-            cast(MoETransformerBlock, block).feed_forward_moe.prepare_experts_for_ddp(
-                world_mesh=world_mesh,
-            )
-
-    def post_batch(self, dry_run: bool = False):
+        seen_moes: Set[int] = set()
         for block in self.blocks.values():
             if not block.is_moe:
                 continue
             block = cast(MoETransformerBlock, block)
+            moe_id = id(block.feed_forward_moe)
+            if moe_id in seen_moes:
+                continue
+            seen_moes.add(moe_id)
+            block.feed_forward_moe.prepare_experts_for_ddp(
+                world_mesh=world_mesh,
+            )
+
+    def post_batch(self, dry_run: bool = False):
+        seen_moes: Set[int] = set()
+        for block in self.blocks.values():
+            if not block.is_moe:
+                continue
+            block = cast(MoETransformerBlock, block)
+            moe_id = id(block.feed_forward_moe)
+            if moe_id in seen_moes:
+                continue
+            seen_moes.add(moe_id)
             block.feed_forward_moe.post_batch(dry_run=dry_run)
 
 

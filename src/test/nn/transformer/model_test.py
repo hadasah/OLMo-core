@@ -44,6 +44,7 @@ from olmo_core.nn.transformer import (
     TransformerConfig,
     TransformerType,
 )
+from olmo_core.nn.transformer.config import SharedBlockConfig
 from olmo_core.testing import (
     BACKENDS,
     FLASH_2_MARKS,
@@ -673,3 +674,156 @@ def test_qwen3_builder_configs(config_builder, expected_d_model):
     num_actual_params = sum(p.numel() for p in model.parameters())
     assert config.num_params == num_actual_params
     assert model.num_params == num_actual_params
+
+
+def _small_shared_moe_config(
+    *,
+    n_layers: int,
+    shared_blocks: Optional[SharedBlockConfig],
+    d_model: int = 64,
+) -> TransformerConfig:
+    layer_norm = LayerNormConfig(name=LayerNormType.rms, bias=False)
+    block = TransformerBlockConfig(
+        name=TransformerBlockType.moe_reordered_norm,
+        sequence_mixer=AttentionConfig(
+            n_heads=4,
+            rope=RoPEConfig(),
+            bias=False,
+        ),
+        layer_norm=layer_norm,
+        feed_forward_moe=MoEConfig(
+            name=MoEType.dropless,
+            num_experts_list=[4],
+            hidden_sizes_list=[d_model],
+            routers_list=[MoERouterConfig(top_k=2)],
+            lb_loss_weight=0.01,
+            z_loss_weight=0.001,
+        ),
+    )
+    return TransformerConfig(
+        name=TransformerType.moe,
+        d_model=d_model,
+        vocab_size=256,
+        n_layers=n_layers,
+        block=block,
+        lm_head=LMHeadConfig(layer_norm=layer_norm, bias=False),
+        shared_blocks=shared_blocks,
+    )
+
+
+def test_shared_blocks_module_identity():
+    n_layers = 6
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=4, share_routers=True, share_experts=True
+    )
+    config = _small_shared_moe_config(n_layers=n_layers, shared_blocks=sb)
+    model = config.build(init_device="cpu")
+    assert isinstance(model, MoETransformer)
+
+    canonical_moe = model.blocks[str(sb.start_layer)].feed_forward_moe
+    for idx in sb.layer_indices():
+        assert model.blocks[str(idx)].feed_forward_moe is canonical_moe, (
+            f"block {idx} should share feed_forward_moe with block {sb.start_layer}"
+        )
+
+    for idx in range(n_layers):
+        if idx in sb.layer_indices():
+            continue
+        assert model.blocks[str(idx)].feed_forward_moe is not canonical_moe, (
+            f"block {idx} should not share feed_forward_moe (outside shared range)"
+        )
+
+
+def test_shared_blocks_param_count():
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=4, share_routers=True, share_experts=True
+    )
+    config = _small_shared_moe_config(n_layers=6, shared_blocks=sb)
+    model = config.build(init_device="cpu")
+
+    seen_ids: set[int] = set()
+    actual_params = 0
+    for p in model.parameters():
+        if id(p) in seen_ids:
+            continue
+        seen_ids.add(id(p))
+        actual_params += p.numel()
+
+    assert config.num_params == actual_params
+    assert model.num_params == actual_params
+
+    unshared_config = _small_shared_moe_config(n_layers=6, shared_blocks=None)
+    assert config.num_params < unshared_config.num_params
+
+
+def test_shared_blocks_partial_routers_only():
+    sb = SharedBlockConfig(
+        start_layer=0, n_layers=3, share_routers=True, share_experts=False
+    )
+    config = _small_shared_moe_config(n_layers=4, shared_blocks=sb)
+    model = config.build(init_device="cpu")
+
+    canonical_block = model.blocks["0"]
+    for idx in (1, 2):
+        block = model.blocks[str(idx)]
+        assert block.feed_forward_moe.routers_list is canonical_block.feed_forward_moe.routers_list
+        assert block.feed_forward_moe.experts_list is not canonical_block.feed_forward_moe.experts_list
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="MoE kernels require CUDA")
+def test_shared_blocks_forward_backward_grad_accumulates():
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=3, share_routers=True, share_experts=True
+    )
+    config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    device = torch.device("cuda")
+    model = config.build(init_device=device.type)
+    model.init_weights(device=device, max_seq_len=32)
+
+    input_ids = torch.randint(0, config.vocab_size, (2, 16), device=device)
+    logits = model(input_ids=input_ids)
+    logits.sum().backward()
+
+    shared_router = model.blocks[str(sb.start_layer)].feed_forward_moe.routers_list[0]
+    assert shared_router.weight.grad is not None
+    assert torch.isfinite(shared_router.weight.grad).all()
+    assert shared_router.weight.grad.abs().sum() > 0
+
+
+def test_shared_blocks_num_param_uses():
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=4, share_routers=True, share_experts=True
+    )
+    config = _small_shared_moe_config(n_layers=6, shared_blocks=sb)
+    model = config.build(init_device="cpu")
+
+    # Usage-weighted count should match a manual sum walking every (module, param) pair.
+    expected_uses = sum(
+        p.numel() for _, p in model.named_parameters(remove_duplicate=False)
+    )
+    assert model.num_param_uses == expected_uses
+    assert config.num_param_uses == expected_uses
+
+    # With sharing, uses > unique-params; without sharing they're equal.
+    assert config.num_param_uses > config.num_params
+    assert model.num_param_uses > model.num_params
+
+    unshared_config = _small_shared_moe_config(n_layers=6, shared_blocks=None)
+    unshared_model = unshared_config.build(init_device="cpu")
+    assert unshared_config.num_param_uses == unshared_config.num_params
+    assert unshared_model.num_param_uses == unshared_model.num_params
+
+    # And the shared model's uses should match the unshared model's total params
+    # (since sharing only changes physical storage, not the per-layer parameter "usage").
+    assert config.num_param_uses == unshared_config.num_params
+    assert model.num_param_uses == unshared_model.num_params
+
+
+def test_shared_blocks_validates_range():
+    with pytest.raises(Exception):
+        SharedBlockConfig(start_layer=5, n_layers=4, share_routers=True).validate_against(6)
+    with pytest.raises(Exception):
+        SharedBlockConfig(start_layer=0, n_layers=2)
+    with pytest.raises(Exception):
+        SharedBlockConfig(start_layer=0, n_layers=1, share_routers=True)
