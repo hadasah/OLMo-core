@@ -2,12 +2,11 @@
 """
 
 import argparse
-import sys
 import os
 import logging
 import traceback
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, cast, Optional
 
 import numpy as np
@@ -26,9 +25,7 @@ from olmo_core.data import (
 from olmo_core.data.source_mixture import SourceMixtureConfig, SourceMixtureList, SourceMixtureDatasetConfig
 from olmo_core.io import get_file_size
 from olmo_core.distributed.parallel import DataParallelType
-from olmo_core.distributed.utils import get_world_size
 from olmo_core.nn.transformer import (
-    TransformerActivationCheckpointingMode,
     TransformerConfig,
 )
 from olmo_core.optim import CosWithWarmup, OptimGroupOverride, AdamWConfig, WSD
@@ -48,7 +45,6 @@ from olmo_core.train.callbacks import (
     WandBCallback,
 )
 from olmo_core.train.train_module import (
-    TransformerActivationCheckpointingConfig,
     TransformerDataParallelConfig,
     TransformerDataParallelWrappingStrategy,
     TransformerTrainModuleConfig,

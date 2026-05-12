@@ -11,7 +11,6 @@ import json
 import os
 import random
 import subprocess
-import sys
 from utils import dict_update, has_file_been_modified_recently
 
 RANDOM_PORT_MIN = 10000
@@ -256,7 +255,7 @@ def run_grid(
             if value is None or isinstance(value, collections.abc.Mapping):
                 continue
             short_key = key.replace("_", "").split('.')[-1] if '.' in key else key
-            if type(value) == str:
+            if isinstance(value, str):
                 value = value.replace('_', '')
                 if ' ' in value:
                     value = value.replace(' --', '_').replace(' -', '_')

@@ -3,7 +3,6 @@ Official training script for OLMo-2-0325-32B, meant to be launched with torchrun
 """
 
 import sys
-import os
 import logging
 import traceback
 from dataclasses import dataclass

@@ -23,12 +23,9 @@ import argparse
 import json
 import logging
 import os
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import torch
-import torch.nn.functional as F
-import numpy as np
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
@@ -37,7 +34,6 @@ log = logging.getLogger(__name__)
 def load_model_from_checkpoint(checkpoint_path: str, device: str = "cpu"):
     """Load a model from an OLMo-core checkpoint directory."""
     from olmo_core.nn.transformer import TransformerConfig
-    from olmo_core.train import TrainerConfig
 
     config_path = os.path.join(checkpoint_path, "config.json")
     if not os.path.exists(config_path):
