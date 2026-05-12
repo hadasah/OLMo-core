@@ -693,9 +693,19 @@ class Transformer(nn.Module):
             )
 
         # Apply tensor/sequence parallelism to every transformer block.
+        # Threading a shared `seen` set across blocks ensures that submodules
+        # aliased by `shared_blocks` (attention, norms, feed_forward_moe) are
+        # parallelized exactly once. Calling `parallelize_module` twice on the
+        # same module corrupts DTensor placement state.
+        seen_tp_modules: Set[int] = set()
         for block in self.blocks.values():
             block = cast(TransformerBlockBase, block)
-            block.apply_tp(tp_mesh, input_layout=Shard(1), float8_enabled=float8_enabled)
+            block.apply_tp(
+                tp_mesh,
+                input_layout=Shard(1),
+                float8_enabled=float8_enabled,
+                skip_modules=seen_tp_modules,
+            )
 
         if self.lm_head is not None:
             self.lm_head.apply_tp(tp_mesh, input_layouts=(Shard(1), Replicate()))
@@ -721,8 +731,12 @@ class Transformer(nn.Module):
         elif uly is not None:
             self._cp_load_balancer = uly.load_balancer.build(cp_mesh)
 
+        # Dedup shared submodules across blocks — see comment in apply_tp.
+        seen_cp_modules: Set[int] = set()
         for block in self.blocks.values():
-            cast(TransformerBlockBase, block).apply_cp(cp_mesh, ring=ring, uly=uly)
+            cast(TransformerBlockBase, block).apply_cp(
+                cp_mesh, ring=ring, uly=uly, skip_modules=seen_cp_modules
+            )
         if self.lm_head is not None:
             self.lm_head.apply_cp(cp_mesh)
 

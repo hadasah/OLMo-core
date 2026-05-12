@@ -1,6 +1,6 @@
 import math
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Dict, Optional, Set, Tuple, Union, cast
 
 import torch
 import torch.nn as nn
@@ -61,8 +61,23 @@ class TransformerBlockBase(nn.Module):
 
     @abstractmethod
     def apply_tp(
-        self, tp_mesh: DeviceMesh, *, input_layout: Placement, float8_enabled: bool = False
+        self,
+        tp_mesh: DeviceMesh,
+        *,
+        input_layout: Placement,
+        float8_enabled: bool = False,
+        skip_modules: Optional[Set[int]] = None,
     ):
+        """
+        Apply tensor parallelism to this block.
+
+        :param skip_modules: A set of ``id(submodule)`` values that have already been
+            parallelized (e.g., because they are physically shared with an earlier
+            block). When ``id(submodule) in skip_modules``, the corresponding inner
+            ``apply_tp`` / ``parallelize_module`` call is skipped to avoid corrupting
+            DTensor state. Implementations should add the ``id`` of each inner
+            submodule they parallelize to the set.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -71,7 +86,13 @@ class TransformerBlockBase(nn.Module):
         cp_mesh: DeviceMesh,
         ring: Optional[RingContextParallelStyle] = None,
         uly: Optional[UlyssesContextParallelStyle] = None,
+        skip_modules: Optional[Set[int]] = None,
     ):
+        """
+        Apply context parallelism to this block.
+
+        :param skip_modules: See :meth:`apply_tp`; same contract.
+        """
         raise NotImplementedError
 
     def apply_compile(self):
@@ -152,8 +173,19 @@ class TransformerBlock(TransformerBlockBase):
         return self.feed_forward_residual_stream(h, self.feed_forward(self.feed_forward_norm(h)))
 
     def apply_tp(
-        self, tp_mesh: DeviceMesh, *, input_layout: Placement, float8_enabled: bool = False
+        self,
+        tp_mesh: DeviceMesh,
+        *,
+        input_layout: Placement,
+        float8_enabled: bool = False,
+        skip_modules: Optional[Set[int]] = None,
     ):
+        # The block itself is always unique per-block (sharing aliases submodules,
+        # not blocks), so the outer `parallelize_module(self, ...)` call is safe.
+        # Only inner submodules can be shared (attention, norms, feed_forward_moe);
+        # those are gated on `skip_modules` to avoid double-parallelizing.
+        skip_modules = skip_modules if skip_modules is not None else set()
+
         parallelize_module(
             self,
             device_mesh=tp_mesh,
@@ -163,32 +195,40 @@ class TransformerBlock(TransformerBlockBase):
             ),
         )
 
-        parallelize_module(
-            self.attention_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
-        )
+        if id(self.attention_norm) not in skip_modules:
+            skip_modules.add(id(self.attention_norm))
+            parallelize_module(
+                self.attention_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
+            )
         parallelize_module(
             self.attention_residual_stream.dropout,
             device_mesh=tp_mesh,
             parallelize_plan=SequenceParallel(),
         )
 
-        self.attention.apply_tp(
-            tp_mesh,
-            input_layout=Shard(1),
-            output_layout=Shard(1),
-            use_local_output=False,
-            float8_enabled=float8_enabled,
-        )
+        if id(self.attention) not in skip_modules:
+            skip_modules.add(id(self.attention))
+            self.attention.apply_tp(
+                tp_mesh,
+                input_layout=Shard(1),
+                output_layout=Shard(1),
+                use_local_output=False,
+                float8_enabled=float8_enabled,
+            )
 
-        parallelize_module(
-            self.feed_forward_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
-        )
+        if id(self.feed_forward_norm) not in skip_modules:
+            skip_modules.add(id(self.feed_forward_norm))
+            parallelize_module(
+                self.feed_forward_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
+            )
         parallelize_module(
             self.feed_forward_residual_stream.dropout,
             device_mesh=tp_mesh,
             parallelize_plan=SequenceParallel(),
         )
 
+        # `self.feed_forward` (the dense FF) is not shareable via SharedBlockConfig
+        # today — no `share_feed_forward` flag exists — so no gating needed.
         self.feed_forward.apply_tp(
             tp_mesh,
             input_layout=Shard(1),
@@ -202,8 +242,12 @@ class TransformerBlock(TransformerBlockBase):
         cp_mesh: DeviceMesh,
         ring: Optional[RingContextParallelStyle] = None,
         uly: Optional[UlyssesContextParallelStyle] = None,
+        skip_modules: Optional[Set[int]] = None,
     ):
-        self.attention.apply_cp(cp_mesh, ring=ring, uly=uly)
+        skip_modules = skip_modules if skip_modules is not None else set()
+        if id(self.attention) not in skip_modules:
+            skip_modules.add(id(self.attention))
+            self.attention.apply_cp(cp_mesh, ring=ring, uly=uly)
 
     def apply_fsdp(
         self,
@@ -360,9 +404,21 @@ class PeriNormTransformerBlock(TransformerBlock):
         )
 
     def apply_tp(
-        self, tp_mesh: DeviceMesh, *, input_layout: Placement, float8_enabled: bool = False
+        self,
+        tp_mesh: DeviceMesh,
+        *,
+        input_layout: Placement,
+        float8_enabled: bool = False,
+        skip_modules: Optional[Set[int]] = None,
     ):
-        super().apply_tp(tp_mesh, input_layout=input_layout, float8_enabled=float8_enabled)
+        super().apply_tp(
+            tp_mesh,
+            input_layout=input_layout,
+            float8_enabled=float8_enabled,
+            skip_modules=skip_modules,
+        )
+        # post_attention_norm / post_feed_forward_norm aren't in the SharedBlockConfig
+        # surface today — they're always block-unique, so no gating needed.
         parallelize_module(
             self.post_feed_forward_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
         )
@@ -446,9 +502,14 @@ class NormalizedTransformerBlock(TransformerBlockBase):
         )
 
     def apply_tp(
-        self, tp_mesh: DeviceMesh, *, input_layout: Placement, float8_enabled: bool = False
+        self,
+        tp_mesh: DeviceMesh,
+        *,
+        input_layout: Placement,
+        float8_enabled: bool = False,
+        skip_modules: Optional[Set[int]] = None,
     ):
-        del tp_mesh, input_layout, float8_enabled
+        del tp_mesh, input_layout, float8_enabled, skip_modules
 
         raise NotImplementedError(
             "TP is not implemented yet for the normalized transformer block variant"
@@ -459,8 +520,12 @@ class NormalizedTransformerBlock(TransformerBlockBase):
         cp_mesh: DeviceMesh,
         ring: Optional[RingContextParallelStyle] = None,
         uly: Optional[UlyssesContextParallelStyle] = None,
+        skip_modules: Optional[Set[int]] = None,
     ):
-        self.attention.apply_cp(cp_mesh, ring=ring, uly=uly)
+        skip_modules = skip_modules if skip_modules is not None else set()
+        if id(self.attention) not in skip_modules:
+            skip_modules.add(id(self.attention))
+            self.attention.apply_cp(cp_mesh, ring=ring, uly=uly)
 
     def apply_fsdp(
         self,
@@ -602,8 +667,16 @@ class MoETransformerBlock(TransformerBlockBase):
         self._ep_enabled = True
 
     def apply_tp(
-        self, tp_mesh: DeviceMesh, *, input_layout: Placement, float8_enabled: bool = False
+        self,
+        tp_mesh: DeviceMesh,
+        *,
+        input_layout: Placement,
+        float8_enabled: bool = False,
+        skip_modules: Optional[Set[int]] = None,
     ):
+        skip_modules = skip_modules if skip_modules is not None else set()
+
+        # The block itself is always unique (sharing aliases submodules, not blocks).
         parallelize_module(
             self,
             device_mesh=tp_mesh,
@@ -613,29 +686,37 @@ class MoETransformerBlock(TransformerBlockBase):
             ),
         )
 
-        parallelize_module(
-            self.attention_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
-        )
+        if id(self.attention_norm) not in skip_modules:
+            skip_modules.add(id(self.attention_norm))
+            parallelize_module(
+                self.attention_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
+            )
 
-        self.attention.apply_tp(
-            tp_mesh,
-            input_layout=Shard(1),
-            output_layout=Shard(1),
-            use_local_output=False,
-            float8_enabled=float8_enabled,
-        )
+        if id(self.attention) not in skip_modules:
+            skip_modules.add(id(self.attention))
+            self.attention.apply_tp(
+                tp_mesh,
+                input_layout=Shard(1),
+                output_layout=Shard(1),
+                use_local_output=False,
+                float8_enabled=float8_enabled,
+            )
 
-        parallelize_module(
-            self.feed_forward_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
-        )
+        if id(self.feed_forward_norm) not in skip_modules:
+            skip_modules.add(id(self.feed_forward_norm))
+            parallelize_module(
+                self.feed_forward_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
+            )
 
-        self.feed_forward_moe.apply_tp(
-            tp_mesh,
-            input_layout=Shard(1),
-            output_layout=Shard(1),
-            use_local_output=False,
-            float8_enabled=float8_enabled,
-        )
+        if id(self.feed_forward_moe) not in skip_modules:
+            skip_modules.add(id(self.feed_forward_moe))
+            self.feed_forward_moe.apply_tp(
+                tp_mesh,
+                input_layout=Shard(1),
+                output_layout=Shard(1),
+                use_local_output=False,
+                float8_enabled=float8_enabled,
+            )
 
         parallelize_module(self.dropout, device_mesh=tp_mesh, parallelize_plan=SequenceParallel())
 
@@ -646,9 +727,15 @@ class MoETransformerBlock(TransformerBlockBase):
         cp_mesh: DeviceMesh,
         ring: Optional[RingContextParallelStyle] = None,
         uly: Optional[UlyssesContextParallelStyle] = None,
+        skip_modules: Optional[Set[int]] = None,
     ):
-        self.attention.apply_cp(cp_mesh, ring=ring, uly=uly)
-        self.feed_forward_moe.apply_cp(cp_mesh)
+        skip_modules = skip_modules if skip_modules is not None else set()
+        if id(self.attention) not in skip_modules:
+            skip_modules.add(id(self.attention))
+            self.attention.apply_cp(cp_mesh, ring=ring, uly=uly)
+        if id(self.feed_forward_moe) not in skip_modules:
+            skip_modules.add(id(self.feed_forward_moe))
+            self.feed_forward_moe.apply_cp(cp_mesh)
 
     def apply_fsdp(
         self,
@@ -803,10 +890,22 @@ class MoEHybridTransformerBlockBase(MoETransformerBlock):
             return self.combined_forward(x, loss_div_factor=loss_div_factor, **kwargs)
 
     def apply_tp(
-        self, tp_mesh: DeviceMesh, *, input_layout: Placement, float8_enabled: bool = False
+        self,
+        tp_mesh: DeviceMesh,
+        *,
+        input_layout: Placement,
+        float8_enabled: bool = False,
+        skip_modules: Optional[Set[int]] = None,
     ):
-        super().apply_tp(tp_mesh, input_layout=input_layout, float8_enabled=float8_enabled)
+        super().apply_tp(
+            tp_mesh,
+            input_layout=input_layout,
+            float8_enabled=float8_enabled,
+            skip_modules=skip_modules,
+        )
 
+        # `feed_forward` (dense) and `feed_forward_moe_norm` are block-unique today —
+        # no SharedBlockConfig flag covers them — so no gating needed.
         self.feed_forward.apply_tp(
             tp_mesh,
             output_layout=Shard(1),

@@ -900,6 +900,116 @@ def test_shared_blocks_init_called_once_per_shared_submodule():
     )
 
 
+def test_shared_blocks_apply_tp_dedup():
+    """
+    With shared_blocks, inner submodules (attention, norms, feed_forward_moe) are
+    aliased across multiple blocks. parallelize_module/apply_tp must only run once
+    per unique submodule — calling it twice corrupts DTensor placement state.
+    Patch out the actual TP calls so we can run on CPU and count invocations by id().
+    """
+    import unittest.mock as mock
+    import olmo_core.nn.transformer.block as block_mod
+    import olmo_core.nn.transformer.model as model_mod
+
+    sb = SharedBlockConfig(
+        start_layer=1,
+        n_layers=3,
+        share_routers=True,
+        share_experts=True,
+        share_attention=True,
+        share_norms=True,
+    )
+    config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    model = config.build(init_device="cpu")
+
+    parallelize_targets: list[int] = []
+    inner_apply_tp_targets: list[int] = []
+
+    def record_parallelize(module, **kw):  # noqa: ARG001
+        parallelize_targets.append(id(module))
+        return module
+
+    def record_apply_tp(self, *_a, **_kw):
+        inner_apply_tp_targets.append(id(self))
+
+    # Capture id()s before patching (after patching, the model still references the
+    # same objects, but we want to record what the live model points to right now).
+    shared_attn_id = id(model.blocks[str(sb.start_layer)].attention)
+    shared_moe_id = id(model.blocks[str(sb.start_layer)].feed_forward_moe)
+    shared_attn_norm_id = id(model.blocks[str(sb.start_layer)].attention_norm)
+    shared_ff_norm_id = id(model.blocks[str(sb.start_layer)].feed_forward_norm)
+
+    attention_cls = type(model.blocks["0"].attention)
+    moe_cls = type(model.blocks["0"].feed_forward_moe)
+    lm_head_cls = type(model.lm_head)
+
+    with mock.patch.object(block_mod, "parallelize_module", side_effect=record_parallelize), \
+         mock.patch.object(model_mod, "parallelize_module", side_effect=record_parallelize), \
+         mock.patch.object(attention_cls, "apply_tp", record_apply_tp), \
+         mock.patch.object(moe_cls, "apply_tp", record_apply_tp), \
+         mock.patch.object(lm_head_cls, "apply_tp", lambda *a, **kw: None):
+        fake_mesh = mock.MagicMock()
+        model.apply_tp(fake_mesh)
+
+    # Each shared submodule should be touched exactly once across all blocks.
+    assert inner_apply_tp_targets.count(shared_attn_id) == 1, (
+        f"shared attention parallelized {inner_apply_tp_targets.count(shared_attn_id)} times "
+        f"(expected 1)"
+    )
+    assert inner_apply_tp_targets.count(shared_moe_id) == 1
+    assert parallelize_targets.count(shared_attn_norm_id) == 1
+    assert parallelize_targets.count(shared_ff_norm_id) == 1
+
+    # Sanity: the n_layers non-shared blocks (block 0 and block 4) should each have
+    # their own unique attention/norm — those get parallelized exactly once too.
+    non_shared_attn_id = id(model.blocks["0"].attention)
+    assert non_shared_attn_id != shared_attn_id
+    assert inner_apply_tp_targets.count(non_shared_attn_id) == 1
+
+
+def test_shared_blocks_apply_cp_dedup():
+    """
+    Same idea as apply_tp dedup but for context parallelism: shared attention /
+    feed_forward_moe should have apply_cp invoked exactly once.
+    """
+    import unittest.mock as mock
+
+    sb = SharedBlockConfig(
+        start_layer=1,
+        n_layers=3,
+        share_routers=True,
+        share_experts=True,
+        share_attention=True,
+    )
+    config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    model = config.build(init_device="cpu")
+
+    inner_apply_cp_targets: list[int] = []
+
+    def record_apply_cp(self, *_a, **_kw):
+        inner_apply_cp_targets.append(id(self))
+
+    shared_attn_id = id(model.blocks[str(sb.start_layer)].attention)
+    shared_moe_id = id(model.blocks[str(sb.start_layer)].feed_forward_moe)
+
+    attention_cls = type(model.blocks["0"].attention)
+    moe_cls = type(model.blocks["0"].feed_forward_moe)
+    lm_head_cls = type(model.lm_head)
+
+    with mock.patch.object(attention_cls, "apply_cp", record_apply_cp), \
+         mock.patch.object(moe_cls, "apply_cp", record_apply_cp), \
+         mock.patch.object(lm_head_cls, "apply_cp", lambda *a, **kw: None):
+        fake_mesh = mock.MagicMock()
+        model.apply_cp(fake_mesh)
+
+    assert inner_apply_cp_targets.count(shared_attn_id) == 1
+    assert inner_apply_cp_targets.count(shared_moe_id) == 1
+
+    non_shared_attn_id = id(model.blocks["0"].attention)
+    assert non_shared_attn_id != shared_attn_id
+    assert inner_apply_cp_targets.count(non_shared_attn_id) == 1
+
+
 def test_shared_blocks_validates_range():
     with pytest.raises(Exception):
         SharedBlockConfig(start_layer=5, n_layers=4, share_routers=True).validate_against(6)
