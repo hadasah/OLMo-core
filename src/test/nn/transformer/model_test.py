@@ -1010,6 +1010,150 @@ def test_shared_blocks_apply_cp_dedup():
     assert inner_apply_cp_targets.count(non_shared_attn_id) == 1
 
 
+def test_shared_blocks_state_dict_dedups_alias_paths():
+    """
+    state_dict() should emit only the canonical (lowest-block-index) path for each
+    Parameter aliased via shared_blocks, not N copies. The total key count drops
+    by (n_layers_shared - 1) * (number of submodule paths shared per layer).
+    """
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=4, share_routers=True, share_experts=True
+    )
+    config = _small_shared_moe_config(n_layers=6, shared_blocks=sb)
+    model = config.build(init_device="cpu")
+
+    sd = model.state_dict()
+
+    # No keys for the aliased blocks' MoE submodule should remain.
+    for alias_idx in (2, 3, 4):
+        alias_prefix = f"blocks.{alias_idx}.feed_forward_moe."
+        leaked = [k for k in sd if k.startswith(alias_prefix)]
+        assert not leaked, (
+            f"alias block {alias_idx} should have no feed_forward_moe keys in state_dict, "
+            f"got: {leaked[:3]}..."
+        )
+
+    # The canonical block's MoE keys MUST be present.
+    canonical_prefix = f"blocks.{sb.start_layer}.feed_forward_moe."
+    canonical_keys = [k for k in sd if k.startswith(canonical_prefix)]
+    assert canonical_keys, "canonical block's MoE keys should be present in state_dict"
+
+    # Sanity: an unshared model has all the alias keys.
+    unshared_config = _small_shared_moe_config(n_layers=6, shared_blocks=None)
+    unshared_sd = unshared_config.build(init_device="cpu").state_dict()
+    assert any(k.startswith("blocks.2.feed_forward_moe.") for k in unshared_sd)
+    assert len(sd) < len(unshared_sd)
+
+
+def test_shared_blocks_state_dict_roundtrip():
+    """
+    Save a shared-blocks model's state_dict, load it back into a fresh shared-blocks
+    model with the same config, and assert weights are bitwise identical.
+    """
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=3, share_routers=True, share_experts=True
+    )
+    config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    model_a = config.build(init_device="cpu")
+    model_a.init_weights(device=torch.device("cpu"))
+
+    sd = model_a.state_dict()
+    # Fresh model with same config.
+    model_b = config.build(init_device="cpu")
+    model_b.init_weights(device=torch.device("cpu"))
+
+    result = model_b.load_state_dict(sd, strict=True)
+    assert not result.missing_keys, f"unexpected missing keys: {result.missing_keys[:5]}"
+    assert not result.unexpected_keys, f"unexpected extra keys: {result.unexpected_keys[:5]}"
+
+    # All parameters identical after round-trip.
+    for (name, pa), (_, pb) in zip(
+        model_a.named_parameters(), model_b.named_parameters()
+    ):
+        assert torch.equal(pa, pb), f"mismatch at {name}"
+
+
+def test_shared_blocks_load_raises_on_disagreeing_unshared_source():
+    """
+    Loading an unshared checkpoint into a shared-blocks model is ambiguous: the
+    source has distinct per-layer weights for what's now a single Parameter. We
+    should raise with a clear message rather than silently picking last-write-wins.
+    """
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=3, share_routers=True, share_experts=True
+    )
+    # Source: unshared model with the same overall shape.
+    unshared_config = _small_shared_moe_config(n_layers=5, shared_blocks=None)
+    source_model = unshared_config.build(init_device="cpu")
+    source_model.init_weights(device=torch.device("cpu"))
+    source_sd = source_model.state_dict()
+
+    # Target: shared-blocks model.
+    target_config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    target_model = target_config.build(init_device="cpu")
+    target_model.init_weights(device=torch.device("cpu"))
+
+    # The source has distinct per-layer values for blocks 1, 2, 3's MoE (because it
+    # was init'd as an unshared model with depth-scaled init independent per layer).
+    # Target's load_state_dict should detect the disagreement and raise.
+    with pytest.raises(RuntimeError, match="differing per-layer values"):
+        target_model.load_state_dict(source_sd)
+
+
+def test_shared_blocks_load_accepts_agreeing_alias_keys():
+    """
+    If the source state_dict has multiple alias keys but their values agree (e.g.
+    saved before the dedup fix landed), loading should succeed without raising.
+    """
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=3, share_routers=True, share_experts=True
+    )
+    config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    model_a = config.build(init_device="cpu")
+    model_a.init_weights(device=torch.device("cpu"))
+
+    # Produce a pre-dedup state_dict by walking with remove_duplicate=False.
+    legacy_sd = {
+        name: p.detach().clone()
+        for name, p in model_a.named_parameters(remove_duplicate=False)
+    }
+    legacy_sd.update(
+        {name: b.detach().clone() for name, b in model_a.named_buffers(remove_duplicate=False)}
+    )
+
+    model_b = config.build(init_device="cpu")
+    model_b.init_weights(device=torch.device("cpu"))
+    # Should not raise — all alias values agree.
+    model_b.load_state_dict(legacy_sd, strict=True)
+
+    for (name, pa), (_, pb) in zip(
+        model_a.named_parameters(), model_b.named_parameters()
+    ):
+        assert torch.equal(pa, pb), f"mismatch at {name}"
+
+
+def test_shared_blocks_none_state_dict_is_passthrough():
+    """
+    When shared_blocks is None, state_dict and load_state_dict should behave
+    identically to base nn.Module behavior.
+    """
+    config = _small_shared_moe_config(n_layers=4, shared_blocks=None)
+    model = config.build(init_device="cpu")
+    model.init_weights(device=torch.device("cpu"))
+
+    sd = model.state_dict()
+    # No dedup happened — every block has its own MoE keys.
+    for i in range(4):
+        assert any(k.startswith(f"blocks.{i}.feed_forward_moe.") for k in sd)
+
+    # Round-trip still works.
+    fresh = config.build(init_device="cpu")
+    fresh.init_weights(device=torch.device("cpu"))
+    fresh.load_state_dict(sd, strict=True)
+    for (name, pa), (_, pb) in zip(model.named_parameters(), fresh.named_parameters()):
+        assert torch.equal(pa, pb), f"mismatch at {name}"
+
+
 def test_shared_blocks_validates_range():
     with pytest.raises(Exception):
         SharedBlockConfig(start_layer=5, n_layers=4, share_routers=True).validate_against(6)

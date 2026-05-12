@@ -183,3 +183,108 @@ I had to update `apply_tp` / `apply_cp` on every class that overrides them:
 - `src/olmo_core/nn/transformer/block.py` — added `skip_modules: Optional[Set[int]] = None` kwarg to the abstract `apply_tp` / `apply_cp` signatures; gated inner-submodule calls in `TransformerBlock`, `PeriNormTransformerBlock`, `NormalizedTransformerBlock`, `MoETransformerBlock`, `MoEHybridTransformerBlockBase`.
 - `src/olmo_core/nn/transformer/model.py` — `Transformer.apply_tp` and `Transformer.apply_cp` build a `seen_*_modules: Set[int]` and thread it through each `block.apply_*` call.
 - `src/test/nn/transformer/model_test.py` — `test_shared_blocks_apply_tp_dedup` and `test_shared_blocks_apply_cp_dedup`, both monkey-patching `parallelize_module` / `attention.apply_tp` / `feed_forward_moe.apply_tp` to record calls by `id()` and asserting each shared submodule is touched exactly once across all blocks.
+
+---
+
+## TODO #3 — `state_dict` deduplication
+
+### The two problems
+
+When the same `nn.Parameter` is referenced by N module paths (i.e. aliased via `SharedBlockConfig`), PyTorch's default `state_dict()` emits **one key per path** — not one key per Parameter. So a model with `share_routers=True, share_experts=True` over four layers has four entries in `state_dict()` for each shared expert weight, all pointing to the same tensor data. Two concrete consequences:
+
+1. **Checkpoint bloat.** The serialized file stores the shared expert weights N times. For a real MoE with most of the mass in experts, this can multiply checkpoint size by 3–4×.
+
+2. **Silent winner on load.** `load_state_dict` walks every key in the input dict and calls `param.data.copy_(value)` for each. For shared params, the same Parameter is "loaded" N times. If you load an unshared pretrained checkpoint into a sharing-enabled model — a natural warm-start workflow — the source dict has N **different** values (one per layer) for what's now a single Parameter. Last write wins, silently. N−1 of the source's per-layer weights are silently discarded with no warning.
+
+### What about DCP?
+
+OLMo-core's distributed-checkpoint path (`save_model_and_optim_state` / `load_model_and_optim_state`) calls `dist_cp_sd.get_model_state_dict(model)` which internally calls `model.state_dict()` — and `set_model_state_dict(model, sd)` which calls `model.load_state_dict(sd)`. So overriding the model-level methods is enough; DCP picks up the dedup transparently. The DCP planner does have a `dedup_save_to_lowest_rank=True` flag, but that only dedups **replicated DTensors across ranks**, not **aliased Parameters within a single rank** — those are independent concerns.
+
+### The fix: two overrides + a helper
+
+**Helper: `Transformer._shared_tensor_paths_map`.** Builds `{id(tensor): [path_canonical, path_alias_1, ...]}` by walking `self.named_parameters(remove_duplicate=False)` and `self.named_buffers(remove_duplicate=False)` and grouping by Python `id()`. The encounter order matters: `self.blocks` is a `nn.ModuleDict` keyed `'0', '1', '2', ...` inserted in numerical block-index order, so the first path encountered for any shared tensor corresponds to the lowest `block_idx` in the shared range — i.e. the canonical path. We don't sort; we rely on PyTorch's deterministic walk order. Tensors reached via exactly one path are filtered out, so the map only contains the "shared" cases.
+
+**Save override: `Transformer.state_dict`.** Calls `super().state_dict(*args, **kwargs)` to let PyTorch build the full state dict normally (with duplicate keys), then post-processes: for every shared tensor, drop all alias paths and keep only the canonical one. Honors the `prefix` kwarg when computing the key to drop, so the override works correctly when called by a parent module with a non-empty prefix.
+
+```python
+def state_dict(self, *args, **kwargs):
+    sd = super().state_dict(*args, **kwargs)
+    if self.shared_blocks is None:
+        return sd
+    shared = self._shared_tensor_paths_map()
+    if not shared:
+        return sd
+    prefix = kwargs.get("prefix", "")
+    for _, paths in shared.items():
+        _canonical, *aliases = paths
+        for alias in aliases:
+            sd.pop(f"{prefix}{alias}", None)
+    return sd
+```
+
+**Load override: `Transformer.load_state_dict`.** Two jobs:
+
+1. **Detect disagreement.** If the source dict has values at multiple alias paths and those values differ, raise `RuntimeError` with a message that calls out the situation explicitly ("pick a warm-start strategy"). This is what catches the silent-winner-on-load case.
+
+2. **Fan out canonical → aliases before calling super.** PyTorch's recursive `_load_from_state_dict` walks the module tree depth-first; for every submodule at path `blocks.K.feed_forward_moe.*`, it expects a state-dict entry with that exact prefix. After our save-side dedup, the saved dict only contains the canonical path — so loading into a fresh shared-blocks model would, under `strict=True`, report `blocks.{2,3,4}.feed_forward_moe.*` as missing. Solution: before delegating, we copy the canonical value into every alias slot in a shallow-copied dict. PyTorch then sees a "full" state dict and validates fine. The Parameter is shared so the multiple writes all land on the same data — harmless and correct.
+
+```python
+def load_state_dict(self, state_dict, strict=True, **kwargs):
+    if self.shared_blocks is None:
+        return super().load_state_dict(state_dict, strict=strict, **kwargs)
+    shared = self._shared_tensor_paths_map()
+    if not shared:
+        return super().load_state_dict(state_dict, strict=strict, **kwargs)
+
+    sd = OrderedDict(state_dict)
+    metadata = getattr(state_dict, "_metadata", None)
+    if metadata is not None:
+        sd._metadata = metadata
+
+    for _, paths in shared.items():
+        canonical, *aliases = paths
+        present = [p for p in paths if p in sd]
+        if not present:
+            continue
+        if len(present) > 1:
+            ref = sd[present[0]]
+            for p in present[1:]:
+                if not _state_dict_tensors_equal(sd[p], ref):
+                    raise RuntimeError(...)
+        value = sd[present[0]]
+        sd[canonical] = value
+        for a in aliases:
+            sd[a] = value
+    return super().load_state_dict(sd, strict=strict, **kwargs)
+```
+
+### Subtle things that came up
+
+**`dict(state_dict)` vs `OrderedDict(state_dict)`.** PyTorch's state_dict carries a `_metadata` attribute (per-submodule version info used by `_load_from_state_dict`). Plain `dict` doesn't allow attribute assignment, so `dict(state_dict)` drops `_metadata` silently — and worse, attempting `sd._metadata = ...` on a plain dict raises `AttributeError`. Using `OrderedDict` preserves the ability to attach `_metadata`, so version-aware load works correctly. (First version of the fix used `dict(...)`; the first test failure caught this in seconds.)
+
+**Tolerant equality for the disagreement check.** Comparing tensors during load needs to handle shape mismatches, dtype mismatches, and DTensors. `torch.equal` raises on shape mismatch and may behave unexpectedly on DTensors. `_state_dict_tensors_equal` wraps `torch.equal` in try/except and returns `False` on any failure — a deliberately conservative choice so the disagreement raise fires loudly when in doubt, rather than silently allowing corruption. DTensor support is a follow-up.
+
+**Why first-encountered is canonical.** When `start_layer=8, n_layers=3`, alphabetical sort would order paths as `blocks.10... < blocks.8... < blocks.9...` and we'd pick the wrong canonical. Insertion-order traversal correctly picks block 8 because `self.blocks['8']` was inserted before `'9'` and `'10'`. So we don't sort — we rely on PyTorch's stable walk order, which matches our intent.
+
+**`load_state_dict` doesn't get a `prefix` kwarg.** Unlike `state_dict`, the load path's recursive walk is internal to PyTorch's implementation; the public method is called once with a complete top-level state dict. So the load override doesn't need to handle a prefix — it operates on absolute paths matching `named_parameters`.
+
+### Round-trip directions
+
+| Source         | Target          | Behavior                                                                                            |
+|----------------|-----------------|-----------------------------------------------------------------------------------------------------|
+| Shared (new)   | Shared (new)    | Canonical-only save round-trips cleanly; load fans out to alias paths to satisfy `strict=True`.     |
+| Shared (new)   | Unshared        | Source has only canonical keys; target's default `load_state_dict` reports missing alias keys under `strict=True`. The user should explicitly fan out, or load with `strict=False`. Not handled here. |
+| Unshared       | Shared (new)    | If unshared source has per-layer differences for what's now shared — the typical warm-start case — `RuntimeError` is raised with a clear message. If they happen to agree (e.g. an old shared-saved checkpoint pre-dedup), loads cleanly.       |
+| Shared (old)*  | Shared (new)    | Source has full alias keys with agreeing values; load detects agreement, fans out, loads cleanly. |
+
+*"Shared (old)" = a hypothetical checkpoint saved before this dedup fix landed, where alias keys all exist and carry identical values.
+
+### Files touched
+
+- `src/olmo_core/nn/transformer/model.py` — added `_shared_tensor_paths_map`, overrode `state_dict` and `load_state_dict` on `Transformer`, added module-level `_state_dict_tensors_equal` helper, imported `OrderedDict`.
+- `src/test/nn/transformer/model_test.py` — five new tests:
+  - `test_shared_blocks_state_dict_dedups_alias_paths` — saved dict has only canonical keys; total key count is smaller than an equivalent unshared model.
+  - `test_shared_blocks_state_dict_roundtrip` — save shared → load shared → parameters bitwise identical.
+  - `test_shared_blocks_load_raises_on_disagreeing_unshared_source` — loading an unshared init'd checkpoint into a shared model raises `RuntimeError`.
+  - `test_shared_blocks_load_accepts_agreeing_alias_keys` — legacy pre-dedup-style dict (all alias keys present, agreeing) loads cleanly.
+  - `test_shared_blocks_none_state_dict_is_passthrough` — overrides are no-ops when `shared_blocks is None`.

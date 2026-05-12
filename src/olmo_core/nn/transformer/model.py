@@ -1,5 +1,5 @@
 import logging
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from functools import cached_property
 from typing import (
     TYPE_CHECKING,
@@ -1002,6 +1002,106 @@ class Transformer(nn.Module):
     def num_non_embedding_param_uses(self) -> int:
         return self.num_param_uses - self.embeddings.weight.numel()
 
+    def _shared_tensor_paths_map(self) -> Dict[int, List[str]]:
+        """
+        For every parameter and buffer reachable via more than one module path (i.e.,
+        aliased by :class:`SharedBlockConfig`), return ``{id(tensor): [path_canonical,
+        path_alias_1, ...]}`` with paths in module-tree encounter order. Tensors that
+        are reachable under exactly one path are excluded.
+
+        ``named_parameters`` / ``named_buffers`` walk ``_modules`` in insertion order,
+        and ``self.blocks`` is a ``ModuleDict`` built in numerical block-index order,
+        so the first path encountered for a shared tensor corresponds to the lowest
+        ``block_idx`` in the shared range — i.e., the canonical path.
+        """
+        by_id: Dict[int, List[str]] = {}
+        for name, p in self.named_parameters(remove_duplicate=False):
+            by_id.setdefault(id(p), []).append(name)
+        for name, b in self.named_buffers(remove_duplicate=False):
+            by_id.setdefault(id(b), []).append(name)
+        return {tid: paths for tid, paths in by_id.items() if len(paths) > 1}
+
+    def state_dict(self, *args, **kwargs):
+        """
+        Override to deduplicate keys aliased by :class:`SharedBlockConfig`. Without
+        this, ``super().state_dict()`` emits one key per module-tree path even when
+        the same ``nn.Parameter`` is referenced by multiple parent modules. The
+        resulting checkpoint would be N× larger than necessary, and loading an
+        unshared checkpoint into a shared model would silently overwrite the shared
+        Parameter N times with last-write-wins semantics.
+
+        We drop the alias entries and keep only the canonical (first-encountered,
+        lowest block-index) path. :meth:`load_state_dict` fans the canonical entry
+        back out to the alias paths so PyTorch's ``strict=True`` walk is satisfied.
+        """
+        sd = super().state_dict(*args, **kwargs)
+        if self.shared_blocks is None:
+            return sd
+        shared = self._shared_tensor_paths_map()
+        if not shared:
+            return sd
+        prefix = kwargs.get("prefix", "")
+        for _, paths in shared.items():
+            _canonical, *aliases = paths
+            for alias in aliases:
+                sd.pop(f"{prefix}{alias}", None)
+        return sd
+
+    def load_state_dict(self, state_dict, strict=True, **kwargs):
+        """
+        Override to handle :class:`SharedBlockConfig`'s aliased Parameters during
+        load. Two responsibilities:
+
+        1. **Detect inconsistent warm-starts.** If the source checkpoint has
+           different per-layer values for what is now a single shared Parameter
+           (typical when loading an unshared pretrained checkpoint into a sharing-
+           enabled model), raise ``RuntimeError``. Otherwise PyTorch would silently
+           load N values into the same Parameter, last-write-wins, with no warning.
+
+        2. **Satisfy strict-mode key checking.** Our :meth:`state_dict` emits only
+           canonical paths. PyTorch's recursive ``_load_from_state_dict`` walk
+           expects keys for every module-tree path, so under ``strict=True`` the
+           alias paths would be reported as missing. Before delegating to
+           ``super().load_state_dict``, we fan out the canonical value to all
+           alias paths so every expected key is present.
+        """
+        if self.shared_blocks is None:
+            return super().load_state_dict(state_dict, strict=strict, **kwargs)
+        shared = self._shared_tensor_paths_map()
+        if not shared:
+            return super().load_state_dict(state_dict, strict=strict, **kwargs)
+
+        # Shallow copy so we don't mutate the caller's dict. Use OrderedDict so we
+        # can attach ``_metadata`` (PyTorch's ``load_state_dict`` consults it for
+        # per-submodule version info; plain ``dict`` rejects attribute assignment).
+        sd = OrderedDict(state_dict)
+        metadata = getattr(state_dict, "_metadata", None)
+        if metadata is not None:
+            sd._metadata = metadata  # type: ignore[attr-defined]
+
+        for _, paths in shared.items():
+            canonical, *aliases = paths
+            present = [p for p in paths if p in sd]
+            if not present:
+                # Missing entirely from the source; let super() report it via strict.
+                continue
+            # If multiple aliased paths are present in the source, require they agree.
+            if len(present) > 1:
+                ref = sd[present[0]]
+                for p in present[1:]:
+                    if not _state_dict_tensors_equal(sd[p], ref):
+                        raise RuntimeError(
+                            f"State dict has differing per-layer values for paths "
+                            f"that now alias one Parameter via shared_blocks: "
+                            f"{paths}. Pick a warm-start strategy explicitly (e.g. "
+                            f"load only the canonical-layer weights, or pre-average)."
+                        )
+            value = sd[present[0]]
+            sd[canonical] = value
+            for a in aliases:
+                sd[a] = value
+        return super().load_state_dict(sd, strict=strict, **kwargs)
+
     def num_flops_per_token(self, seq_len: int) -> int:
         """
         Returns the idealized number of flops per token for the given sequence length. Purposefully
@@ -1259,6 +1359,24 @@ class MoETransformer(Transformer):
                 continue
             seen_moes.add(moe_id)
             block.feed_forward_moe.post_batch(dry_run=dry_run)
+
+
+def _state_dict_tensors_equal(a: Any, b: Any) -> bool:
+    """
+    Tolerant tensor equality used during :meth:`Transformer.load_state_dict` to detect
+    inconsistent warm-starts. Returns ``False`` on any shape/dtype/device mismatch and
+    on exceptions raised by ``torch.equal`` (e.g. with DTensors that can't be compared
+    directly). Conservative: when in doubt, treat as not-equal so the disagreement
+    check fires and the user sees a clear error rather than silent corruption.
+    """
+    try:
+        if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
+            return a is b
+        if a.shape != b.shape:
+            return False
+        return bool(torch.equal(a, b))
+    except Exception:
+        return False
 
 
 def _hide_cpu_inputs_from_torch(m, args, kwargs) -> Optional[Tuple[Any, Dict[str, Any]]]:
