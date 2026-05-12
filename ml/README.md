@@ -1,6 +1,12 @@
 # `ml/` — MoE Training Pipeline
 
-Tools for training OLMo-Core MoE (and dense) models on SLURM clusters. Wraps `olmo_core.train` with a parameter-sweep system, hyperparameter defaults, and CLI plumbing for the project-specific knobs we care about (MoE shape, data repetition, etc).
+Tools for training OLMo-Core MoE (and dense) models on SLURM clusters. Wraps `olmo_core.train` with a parameter-sweep system, hyperparameter defaults, and CLI plumbing for the project-specific knobs we care about (MoE shape, data repetition, shared-block parameter sharing).
+
+## Companion docs
+
+- [`SHARED_MOE_TODOS.md`](./SHARED_MOE_TODOS.md) — backlog of open follow-ups for the `SharedBlockConfig` feature.
+- [`SHARED_MOE_TOP3_PLANS.md`](./SHARED_MOE_TOP3_PLANS.md) — implementation plans for the highest-priority items.
+- [`SHARED_MOE_FIX_NOTES.md`](./SHARED_MOE_FIX_NOTES.md) — walkthroughs of each correctness fix shipped on the shared-MoE feature.
 
 ---
 
@@ -225,6 +231,86 @@ All MoE flags in `single_train_launch.py`:
 
 ---
 
+## Shared MoE blocks
+
+A variant where routers, experts, and/or attention/norms are **physically shared** across a contiguous range of transformer layers — i.e. multiple `block.feed_forward_moe` attributes point to the same `nn.Module`, so the parameters live in memory exactly once and are *applied* N times during the forward pass.
+
+Useful for parameter-efficient MoE experiments where you want the inner FLOPs of an N-layer network but the parameter footprint of a 1-layer (shared) middle stack.
+
+### Configuration
+
+Disabled by default. Enable by setting `--shared_blocks_start_layer` to an integer. The shared range is `[start_layer, start_layer + n_layers - 1]` (inclusive).
+
+| Flag                                 | Type      | Default | Meaning                                                                 |
+|--------------------------------------|-----------|---------|-------------------------------------------------------------------------|
+| `--shared_blocks_start_layer`        | int / None| None    | First layer index in shared range. None = sharing disabled.             |
+| `--shared_blocks_n_layers`           | int       | 2       | Number of contiguous layers in the shared range. Must be ≥ 2.           |
+| `--shared_blocks_share_routers`      | bool      | False   | Share the MoE routers across the shared range.                          |
+| `--shared_blocks_share_experts`      | bool      | False   | Share the MoE expert MLPs across the shared range.                      |
+| `--shared_blocks_share_shared_mlp`   | bool      | False   | Share the dense `shared_mlp` (only present in hybrid MoE blocks).       |
+| `--shared_blocks_share_attention`    | bool      | False   | Share attention/sequence-mixer across the shared range.                 |
+| `--shared_blocks_share_norms`        | bool      | False   | Share `attention_norm` and `feed_forward_norm`.                         |
+
+Boolean flags accept `True/False`, `1/0`, `yes/no`, `t/f` (case-insensitive). Anything else raises.
+
+### Examples
+
+Share routers and experts across the middle 4 layers of an 80M model (~12 layers deep):
+
+```bash
+--shared_blocks_start_layer=4 --shared_blocks_n_layers=4 \
+--shared_blocks_share_routers=True --shared_blocks_share_experts=True
+```
+
+Share *everything* (routers, experts, shared MLP, attention, norms) across the middle 6 layers — extreme parameter sharing, only the outermost layers are unique:
+
+```bash
+--shared_blocks_start_layer=3 --shared_blocks_n_layers=6 \
+--shared_blocks_share_routers=True --shared_blocks_share_experts=True \
+--shared_blocks_share_shared_mlp=True --shared_blocks_share_attention=True \
+--shared_blocks_share_norms=True
+```
+
+Share only routers (keep per-layer experts, study what routing-policy reuse looks like):
+
+```bash
+--shared_blocks_start_layer=4 --shared_blocks_n_layers=4 \
+--shared_blocks_share_routers=True --shared_blocks_share_experts=False
+```
+
+### Example sweep subgrids
+
+`train_sweep.py` includes commented-out example subgrids for shared-block runs:
+
+```python
+"moe32_shared_RE_mid4": {
+    "moe_num_experts_list": ["32"],
+    "moe_hidden_multipliers_list": ["0.25"],
+    "moe_router_top_ks_list": ["4"],
+    "moe_generalist_hidden_multiplier": ["0"],
+    "shared_blocks_start_layer": ["4"],
+    "shared_blocks_n_layers":    ["4"],
+    "shared_blocks_share_routers": ["True"],
+    "shared_blocks_share_experts": ["True"],
+},
+```
+
+Uncomment, adjust `start_layer` / `n_layers` for your model depth, and run the sweep.
+
+### What gets reported
+
+- **W&B tags.** Runs with `shared_blocks` enabled are tagged `sharedMoE` and `share[RE]@4+4` (letters encode which flags are on: R=routers, E=experts, S=shared_mlp, A=attention, N=norms; `@start+n_layers` shows the range).
+- **Parameter counts.** `model.num_params` reports the *unique* parameter count (shared params counted once). `model.num_param_uses` reports the *usage-weighted* count (shared params counted once per referencing block). Use the latter for FLOPs estimation: `flops ≈ 6 × num_active_param_uses × tokens`.
+
+### What it interacts with
+
+- **EP / FSDP / TP / CP.** All four parallelism strategies are dedup'd internally — each shared submodule is parallelized/sharded exactly once, not N times. See `SHARED_MOE_FIX_NOTES.md` for details.
+- **Init schemes.** `Transformer.init_weights` dedups so depth-scaled init (`InitMethod.llama_depth`) lands the canonical (lowest) `block_idx`'s std on shared params, not the highest. See fix notes for the worked example.
+- **Checkpoints.** `state_dict()` emits only canonical paths (smaller checkpoint files). `load_state_dict()` fans the canonical entry out to alias slots so `strict=True` works, and **raises** if the source has per-layer values that disagree for what's now a single shared Parameter (catches silent corruption when warm-starting from an unshared pretrained checkpoint).
+- **FSDP fine-grained wrapping.** Not yet supported with `shared_blocks` — `apply_fsdp(wrapping_strategy="fine_grained")` raises a configuration error in that case. Use `"blocks"` or `"full"`.
+
+---
+
 ## Data and repetition
 
 | Flag                       | Type    | Default          | Meaning                                                                |
@@ -260,6 +346,9 @@ These get captured by `parse_known_args()` and merged into the config via `Exper
 ```
 ml/
 ├── README.md                      # this file
+├── SHARED_MOE_TODOS.md            # backlog for SharedBlockConfig follow-ups
+├── SHARED_MOE_TOP3_PLANS.md       # implementation plans for top priorities
+├── SHARED_MOE_FIX_NOTES.md        # per-fix walkthroughs
 ├── run_train.sh                   # one-shot launch helper
 ├── run_train_scale.sh             # multi-scale launch helper
 └── scripts/
