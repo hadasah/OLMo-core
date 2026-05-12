@@ -12,6 +12,7 @@ from .lion import Lion, LionConfig, SkipStepLion, SkipStepLionConfig
 from .muon import MuonConfig, NorMuonConfig
 from .noop import NoOpConfig, NoOpOptimizer
 from .scheduler import (
+    WSD,
     WSDS,
     ConstantScheduler,
     ConstantWithWarmup,
@@ -24,7 +25,6 @@ from .scheduler import (
     Scheduler,
     SchedulerUnits,
     SequentialScheduler,
-    WSD,
 )
 from .skip_step_optimizer import SkipStepOptimizer
 

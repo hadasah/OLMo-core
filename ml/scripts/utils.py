@@ -10,7 +10,7 @@ def dict_update(d, u):
     has a dict as its value, and the second dict has a key with
     the same name, the value in the first dict will be updated
     with the value from the second dict.
-    Keys in the second dict are the ones iterated over. 
+    Keys in the second dict are the ones iterated over.
     If the value in the second dict is not a dict, it will
     overwrite the value in the first dict.
     """
@@ -20,6 +20,7 @@ def dict_update(d, u):
         else:
             d[k] = v
     return d
+
 
 def has_file_been_modified_recently(filepath, recent_threshold_seconds=3600):
     """

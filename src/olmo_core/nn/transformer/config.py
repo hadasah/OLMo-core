@@ -780,26 +780,40 @@ class TransformerConfig(ModelConfig):
         d_model = kwargs.pop("d_model", 48)
         use_moe = kwargs.pop("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        feed_forward_config = FeedForwardConfig(
-                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-                                ) if generalist_hidden_multiplier > 0 else None
-        feed_forward_moe_config = MoEConfig(
-                                    name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                                    num_experts_list=kwargs.pop("num_experts_list", []),
-                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])],
-                                    routers_list=[
-                                        MoERouterConfig(
-                                            top_k=top_k, 
-                                            bias_gamma=kwargs.pop("bias_gamma", None), 
-                                            uniform_expert_assignment=kwargs.pop("uniform_expert_assignment", False)
-                                        ) for top_k in kwargs.pop("router_top_ks_list", [4])],
-                                    lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                                    z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-                                ) if use_moe else None
+        generalist_hidden_multiplier = (
+            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        )
+        feed_forward_config = (
+            FeedForwardConfig(
+                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+            )
+            if generalist_hidden_multiplier > 0
+            else None
+        )
+        feed_forward_moe_config = (
+            MoEConfig(
+                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
+                num_experts_list=kwargs.pop("num_experts_list", []),
+                hidden_sizes_list=[
+                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
+                ],
+                routers_list=[
+                    MoERouterConfig(
+                        top_k=top_k,
+                        bias_gamma=kwargs.pop("bias_gamma", None),
+                        uniform_expert_assignment=kwargs.pop("uniform_expert_assignment", False),
+                    )
+                    for top_k in kwargs.pop("router_top_ks_list", [4])
+                ],
+                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
+                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+            )
+            if use_moe
+            else None
+        )
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe: 
+        if not use_moe:
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -825,21 +839,36 @@ class TransformerConfig(ModelConfig):
         d_model = kwargs.pop("d_model", 96)
         use_moe = kwargs.pop("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        feed_forward_config = FeedForwardConfig(
-                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-                                ) if generalist_hidden_multiplier > 0 else None
-        feed_forward_moe_config = MoEConfig(
-                                    name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                                    num_experts_list=kwargs.pop("num_experts_list", []),
-                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])],
-                                    routers_list=[MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None)) for top_k in kwargs.pop("router_top_ks_list", [4])],
-                                    lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                                    z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-                                ) if use_moe else None
+        generalist_hidden_multiplier = (
+            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        )
+        feed_forward_config = (
+            FeedForwardConfig(
+                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+            )
+            if generalist_hidden_multiplier > 0
+            else None
+        )
+        feed_forward_moe_config = (
+            MoEConfig(
+                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
+                num_experts_list=kwargs.pop("num_experts_list", []),
+                hidden_sizes_list=[
+                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
+                ],
+                routers_list=[
+                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
+                    for top_k in kwargs.pop("router_top_ks_list", [4])
+                ],
+                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
+                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+            )
+            if use_moe
+            else None
+        )
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe: 
+        if not use_moe:
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -859,28 +888,42 @@ class TransformerConfig(ModelConfig):
             feed_forward_moe=feed_forward_moe_config,
         )
 
-
     @classmethod
     def olmo2_ml_50M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
         # expected # parameters: ~52.74M
         d_model = kwargs.pop("d_model", 240)
         use_moe = kwargs.pop("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        feed_forward_config = FeedForwardConfig(
-                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-                                ) if generalist_hidden_multiplier > 0 else None
-        feed_forward_moe_config = MoEConfig(
-                                    name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                                    num_experts_list=kwargs.pop("num_experts_list", []),
-                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])],
-                                    routers_list=[MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None)) for top_k in kwargs.pop("router_top_ks_list", [4])],
-                                    lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                                    z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-                                ) if use_moe else None
+        generalist_hidden_multiplier = (
+            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        )
+        feed_forward_config = (
+            FeedForwardConfig(
+                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+            )
+            if generalist_hidden_multiplier > 0
+            else None
+        )
+        feed_forward_moe_config = (
+            MoEConfig(
+                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
+                num_experts_list=kwargs.pop("num_experts_list", []),
+                hidden_sizes_list=[
+                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
+                ],
+                routers_list=[
+                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
+                    for top_k in kwargs.pop("router_top_ks_list", [4])
+                ],
+                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
+                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+            )
+            if use_moe
+            else None
+        )
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe: 
+        if not use_moe:
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -906,21 +949,36 @@ class TransformerConfig(ModelConfig):
         d_model = kwargs.pop("d_model", 336)
         use_moe = kwargs.pop("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        feed_forward_config = FeedForwardConfig(
-                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-                                ) if generalist_hidden_multiplier > 0 else None
-        feed_forward_moe_config = MoEConfig(
-                                    name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                                    num_experts_list=kwargs.pop("num_experts_list", []),
-                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])],
-                                    routers_list=[MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None)) for top_k in kwargs.pop("router_top_ks_list", [4])],
-                                    lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                                    z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-                                ) if use_moe else None
+        generalist_hidden_multiplier = (
+            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        )
+        feed_forward_config = (
+            FeedForwardConfig(
+                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+            )
+            if generalist_hidden_multiplier > 0
+            else None
+        )
+        feed_forward_moe_config = (
+            MoEConfig(
+                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
+                num_experts_list=kwargs.pop("num_experts_list", []),
+                hidden_sizes_list=[
+                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
+                ],
+                routers_list=[
+                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
+                    for top_k in kwargs.pop("router_top_ks_list", [4])
+                ],
+                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
+                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+            )
+            if use_moe
+            else None
+        )
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe: 
+        if not use_moe:
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -946,18 +1004,33 @@ class TransformerConfig(ModelConfig):
         d_model = kwargs.pop("d_model", 384)
         use_moe = kwargs.pop("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        feed_forward_config = FeedForwardConfig(
-                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-                                ) if generalist_hidden_multiplier > 0 else None
-        feed_forward_moe_config = MoEConfig(
-                                    name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                                    num_experts_list=kwargs.pop("num_experts_list", []),
-                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])],
-                                    routers_list=[MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None)) for top_k in kwargs.pop("router_top_ks_list", [4])],
-                                    lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                                    z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-                                ) if use_moe else None
+        generalist_hidden_multiplier = (
+            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        )
+        feed_forward_config = (
+            FeedForwardConfig(
+                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+            )
+            if generalist_hidden_multiplier > 0
+            else None
+        )
+        feed_forward_moe_config = (
+            MoEConfig(
+                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
+                num_experts_list=kwargs.pop("num_experts_list", []),
+                hidden_sizes_list=[
+                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
+                ],
+                routers_list=[
+                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
+                    for top_k in kwargs.pop("router_top_ks_list", [4])
+                ],
+                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
+                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+            )
+            if use_moe
+            else None
+        )
 
         default_block_name = TransformerBlockType.moe_reordered_norm
         if not use_moe:
@@ -986,21 +1059,36 @@ class TransformerConfig(ModelConfig):
         d_model = kwargs.pop("d_model", 432)
         use_moe = kwargs.pop("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        feed_forward_config = FeedForwardConfig(
-                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-                                ) if generalist_hidden_multiplier > 0 else None
-        feed_forward_moe_config = MoEConfig(
-                                    name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                                    num_experts_list=kwargs.pop("num_experts_list", []),
-                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])],
-                                    routers_list=[MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None)) for top_k in kwargs.pop("router_top_ks_list", [4])],
-                                    lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                                    z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-                                ) if use_moe else None
+        generalist_hidden_multiplier = (
+            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        )
+        feed_forward_config = (
+            FeedForwardConfig(
+                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+            )
+            if generalist_hidden_multiplier > 0
+            else None
+        )
+        feed_forward_moe_config = (
+            MoEConfig(
+                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
+                num_experts_list=kwargs.pop("num_experts_list", []),
+                hidden_sizes_list=[
+                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
+                ],
+                routers_list=[
+                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
+                    for top_k in kwargs.pop("router_top_ks_list", [4])
+                ],
+                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
+                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+            )
+            if use_moe
+            else None
+        )
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe: 
+        if not use_moe:
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1019,28 +1107,43 @@ class TransformerConfig(ModelConfig):
             feed_forward=feed_forward_config,
             feed_forward_moe=feed_forward_moe_config,
         )
-        
+
     @classmethod
     def olmo2_ml_200M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
         # expected # parameters: ~193.9M
         d_model = kwargs.pop("d_model", 640)
         use_moe = kwargs.pop("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        feed_forward_config = FeedForwardConfig(
-                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-                                ) if generalist_hidden_multiplier > 0 else None
-        feed_forward_moe_config = MoEConfig(
-                                    name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                                    num_experts_list=kwargs.pop("num_experts_list", []),
-                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])],
-                                    routers_list=[MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None)) for top_k in kwargs.pop("router_top_ks_list", [4])],
-                                    lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                                    z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-                                ) if use_moe else None
+        generalist_hidden_multiplier = (
+            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        )
+        feed_forward_config = (
+            FeedForwardConfig(
+                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+            )
+            if generalist_hidden_multiplier > 0
+            else None
+        )
+        feed_forward_moe_config = (
+            MoEConfig(
+                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
+                num_experts_list=kwargs.pop("num_experts_list", []),
+                hidden_sizes_list=[
+                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
+                ],
+                routers_list=[
+                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
+                    for top_k in kwargs.pop("router_top_ks_list", [4])
+                ],
+                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
+                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+            )
+            if use_moe
+            else None
+        )
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe: 
+        if not use_moe:
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1066,21 +1169,36 @@ class TransformerConfig(ModelConfig):
         d_model = kwargs.pop("d_model", 832)
         use_moe = kwargs.pop("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        feed_forward_config = FeedForwardConfig(
-                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-                                ) if generalist_hidden_multiplier > 0 else None
-        feed_forward_moe_config = MoEConfig(
-                                    name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                                    num_experts_list=kwargs.pop("num_experts_list", []),
-                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])],
-                                    routers_list=[MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None)) for top_k in kwargs.pop("router_top_ks_list", [4])],
-                                    lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                                    z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-                                ) if use_moe else None
+        generalist_hidden_multiplier = (
+            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        )
+        feed_forward_config = (
+            FeedForwardConfig(
+                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+            )
+            if generalist_hidden_multiplier > 0
+            else None
+        )
+        feed_forward_moe_config = (
+            MoEConfig(
+                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
+                num_experts_list=kwargs.pop("num_experts_list", []),
+                hidden_sizes_list=[
+                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
+                ],
+                routers_list=[
+                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
+                    for top_k in kwargs.pop("router_top_ks_list", [4])
+                ],
+                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
+                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+            )
+            if use_moe
+            else None
+        )
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe: 
+        if not use_moe:
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1106,21 +1224,36 @@ class TransformerConfig(ModelConfig):
         d_model = kwargs.pop("d_model", 1120)
         use_moe = kwargs.pop("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        feed_forward_config = FeedForwardConfig(
-                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-                                ) if generalist_hidden_multiplier > 0 else None
-        feed_forward_moe_config = MoEConfig(
-                                    name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                                    num_experts_list=kwargs.pop("num_experts_list", []),
-                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])],
-                                    routers_list=[MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None)) for top_k in kwargs.pop("router_top_ks_list", [4])],
-                                    lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                                    z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-                                ) if use_moe else None
+        generalist_hidden_multiplier = (
+            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        )
+        feed_forward_config = (
+            FeedForwardConfig(
+                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+            )
+            if generalist_hidden_multiplier > 0
+            else None
+        )
+        feed_forward_moe_config = (
+            MoEConfig(
+                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
+                num_experts_list=kwargs.pop("num_experts_list", []),
+                hidden_sizes_list=[
+                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
+                ],
+                routers_list=[
+                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
+                    for top_k in kwargs.pop("router_top_ks_list", [4])
+                ],
+                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
+                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+            )
+            if use_moe
+            else None
+        )
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe: 
+        if not use_moe:
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm

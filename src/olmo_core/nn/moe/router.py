@@ -412,7 +412,7 @@ class MoERouter(nn.Module):
             out[f"{prefix}routing entropy"] = (avg_entropy, ReduceType.mean)
 
         # Router weight magnitude (higher = more rigid/extreme weights).
-        if hasattr(self, 'weight'):
+        if hasattr(self, "weight"):
             weight = get_full_tensor(self.weight).view(self.num_experts, self.d_model).float()
             weight_l2_per_expert = weight.norm(dim=-1)  # (num_experts,)
             out[f"{prefix}router weight L2 mean"] = (weight_l2_per_expert.mean(), ReduceType.mean)

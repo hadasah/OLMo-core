@@ -621,7 +621,9 @@ def _get_http_session() -> requests.Session:
     return session
 
 
-@retriable(max_attempts=10, retry_condition=lambda exc: isinstance(exc, requests.exceptions.HTTPError))
+@retriable(
+    max_attempts=10, retry_condition=lambda exc: isinstance(exc, requests.exceptions.HTTPError)
+)
 def _http_file_size(url: str) -> int:
     session = _get_http_session()
     response = session.head(url, allow_redirects=True)
@@ -658,7 +660,9 @@ def _http_get_bytes_range(url: str, bytes_start: int, num_bytes: int) -> bytes:
     # Some web servers silently ignore range requests and send everything
     # assert len(result) == num_bytes, f"expected {num_bytes} bytes, got {len(result)}"
     if len(result) != num_bytes:
-        raise requests.exceptions.HTTPError(f"{response.status_code}: {response.text}. expected {num_bytes} bytes, got {len(result)}")
+        raise requests.exceptions.HTTPError(
+            f"{response.status_code}: {response.text}. expected {num_bytes} bytes, got {len(result)}"
+        )
 
     return result
 
