@@ -537,8 +537,17 @@ class MoERouter(nn.Module):
                 assert self.score_bias_batch_size_per_expert is not None
                 self.score_bias_batch_size_per_expert += batch_size_per_expert
 
+            # Initialize/resync the routing-entropy accumulator on the input device.
+            # `_routing_entropy` is a hidden tensor (not a registered buffer), so
+            # `.to(device)` on the module doesn't move it; if the module was built
+            # on CPU and then moved to MPS/CUDA, the accumulator stays on CPU and
+            # `.add_(mean_entropy)` would crash with a device mismatch.
             if self._routing_entropy is None:
-                self._routing_entropy = hide_from_torch(torch.zeros([], device=self.device))
+                self._routing_entropy = hide_from_torch(torch.zeros([], device=mean_entropy.device))
+            elif unhide_from_torch(self._routing_entropy).device != mean_entropy.device:
+                self._routing_entropy = hide_from_torch(
+                    unhide_from_torch(self._routing_entropy).to(mean_entropy.device)
+                )
             unhide_from_torch(self._routing_entropy).add_(mean_entropy)
             self._routing_entropy_count += 1
 
