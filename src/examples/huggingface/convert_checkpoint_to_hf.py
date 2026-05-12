@@ -199,10 +199,15 @@ def convert_checkpoint_to_hf(
                         ".feed_forward_moe.experts.mlp.w3"
                     ):
                         assert isinstance(v, torch.Tensor), (k, v)
+                        # NOTE: assumes a single MoE group (the common case). The list-based
+                        # MoEConfig API supports heterogeneous MoE with multiple groups per
+                        # layer, but this checkpoint converter doesn't.
+                        num_experts = moe_config.num_experts_list[0]
+                        hidden_size = moe_config.hidden_sizes_list[0]
                         model_state_dict[k] = (
-                            v.reshape(moe_config.num_experts, moe_config.hidden_size, -1)
+                            v.reshape(num_experts, hidden_size, -1)
                             .permute(0, 2, 1)
-                            .reshape(-1, moe_config.hidden_size)
+                            .reshape(-1, hidden_size)
                         )
                         log.info(f"Reshaped {k} because MoE is dropless")
             elif moe_config.name == MoEType.default:
