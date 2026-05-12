@@ -677,6 +677,100 @@ def test_qwen3_builder_configs(config_builder, expected_d_model):
     assert model.num_params == num_actual_params
 
 
+def run_shared_blocks_ep_fsdp_step():
+    """
+    Multi-GPU integration test: build a small shared-MoE model, apply EP then FSDP
+    (wrapping_strategy="blocks"), and run a forward+backward+optim step. Validates
+    that the apply_ep / apply_fsdp dedup actually works under real distributed setup
+    (which the CPU mock tests can't fully exercise) and that DTensor + FSDP layered
+    on shared parameters doesn't corrupt state.
+    """
+    from olmo_core.distributed.parallel import (
+        DataParallelType,
+        TransformerDataParallelConfig,
+    )
+
+    layer_norm = LayerNormConfig(name=LayerNormType.rms, bias=False)
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=2, share_routers=True, share_experts=True
+    )
+    config = TransformerConfig(
+        name=TransformerType.moe,
+        d_model=64,
+        vocab_size=256,
+        n_layers=4,
+        block=TransformerBlockConfig(
+            name=TransformerBlockType.moe_reordered_norm,
+            sequence_mixer=AttentionConfig(n_heads=4, rope=RoPEConfig(), bias=False),
+            layer_norm=layer_norm,
+            feed_forward_moe=MoEConfig(
+                name=MoEType.dropless,
+                num_experts_list=[4],
+                hidden_sizes_list=[64],
+                routers_list=[MoERouterConfig(top_k=2)],
+                lb_loss_weight=0.01,
+                z_loss_weight=0.001,
+            ),
+        ),
+        lm_head=LMHeadConfig(layer_norm=layer_norm, bias=False),
+        shared_blocks=sb,
+    )
+
+    device = get_default_device()
+    model = config.build(init_device="meta")
+    assert isinstance(model, MoETransformer)
+
+    # 1-D mesh used for both EP and FSDP. With 2 GPUs this gives EP=2 (4 experts
+    # sharded 2 per rank) and FSDP=2 (block params sharded across ranks).
+    mesh = init_device_mesh(
+        device.type,
+        (get_world_size(),),
+        mesh_dim_names=("ep",),
+    )
+
+    # EP first, then FSDP (the required order — FSDP must wrap experts already
+    # converted to DTensor by EP).
+    model.apply_ep(mesh["ep"])
+    model.apply_fsdp(
+        dp_mesh=mesh["ep"],
+        wrapping_strategy=TransformerDataParallelWrappingStrategy.blocks,
+    )
+
+    model.init_weights(device=device, max_seq_len=32)
+
+    optim = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    input_ids = torch.randint(0, config.vocab_size, (2, 16), device=device)
+
+    # Step 1
+    out1 = model(input_ids=input_ids)
+    loss1 = out1.sum()
+    assert torch.isfinite(loss1), f"step 1 loss non-finite: {loss1}"
+    loss1.backward()
+    optim.step()
+    optim.zero_grad()
+
+    # Step 2 — confirms autograd through shared params keeps working after one step.
+    out2 = model(input_ids=input_ids)
+    loss2 = out2.sum()
+    assert torch.isfinite(loss2), f"step 2 loss non-finite: {loss2}"
+    loss2.backward()
+    optim.step()
+
+
+@requires_multi_gpu
+def test_shared_blocks_ep_fsdp_integration():
+    """
+    TODO #4: end-to-end smoke test that EP + FSDP-blocks compose correctly with
+    shared_blocks. Skipped on CPU/single-GPU; runs on 2-GPU CI.
+    """
+    run_distributed_test(
+        run_shared_blocks_ep_fsdp_step,
+        backend="nccl",
+        start_method="spawn",
+        world_size=2,
+    )
+
+
 def _small_shared_moe_config(
     *,
     n_layers: int,
