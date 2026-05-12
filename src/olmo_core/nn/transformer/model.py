@@ -119,6 +119,25 @@ class Transformer(nn.Module):
         self.shared_blocks = shared_blocks
         if shared_blocks is not None:
             shared_blocks.validate_against(n_layers)
+            if block_overrides is not None:
+                # A block_overrides entry inside the shared range would be silently
+                # clobbered by `_apply_shared_blocks` when it reassigns submodules
+                # from the canonical block — at best wasting the override, at worst
+                # producing a shape mismatch far from the config site. Forbid the
+                # combination outright; the user should either move the override
+                # outside the shared range or shrink the range.
+                conflicting = sorted(
+                    set(block_overrides) & set(shared_blocks.layer_indices())
+                )
+                if conflicting:
+                    raise OLMoConfigurationError(
+                        f"block_overrides indices {conflicting} fall inside the "
+                        f"shared range [{shared_blocks.start_layer}, "
+                        f"{shared_blocks.end_layer}]. Overrides at shared positions "
+                        f"would be silently clobbered by the canonical block when "
+                        f"sharing is applied. Move the overrides outside the shared "
+                        f"range, or shrink the shared range to not cover them."
+                    )
 
         self.embeddings = nn.Embedding(vocab_size, d_model, dtype=dtype, device=init_device)
         self.embedding_norm = (

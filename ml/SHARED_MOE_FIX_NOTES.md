@@ -288,3 +288,68 @@ def load_state_dict(self, state_dict, strict=True, **kwargs):
   - `test_shared_blocks_load_raises_on_disagreeing_unshared_source` — loading an unshared init'd checkpoint into a shared model raises `RuntimeError`.
   - `test_shared_blocks_load_accepts_agreeing_alias_keys` — legacy pre-dedup-style dict (all alias keys present, agreeing) loads cleanly.
   - `test_shared_blocks_none_state_dict_is_passthrough` — overrides are no-ops when `shared_blocks is None`.
+
+---
+
+## TODO #10 — `block_overrides` × `shared_blocks` validation
+
+### The footgun
+
+`TransformerConfig` has two ways to make per-layer customizations:
+
+1. **`block_overrides: Dict[int, TransformerBlockConfig]`** — replace the block at a specific index with a different block config. Used for things like a single sliding-window-attention layer in an otherwise-full-attention model, or one MoE layer in an otherwise-dense stack.
+
+2. **`shared_blocks: SharedBlockConfig`** — physically alias submodules of blocks within a contiguous range to the canonical (start) block's instances.
+
+These two features compose poorly when their indices intersect. After `Transformer.__init__` runs the block-construction loop, `_apply_shared_blocks` walks the shared range and reassigns submodules:
+
+```python
+for idx in shared_blocks.layer_indices():
+    if idx == shared_blocks.start_layer:
+        continue
+    block = self.blocks[str(idx)]
+    block.feed_forward_moe = canonical.feed_forward_moe  # silently overwrites the override
+    ...
+```
+
+If `block_overrides[2]` produced a block with, say, a 64-expert MoE and the canonical block has 32 experts, the assignment either:
+
+- **Silently clobbers the override** (when share covers `feed_forward_moe`): block 2 ends up with the canonical's 32-expert MoE, and the override has no effect. The model trains, but it's not the model the user configured.
+- **Fails with a shape mismatch much later** (when only a subset of `feed_forward_moe` is shared, e.g. `share_routers=True, share_experts=False`): the alias assignment of `routers_list` succeeds but the expert dimensions don't line up at forward time. The error message is far from the config site.
+
+Both failure modes are bad: the first is silently wrong, the second is loud but uninformative.
+
+### The fix
+
+In `Transformer.__init__`, right after `shared_blocks.validate_against(n_layers)`, intersect the two index sets and refuse the combination:
+
+```python
+if block_overrides is not None:
+    conflicting = sorted(set(block_overrides) & set(shared_blocks.layer_indices()))
+    if conflicting:
+        raise OLMoConfigurationError(
+            f"block_overrides indices {conflicting} fall inside the shared range "
+            f"[{shared_blocks.start_layer}, {shared_blocks.end_layer}]. "
+            f"Overrides at shared positions would be silently clobbered by the "
+            f"canonical block when sharing is applied. Move the overrides outside "
+            f"the shared range, or shrink the shared range to not cover them."
+        )
+```
+
+The error message points the user at both ways to resolve it (move the overrides, or shrink the range). The check runs once at construction, before any block instances are built — fast and surfaces the problem at the config site.
+
+### Design choice: refuse outright vs. allow structural equivalence
+
+The original plan considered a more permissive variant: allow `block_overrides` entries inside the shared range *if* the override is structurally identical to the canonical block (e.g. the user replicates the canonical config across multiple indices). That's tempting but adds complexity:
+
+- Comparing two `Config` dataclasses for "structural equivalence" requires a deep comparison that excludes incidental fields (init_device strings, etc.). Easy to get subtly wrong.
+- The use case is dubious — if the user genuinely wants the same config at multiple positions, the natural answer is to use a single block config and not specify overrides there.
+
+Refusing outright is simpler, the error message is actionable, and the user can resolve it trivially by editing their config. If a real use case for permissive behavior emerges later, the validation can be relaxed without breaking anything.
+
+### Files touched
+
+- `src/olmo_core/nn/transformer/model.py` — added the intersection check in `Transformer.__init__` right after `shared_blocks.validate_against`.
+- `src/test/nn/transformer/model_test.py` — two new tests:
+  - `test_shared_blocks_rejects_block_overrides_in_shared_range` — building with an override at an index inside the shared range raises with the expected message.
+  - `test_shared_blocks_allows_block_overrides_outside_shared_range` — sanity check that overrides at non-shared indices still work.

@@ -1154,6 +1154,37 @@ def test_shared_blocks_none_state_dict_is_passthrough():
         assert torch.equal(pa, pb), f"mismatch at {name}"
 
 
+def test_shared_blocks_rejects_block_overrides_in_shared_range():
+    """
+    block_overrides at indices that fall inside shared_blocks.layer_indices() would be
+    silently clobbered by _apply_shared_blocks. Reject the combination at construction
+    time with a clear error rather than producing a wrong model.
+    """
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=3, share_routers=True, share_experts=True
+    )
+    config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    # Pretend the user added an override on block 2, which is inside [1, 2, 3].
+    config.block_overrides = {2: config.block}
+    with pytest.raises(Exception, match="fall inside the shared range"):
+        config.build(init_device="cpu")
+
+
+def test_shared_blocks_allows_block_overrides_outside_shared_range():
+    """
+    block_overrides at indices outside the shared range are fine and should build
+    normally. Sanity check that the validation isn't over-eager.
+    """
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=3, share_routers=True, share_experts=True
+    )
+    config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    # Block 0 and block 4 are outside [1, 2, 3] — overrides there are legal.
+    config.block_overrides = {0: config.block, 4: config.block}
+    model = config.build(init_device="cpu")
+    assert isinstance(model, MoETransformer)
+
+
 def test_shared_blocks_validates_range():
     with pytest.raises(Exception):
         SharedBlockConfig(start_layer=5, n_layers=4, share_routers=True).validate_against(6)
