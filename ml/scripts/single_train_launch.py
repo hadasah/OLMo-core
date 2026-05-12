@@ -12,9 +12,6 @@ from typing import List, Optional, cast
 import numpy as np
 import torch
 import torch.distributed as dist
-from constants import (
-    PROJECT_SPECS,
-)
 
 from olmo_core.config import Config, DType
 from olmo_core.data import (
@@ -31,9 +28,7 @@ from olmo_core.data.source_mixture import (
 )
 from olmo_core.distributed.parallel import DataParallelType
 from olmo_core.io import get_file_size
-from olmo_core.nn.transformer import (
-    TransformerConfig,
-)
+from olmo_core.nn.transformer import TransformerConfig
 from olmo_core.optim import WSD, AdamWConfig, CosWithWarmup, OptimGroupOverride
 from olmo_core.train import (
     Duration,
@@ -56,6 +51,8 @@ from olmo_core.train.train_module import (
     TransformerTrainModuleConfig,
 )
 from olmo_core.utils import seed_all
+
+from constants import PROJECT_SPECS
 
 log = logging.getLogger(__name__)
 
