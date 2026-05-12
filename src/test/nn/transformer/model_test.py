@@ -437,12 +437,12 @@ def run_moe_hybrid_combined_forward(
             feed_forward=FeedForwardConfig(hidden_size=1024, bias=False),
             feed_forward_moe=MoEConfig(
                 name=MoEType.dropless if dropless else MoEType.default,
-                num_experts=4,
-                hidden_size=256,
+                num_experts_list=[4],
+                hidden_sizes_list=[256],
                 shared_mlp=(
                     FeedForwardConfig(hidden_size=512, bias=False) if shared_experts else None
                 ),
-                router=MoERouterConfig(uniform_expert_assignment=True),
+                routers_list=[MoERouterConfig(uniform_expert_assignment=True)],
             ),
         ),
         lm_head=LMHeadConfig(layer_norm=layer_norm, bias=False),

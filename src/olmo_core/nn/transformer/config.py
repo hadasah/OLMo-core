@@ -1679,10 +1679,10 @@ class TransformerConfig(ModelConfig):
             qk_norm=kwargs.pop("qk_norm", reordered_norm),
             feed_forward_moe=MoEConfig(
                 name=MoEType.default if not dropless else MoEType.dropless,
-                num_experts=num_experts,
-                hidden_size=expert_hidden_size,
+                num_experts_list=[num_experts],
+                hidden_sizes_list=[expert_hidden_size],
                 capacity_factor=capacity_factor,
-                router=MoERouterConfig(top_k=top_k),
+                routers_list=[MoERouterConfig(top_k=top_k)],
                 shared_mlp=None
                 if shared_expert_hidden_size is None
                 else FeedForwardConfig(hidden_size=shared_expert_hidden_size, bias=False),
