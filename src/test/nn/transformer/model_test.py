@@ -712,6 +712,41 @@ def _small_shared_moe_config(
     )
 
 
+def _small_shared_hybrid_moe_config(
+    *,
+    n_layers: int,
+    shared_blocks: Optional[SharedBlockConfig],
+    d_model: int = 64,
+) -> TransformerConfig:
+    """Like _small_shared_moe_config but uses the hybrid MoE block so the dense
+    `shared_mlp` exists, allowing share_shared_mlp tests."""
+    layer_norm = LayerNormConfig(name=LayerNormType.rms, bias=False)
+    block = TransformerBlockConfig(
+        name=TransformerBlockType.moe_hybrid_reordered_norm,
+        sequence_mixer=AttentionConfig(n_heads=4, rope=RoPEConfig(), bias=False),
+        layer_norm=layer_norm,
+        feed_forward=FeedForwardConfig(hidden_size=d_model, bias=False),
+        feed_forward_moe=MoEConfig(
+            name=MoEType.dropless,
+            num_experts_list=[4],
+            hidden_sizes_list=[d_model],
+            routers_list=[MoERouterConfig(top_k=2)],
+            shared_mlp=FeedForwardConfig(hidden_size=d_model, bias=False),
+            lb_loss_weight=0.01,
+            z_loss_weight=0.001,
+        ),
+    )
+    return TransformerConfig(
+        name=TransformerType.moe,
+        d_model=d_model,
+        vocab_size=256,
+        n_layers=n_layers,
+        block=block,
+        lm_head=LMHeadConfig(layer_norm=layer_norm, bias=False),
+        shared_blocks=shared_blocks,
+    )
+
+
 def test_shared_blocks_module_identity():
     n_layers = 6
     sb = SharedBlockConfig(
@@ -1152,6 +1187,142 @@ def test_shared_blocks_none_state_dict_is_passthrough():
     fresh.load_state_dict(sd, strict=True)
     for (name, pa), (_, pb) in zip(model.named_parameters(), fresh.named_parameters()):
         assert torch.equal(pa, pb), f"mismatch at {name}"
+
+
+def test_shared_router_metric_accumulates_across_calls():
+    """
+    TODO #5: when the same router is called N times in one forward pass (the natural
+    consequence of share_routers=True across N blocks), its load_balancing_loss and
+    batch_size_per_expert accumulators must reflect all N contributions, not just the
+    last one. Test directly at the router level — full MoE forward requires CUDA
+    kernels, but the router itself is plain PyTorch and runs on CPU.
+    """
+    from olmo_core.nn.moe.router import MoERouterConfig
+
+    torch.manual_seed(0)
+    router_cfg = MoERouterConfig(top_k=2)
+    router = router_cfg.build(
+        d_model=64,
+        num_experts=8,
+        lb_loss_weight=0.01,
+        z_loss_weight=0.001,
+        init_device="cpu",
+    )
+    router.train()
+
+    inputs = torch.randn(2, 16, 64, generator=torch.Generator().manual_seed(1))
+
+    # First call: state populates.
+    router(inputs)
+    lb1 = router.load_balancing_loss.detach().clone()
+    bz1 = router.batch_size_per_expert.detach().clone()
+
+    # Second call: state should accumulate, not overwrite.
+    router(inputs)
+    lb2 = router.load_balancing_loss.detach().clone()
+    bz2 = router.batch_size_per_expert.detach().clone()
+
+    # Accumulation: second is ~2x the first (with identical inputs).
+    assert lb2.item() > lb1.item(), f"lb_loss did not accumulate: {lb1.item()} -> {lb2.item()}"
+    assert torch.allclose(lb2, lb1 * 2, rtol=1e-4), (
+        f"lb_loss accumulation off: lb2={lb2.item()}, 2*lb1={2*lb1.item()}"
+    )
+    assert torch.all(bz2 >= bz1), "batch_size_per_expert went down"
+    assert torch.equal(bz2, bz1 * 2), (
+        f"batch_size_per_expert accumulation off: got {bz2}, expected {bz1 * 2}"
+    )
+
+
+def test_shared_blocks_num_flops_per_token_equals_unshared():
+    """
+    TODO #6: num_flops_per_token sums over self.blocks.values(), and for shared MoE
+    each referencing block reports the same per-token FLOPs (since the shared module
+    is the same instance). So with the same n_layers, shared and unshared models
+    should report identical FLOPs/token — sharing only changes parameter footprint,
+    not the per-token work done.
+    """
+    n_layers = 5
+    seq_len = 64
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=3, share_routers=True, share_experts=True
+    )
+    shared_model = _small_shared_moe_config(n_layers=n_layers, shared_blocks=sb).build(
+        init_device="cpu"
+    )
+    unshared_model = _small_shared_moe_config(n_layers=n_layers, shared_blocks=None).build(
+        init_device="cpu"
+    )
+
+    shared_flops = shared_model.num_flops_per_token(seq_len)
+    unshared_flops = unshared_model.num_flops_per_token(seq_len)
+    assert shared_flops == unshared_flops, (
+        f"shared.num_flops_per_token={shared_flops} != "
+        f"unshared.num_flops_per_token={unshared_flops}"
+    )
+
+
+def test_shared_blocks_share_attention_identity():
+    """TODO #11: share_attention aliases self.attention across the shared range."""
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=3, share_routers=False, share_experts=False,
+        share_attention=True,
+    )
+    config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    model = config.build(init_device="cpu")
+
+    canonical_attn = model.blocks[str(sb.start_layer)].attention
+    for idx in sb.layer_indices():
+        assert model.blocks[str(idx)].attention is canonical_attn, (
+            f"block {idx} attention should alias canonical"
+        )
+    # Outside the shared range, attention must NOT alias.
+    assert model.blocks["0"].attention is not canonical_attn
+    assert model.blocks["4"].attention is not canonical_attn
+    # And feed_forward_moe must remain unaliased (we didn't set share_routers/experts).
+    canonical_moe = model.blocks[str(sb.start_layer)].feed_forward_moe
+    for idx in sb.layer_indices():
+        if idx == sb.start_layer:
+            continue
+        assert model.blocks[str(idx)].feed_forward_moe is not canonical_moe
+
+
+def test_shared_blocks_share_norms_identity():
+    """TODO #11: share_norms aliases attention_norm and feed_forward_norm across the range."""
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=3, share_routers=False, share_experts=False,
+        share_norms=True,
+    )
+    config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
+    model = config.build(init_device="cpu")
+
+    canonical = model.blocks[str(sb.start_layer)]
+    for idx in sb.layer_indices():
+        assert model.blocks[str(idx)].attention_norm is canonical.attention_norm
+        assert model.blocks[str(idx)].feed_forward_norm is canonical.feed_forward_norm
+    assert model.blocks["0"].attention_norm is not canonical.attention_norm
+    assert model.blocks["4"].attention_norm is not canonical.attention_norm
+
+
+def test_shared_blocks_share_shared_mlp_identity():
+    """
+    TODO #11: share_shared_mlp aliases the hybrid MoE's dense shared_mlp across the range.
+    Requires the hybrid block type since shared_mlp doesn't exist on pure-MoE blocks.
+    """
+    sb = SharedBlockConfig(
+        start_layer=1, n_layers=3, share_routers=False, share_experts=False,
+        share_shared_mlp=True,
+    )
+    config = _small_shared_hybrid_moe_config(n_layers=5, shared_blocks=sb)
+    model = config.build(init_device="cpu")
+
+    canonical_shared_mlp = model.blocks[str(sb.start_layer)].feed_forward_moe.shared_mlp
+    assert canonical_shared_mlp is not None, "hybrid MoE should have shared_mlp"
+    for idx in sb.layer_indices():
+        assert model.blocks[str(idx)].feed_forward_moe.shared_mlp is canonical_shared_mlp, (
+            f"block {idx} shared_mlp should alias canonical"
+        )
+    assert model.blocks["0"].feed_forward_moe.shared_mlp is not canonical_shared_mlp
+    assert model.blocks["4"].feed_forward_moe.shared_mlp is not canonical_shared_mlp
 
 
 def test_shared_blocks_rejects_block_overrides_in_shared_range():
