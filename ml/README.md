@@ -278,6 +278,16 @@ Share only routers (keep per-layer experts, study what routing-policy reuse look
 --shared_blocks_share_routers=True --shared_blocks_share_experts=False
 ```
 
+### Pre-flight smoke test
+
+Before submitting a real training run, you can validate the config-build path locally — no GPU, no data, no SLURM required:
+
+```bash
+python ml/scripts/smoke_test_shared_moe.py
+```
+
+This builds a small `olmo2_ml_10M` model with `shared_blocks` enabled (on `init_device="meta"`), then checks module identity, parameter counts (`num_params` and `num_param_uses`), `state_dict` dedup, and W&B tag generation. Exits 0 on success. Useful before sinking time into a SLURM submission.
+
 ### Example sweep subgrids
 
 `train_sweep.py` includes commented-out example subgrids for shared-block runs:
