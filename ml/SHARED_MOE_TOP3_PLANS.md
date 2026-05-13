@@ -1,10 +1,12 @@
 # Top-3 Shared-MoE Follow-up Plans
 
+> **Status: all three plans landed.** This file is preserved for historical reference — it captures the design that was approved before implementation. The actual fixes shipped in commits `f273d77` (Plan 1), `df04868` (Plan 2), and `a1f04c2` (Plan 3). For per-fix walkthroughs (what actually got built and why), see `SHARED_MOE_FIX_NOTES.md` — those are the durable design records. For the top-level status of all `SharedBlockConfig` follow-ups, see `SHARED_MOE_TODOS.md`.
+
 Implementation plans for the three highest-priority items from `ml/SHARED_MOE_TODOS.md`:
 
-1. `apply_tp` / `apply_cp` dedup (TODO #8) — TP/CP correctness gap of the same class as the EP/FSDP fix.
-2. `init_weights` per-block dedup (TODO #9) — silent correctness issue with depth-scaled init.
-3. `state_dict` deduplication (TODO #3) — checkpoint bloat + silent load-time winner.
+1. `apply_tp` / `apply_cp` dedup (TODO #8) — TP/CP correctness gap of the same class as the EP/FSDP fix. ✅ landed `f273d77`.
+2. `init_weights` per-block dedup (TODO #9) — silent correctness issue with depth-scaled init. ✅ landed `df04868`.
+3. `state_dict` deduplication (TODO #3) — checkpoint bloat + silent load-time winner. ✅ landed `a1f04c2`.
 
 Each plan is structured as: **Goal / Approach / Files / Code sketch / Tests / Verification**.
 

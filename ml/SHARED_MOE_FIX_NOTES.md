@@ -2,9 +2,18 @@
 
 Walkthroughs of each correctness fix landed for the `SharedBlockConfig` feature (physical parameter sharing across a contiguous range of transformer blocks). Each entry explains the bug in concrete terms, what the fix does, and any related concepts worth knowing.
 
+**Entries below (in landing order):**
+
+| TODO | Title | Commit |
+|------|-------|--------|
+| #9 | `init_weights` per-block dedup | `df04868` |
+| #8 | `apply_tp` / `apply_cp` dedup | `f273d77` |
+| #3 | `state_dict` deduplication | `a1f04c2` |
+| #10 | `block_overrides` × `shared_blocks` validation | `a7d9785` |
+
 **Companion files:**
-- `ml/SHARED_MOE_TODOS.md` — backlog index of follow-ups.
-- `ml/SHARED_MOE_TOP3_PLANS.md` — implementation plans for the highest-priority items.
+- `ml/SHARED_MOE_TODOS.md` — backlog index of follow-ups (status of all 12 items).
+- `ml/SHARED_MOE_TOP3_PLANS.md` — original design plans for #3, #8, #9 (kept for historical reference; all three landed).
 
 ---
 

@@ -4,9 +4,9 @@ Tools for training OLMo-Core MoE (and dense) models on SLURM clusters. Wraps `ol
 
 ## Companion docs
 
-- [`SHARED_MOE_TODOS.md`](./SHARED_MOE_TODOS.md) — backlog of open follow-ups for the `SharedBlockConfig` feature.
-- [`SHARED_MOE_TOP3_PLANS.md`](./SHARED_MOE_TOP3_PLANS.md) — implementation plans for the highest-priority items.
-- [`SHARED_MOE_FIX_NOTES.md`](./SHARED_MOE_FIX_NOTES.md) — walkthroughs of each correctness fix shipped on the shared-MoE feature.
+- [`SHARED_MOE_TODOS.md`](./SHARED_MOE_TODOS.md) — status table for the 12 `SharedBlockConfig` follow-ups (9 done, 1 partial, 3 open) plus rationale for each remaining item.
+- [`SHARED_MOE_FIX_NOTES.md`](./SHARED_MOE_FIX_NOTES.md) — concept-level walkthroughs of each correctness fix shipped on the shared-MoE feature (`init_weights` dedup, TP/CP dedup, `state_dict` dedup, `block_overrides` validation).
+- [`SHARED_MOE_TOP3_PLANS.md`](./SHARED_MOE_TOP3_PLANS.md) — historical design plans for the highest-priority items; all three have shipped, kept for reference.
 
 ---
 

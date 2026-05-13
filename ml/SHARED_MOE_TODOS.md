@@ -1,6 +1,31 @@
 # Shared-MoE Follow-ups
 
-Open items left over from the `SharedBlockConfig` implementation (shared routers/experts/attention/norms across a contiguous range of middle layers). Nothing here is required for correctness in single-host training; these are improvements / hardening for production and large-scale use.
+Backlog of follow-ups for the `SharedBlockConfig` feature (shared routers/experts/attention/norms across a contiguous range of middle layers). Nothing here is required for correctness in single-host training; these are improvements / hardening for production and large-scale use.
+
+## Status at a glance
+
+| # | Item | Status | Commit |
+|---|------|--------|--------|
+| 1 | Memory-efficient construction | ⏳ open | — |
+| 2 | Fine-grained FSDP support | ⏳ open | — |
+| 3 | `state_dict` deduplication | ✅ done | `a1f04c2` |
+| 4 | EP + FSDP-blocks integration test | ✅ done (multi-GPU only) | `de45303` |
+| 5 | Router metric regression test | ✅ done | `850009c` |
+| 6 | `num_flops_per_token` regression test | ✅ done | `850009c` |
+| 7 | Pipeline-parallelism interaction | ⏳ open | — |
+| 8 | `apply_tp` / `apply_cp` dedup | ✅ done | `f273d77` |
+| 9 | `init_weights` per-block dedup | ✅ done | `df04868` |
+| 10 | `block_overrides` ∩ `shared_blocks` validation | ✅ done | `a7d9785` |
+| 11 | Tests for `share_attention` / `share_norms` / `share_shared_mlp` | ✅ done | `850009c` |
+| 12 | Usage example for `SharedBlockConfig` | 🚧 partial — `ml/README.md` has the section; `SharedBlockConfig` docstring still has no inline example |
+
+**Completion summary:** 9 of 12 closed, 1 partial, 3 open. The three open items (#1, #2, #7) are all efficiency / large-scale hardening — none are correctness blockers for single-node training.
+
+Per-fix walkthroughs for completed items live in `SHARED_MOE_FIX_NOTES.md`. Implementation plans for the highest-priority items are in `SHARED_MOE_TOP3_PLANS.md`.
+
+---
+
+# Open
 
 ## 1. Memory-efficient construction
 
@@ -16,80 +41,72 @@ Open items left over from the `SharedBlockConfig` implementation (shared routers
 
 **Why it might matter:** Fine-grained wrapping can improve memory and overlap for very large models. We're forcing users to fall back to whole-block wrapping when sharing is enabled.
 
-**Suggested fix:** At the `Transformer` level, identify the unique shared submodules up front and wrap them with `fully_shard` once. Pass a `skip_modules: set[int]` (set of `id(...)`) into `block.apply_fsdp` so each block's fine-grained pass skips already-wrapped children. This touches every block class that overrides `apply_fsdp` (TransformerBlock, MoETransformerBlock, hybrid variants), so it's mechanical but not zero-cost to land.
+**Suggested fix:** At the `Transformer` level, identify the unique shared submodules up front and wrap them with `fully_shard` once. Pass a `skip_modules: set[int]` (set of `id(...)`) into `block.apply_fsdp` so each block's fine-grained pass skips already-wrapped children. The pattern already exists for TP/CP (`#8` below) — same trick, applied to FSDP. Touches every block class that overrides `apply_fsdp` (TransformerBlock, MoETransformerBlock, hybrid variants), so it's mechanical but not zero-cost to land.
 
-## 3. `state_dict` deduplication
-
-**What:** When the same `nn.Parameter` is referenced by N blocks, `state_dict()` walks the module tree without dedup and emits N keys (e.g., `blocks.1.feed_forward_moe.routers_list.0.weight` through `blocks.4...`), all pointing to the same tensor.
-
-**Three concrete consequences:**
-
-1. **Checkpoint bloat.** The serialized checkpoint contains N copies of every shared tensor. For a real MoE most of the checkpoint mass is in experts — could be 3–4× larger than necessary depending on the shared range.
-2. **Silent winner on load.** `load_state_dict` resolves all N keys to the same Parameter, then calls `param.data.copy_(value)` once per key. If you load an unshared checkpoint into a sharing-enabled model (e.g., a fine-tuning warm-start), N−1 of the source values get discarded — last-write-wins, no warning.
-3. **Strict-mode round-trip surprises** when converting between shared/unshared model variants. Going `shared → unshared` works but produces N identical copies. Going `unshared → shared` hits #2.
-
-**Open question before fixing:** OLMo-core saves via DCP (`save_model_and_optim_state` / `load_model_and_optim_state`), which has its own DTensor-aware behavior. **Verify what DCP does today with shared params** before adding any override — it may already dedup.
-
-**Suggested fix (if DCP doesn't dedup):** Override `Transformer.state_dict` and `_load_from_state_dict` to write/expect each shared Parameter only under its canonical path (the start-layer path). The model stays internally consistent either way; this is purely about the on-disk representation.
-
-## 4. End-to-end EP + FSDP-blocks interaction test
-
-**What:** The plan calls for a 2-GPU integration test where `apply_ep(ep_mesh)` is applied first, then `apply_fsdp(wrapping_strategy="blocks")`, with `shared_blocks` enabled. We've unit-tested module identity, param counts, validation, and partial sharing on CPU; the GPU forward/backward test is `@pytest.mark.gpu` but doesn't exercise the EP+FSDP interaction.
-
-**Why it might matter:** Each shared expert weight becomes a DTensor under EP. The "blocks" FSDP wrap then encloses each block (including its reference to the now-DTensor-ified shared experts). FSDP 2's behavior when a DTensor parameter lives under multiple FSDP units needs empirical confirmation.
-
-**Suggested test:** A multi-GPU pytest (`@requires_multi_gpu`) that builds a small shared-MoE model, applies EP then FSDP, runs a forward + backward + optimizer step, and checks loss decreases. Run with `n_layers=4, shared_blocks=(start=1, n=2, share_routers+experts)`.
-
-## 5. Router metric audit — done, but worth a regression test
-
-**Status:** Inspected `MoERouter.forward` — `load_balancing_loss`, `z_loss`, and `batch_size_per_expert` all accumulate via `+=`. A shared router called N times in one forward pass naturally accumulates N contributions. `MoETransformer.compute_auxiliary_metrics` and `reset_auxiliary_metrics` were updated to iterate by unique MoE id so we don't read-then-reset-then-read-zeros, and don't re-aggregate already-summed state.
-
-**Suggested test:** A small CPU-friendly (or GPU) test that runs two forward+backward passes through a model with a shared router and asserts that the `load_balancing_loss` metric reported in `compute_auxiliary_metrics` equals the sum of per-call lb-losses across all N shared layer applications, not just one. Currently nothing exercises this path.
-
-## 6. `num_flops_per_token` audit under sharing
-
-**Status (informal):** `Transformer.num_flops_per_token` iterates `self.blocks.values()` and sums each block's contribution. For a shared MoE module, `block.num_flops_per_token` is called once per referencing block — each call returns the same per-token FLOPs — so the total is correctly usage-weighted. The `num_param_uses` / `num_active_param_uses` properties were added so a researcher can write `flops ≈ 6 × num_active_param_uses × tokens` and get the right answer.
-
-**Suggested check:** Add a test that builds a shared-blocks model and an equivalent unshared model with the same `n_layers`, and asserts `shared.num_flops_per_token(seq_len) == unshared.num_flops_per_token(seq_len)`. Should already hold; the test would lock it in.
-
-## 7. Pipeline parallelism interaction
+## 7. Pipeline-parallelism interaction
 
 **What we haven't thought about:** `Transformer.apply_pp` and the various `_pp_*` state on the model. PP slices the block list across stages. If a shared range straddles a stage boundary, the same module would need to live on multiple stages — which doesn't work without explicit replication or weight sync.
 
 **Suggested behavior:** In `apply_pp`, detect whether `shared_blocks.layer_indices()` is fully contained within a single PP stage's block range; raise `OLMoConfigurationError` otherwise. Document the constraint.
 
-## 8. `apply_tp` and `apply_cp` are not dedup'd
+## 12. Usage example for `SharedBlockConfig` (partial)
 
-**What:** `Transformer.apply_tp` (model.py:649-687) and `Transformer.apply_cp` (model.py:689-710) iterate `for block in self.blocks.values()` and call `block.apply_tp(...)` / `block.apply_cp(...)` per-block. Those block methods then call `parallelize_module(self.attention, ...)`, `parallelize_module(self.feed_forward_moe, ...)`, and `self.feed_forward_moe.apply_cp(...)` on the inner submodules. When the same `feed_forward_moe` is shared across N blocks, those calls run N times against the same module.
+**What's done:** `ml/README.md` has a "Shared MoE blocks" section with the flag reference, three worked examples, and a sweep-subgrid snippet. The CLI-side documentation is complete.
 
-**Why it matters:** This is the exact same correctness gap that `apply_ep` and `apply_fsdp` had — wrapping the same module with `parallelize_module` twice corrupts TP state. Anyone enabling `shared_blocks` together with TP or CP will hit this. The fact that it doesn't fail in our existing CPU tests is just because we don't exercise TP/CP there.
+**What's still missing:** The `SharedBlockConfig` dataclass itself (in `src/olmo_core/nn/transformer/config.py`) has per-field descriptions but no inline usage example in its docstring. A library consumer reading the source would not see a recommended config without crossing over into `ml/README.md`.
 
-**Suggested fix:** Mirror the `seen_moes: set[int]` dedup pattern used in `MoETransformer.apply_ep` (model.py:1062-1073) inside `Transformer.apply_tp` and `Transformer.apply_cp`. For TP: track which inner submodules have already been `parallelize_module`'d; skip them on subsequent blocks. For CP: similar dedup, also extend to shared attention if `share_attention=True`.
+**Suggested fix:** Add a short example block (maybe 10-15 lines) to the `SharedBlockConfig` docstring. Cover the typical case (`share_routers=True, share_experts=True`, middle range of an N-layer model) plus a note that `n_layers` here is the *count of layers in the shared range*, not the total model depth (an easy thing to misread).
 
-## 9. `init_weights` re-initializes shared submodules N times
+---
 
-**What:** `Transformer.init_weights` (model.py:295-374) iterates `for block in self.blocks.values()` and calls `self.init_method.init_attention(block.attention, block_idx=block.block_idx, num_blocks=self.n_layers, ...)`, `init_feed_forward_moe(...)`, etc. on each block. For a shared submodule, this runs N times against the same `Parameter`s with N different `block_idx` values — last write wins.
+# Completed
 
-**Why it matters:** Many `InitMethod`s scale the init std by depth (`block_idx` / `num_blocks`), e.g. `std / sqrt(2 * (block_idx + 1))`. With sharing, the shared weights silently end up with the init produced for the *highest* `block_idx` in the shared range, not the canonical (start) one, and N−1 RNG draws are wasted. There's no warning and the result is a wrong-but-trains-OK model. Also: RoPE and attention-backend warmup-cache calls inside the loop run N times if `share_attention=True` (wasteful, not incorrect).
+Each entry below points at its implementing commit and the walkthrough section in `SHARED_MOE_FIX_NOTES.md`.
 
-**Suggested fix:** Dedup the per-block init pass by `id(submodule)`. When the loop encounters a block whose `attention` or `feed_forward_moe` has already been init'd, skip the init call (but still warm up per-block caches that depend on block_idx, if any). Equivalently: build a set of canonical (block_idx, submodule) pairs up front and only init those.
+## 3. `state_dict` deduplication ✅
 
-## 10. `block_overrides` ∩ `shared_blocks` is unvalidated
+**Landed in:** `a1f04c2`. Walkthrough: `SHARED_MOE_FIX_NOTES.md` → "TODO #3 — state_dict deduplication".
 
-**What:** `_apply_shared_blocks` (model.py) overwrites the non-canonical blocks' submodules with references to the canonical block's submodules. If a layer in `shared_blocks.layer_indices()` also has an entry in `block_overrides` that produces a structurally different block (e.g. different `num_experts_list`, different block type, MoE vs hybrid), the override gets silently clobbered.
+**Summary:** Override `Transformer.state_dict()` to emit only canonical paths for shared `nn.Parameter`s; override `Transformer.load_state_dict()` to fan canonical entries back out to alias paths so PyTorch's `strict=True` walk is satisfied, and raise `RuntimeError` when the source dict has *differing* per-layer values for what's now a single shared Parameter (catches silent corruption when warm-starting from an unshared pretrained checkpoint). Works transparently through DCP's `save_model_and_optim_state` / `load_model_and_optim_state`.
 
-**Why it matters:** No error is raised. In the lucky case shapes match and the user gets a model different from what they configured. In the unlucky case shapes differ and you get a runtime shape error far from the config site.
+## 4. EP + FSDP-blocks integration test ✅
 
-**Suggested fix:** In `SharedBlockConfig.validate_against` (or in `_apply_shared_blocks`), check that no `block_overrides` index lies in `layer_indices()`, OR that the override resolves to a config structurally identical to the canonical block. Raise `OLMoConfigurationError` with a clear message otherwise.
+**Landed in:** `de45303`. The test is `test_shared_blocks_ep_fsdp_integration` in `src/test/nn/transformer/model_test.py`, marked `@requires_multi_gpu` so it skips on single-GPU/CPU but runs on multi-GPU CI.
 
-## 11. Test coverage gaps for `share_attention` / `share_norms` / `share_shared_mlp`
+**Summary:** Builds a small shared-MoE model on `init_device="meta"`, applies EP on a 2-GPU mesh, then FSDP with `wrapping_strategy="blocks"`, runs forward+backward+optim across 2 steps, asserts loss is finite both times. Validates that the parallelism-dedup fixes (#8 + EP + FSDP) compose cleanly when DTensor and FSDP layer on top of physically-shared parameters.
 
-**What:** The five CPU tests in `src/test/nn/transformer/model_test.py` exercise `share_routers`, `share_experts`, both together, partial-sharing, validation, and the GPU-only forward/backward path. The remaining three flags — `share_attention`, `share_norms`, `share_shared_mlp` — have no direct test.
+## 5. Router metric regression test ✅
 
-**Suggested fix:** Add three tests modeled on `test_shared_blocks_module_identity` that build a small model with each flag set in isolation and assert `id()` equality of the right submodule across the shared range. For `share_shared_mlp` use the hybrid block type (`moe_hybrid_reordered_norm`) so the dense `shared_mlp` actually exists.
+**Landed in:** `850009c`. Test: `test_shared_router_metric_accumulates_across_calls`.
 
-## 12. Usage example for `SharedBlockConfig`
+**Summary:** Builds an `MoELinearRouter` directly (router forward is plain PyTorch, runs on CPU) and calls it twice with identical inputs. Asserts `load_balancing_loss` and `batch_size_per_expert` accumulators double — i.e. `+=` is being used, not overwrite. This is the property that makes shared-router-across-N-blocks produce sensible metrics.
 
-**What:** Beyond the per-field descriptions on the dataclass, there's no user-facing snippet showing how to enable shared blocks from a config or how to think about the `start_layer`/`n_layers` choice for a given model depth.
+## 6. `num_flops_per_token` regression test ✅
 
-**Suggested fix:** Add a short example block (maybe 10-15 lines) to the `SharedBlockConfig` docstring in `src/olmo_core/nn/transformer/config.py`, and a paragraph + example subgrid pointer in `ml/README.md`. Cover the typical case (`share_routers=True, share_experts=True`, middle range of an N-layer model) plus a note that `n_layers` here is the *count of layers in the shared range*, not the total model depth (an easy thing to misread).
+**Landed in:** `850009c`. Test: `test_shared_blocks_num_flops_per_token_equals_unshared`.
+
+**Summary:** Builds a shared-blocks model and an equivalent unshared model with the same `n_layers`, asserts `shared.num_flops_per_token(seq_len) == unshared.num_flops_per_token(seq_len)`. Locks in the invariant that sharing only changes parameter footprint, not per-token work.
+
+## 8. `apply_tp` and `apply_cp` dedup ✅
+
+**Landed in:** `f273d77`. Walkthrough: `SHARED_MOE_FIX_NOTES.md` → "TODO #8 — apply_tp / apply_cp dedup".
+
+**Summary:** Threaded an optional `skip_modules: Set[int]` kwarg through the abstract `TransformerBlockBase.apply_tp` / `.apply_cp` signatures and all concrete overrides. The model-level driver constructs one set and passes it to each per-block call; each block's method gates its inner-submodule recursion on `id(submodule) not in skip_modules`. Result: a shared `feed_forward_moe` / `attention` / norm is parallelized exactly once across N referencing blocks, never N times.
+
+## 9. `init_weights` per-block dedup ✅
+
+**Landed in:** `df04868`. Walkthrough: `SHARED_MOE_FIX_NOTES.md` → "TODO #9 — init_weights per-block dedup".
+
+**Summary:** Added four `seen_*: Set[int]` tracking sets in `Transformer.init_weights` and gated each `init_method.init_*` and `*.warmup_cache(...)` call on `id(submodule)`. Because `self.blocks` is a `ModuleDict` iterated in numerical key order, the *canonical* (lowest) `block_idx` drives init for shared submodules — which is what depth-scaled init schemes like `InitMethod.llama_depth` actually want. Pre-fix, the last block_idx in the shared range silently won.
+
+## 10. `block_overrides` ∩ `shared_blocks` validation ✅
+
+**Landed in:** `a7d9785`. Walkthrough: `SHARED_MOE_FIX_NOTES.md` → "TODO #10 — block_overrides × shared_blocks validation".
+
+**Summary:** In `Transformer.__init__`, intersect `block_overrides` keys with `shared_blocks.layer_indices()` and raise `OLMoConfigurationError` if any overlap. Prevents the silent footgun where a `block_overrides` entry at an index inside the shared range gets clobbered by `_apply_shared_blocks` (silently producing a wrong model if shapes match, or a confusing far-away crash if they don't).
+
+## 11. Tests for `share_attention` / `share_norms` / `share_shared_mlp` ✅
+
+**Landed in:** `850009c`. Three tests: `test_shared_blocks_share_attention_identity`, `test_shared_blocks_share_norms_identity`, `test_shared_blocks_share_shared_mlp_identity`.
+
+**Summary:** Module-identity tests modeled on the existing `test_shared_blocks_module_identity`. Each builds a small model with the relevant flag enabled in isolation and asserts `is` aliasing of the right submodule across the shared range, plus distinct identity outside the range. `share_shared_mlp` uses the hybrid block type (`moe_hybrid_reordered_norm`) because the dense `shared_mlp` only exists there.
