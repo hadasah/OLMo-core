@@ -23,21 +23,17 @@ import argparse
 import json
 import logging
 import os
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import torch
-import torch.nn.functional as F
-import numpy as np
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 
 
 def load_model_from_checkpoint(checkpoint_path: str, device: str = "cpu"):
     """Load a model from an OLMo-core checkpoint directory."""
     from olmo_core.nn.transformer import TransformerConfig
-    from olmo_core.train import TrainerConfig
 
     config_path = os.path.join(checkpoint_path, "config.json")
     if not os.path.exists(config_path):
@@ -80,7 +76,7 @@ def get_routing_decisions(model, input_ids: torch.Tensor) -> Dict[int, Dict[str,
     # Register hooks on router forward methods
     hooks = []
     for block_key, block in model.blocks.items():
-        if not hasattr(block, 'feed_forward_moe'):
+        if not hasattr(block, "feed_forward_moe"):
             continue
 
         layer_idx = int(block_key)
@@ -103,6 +99,7 @@ def get_routing_decisions(model, input_ids: torch.Tensor) -> Dict[int, Dict[str,
                         x = input[0]
                         logits = module.get_expert_logits(x).detach().cpu()
                         info_dict[f"router_{r_idx}"]["logits"] = logits
+
                 return hook_fn
 
             h = router.register_forward_hook(make_hook(routing_info[layer_idx], router_idx, router))
@@ -184,7 +181,7 @@ def analyze_expert_knockout(
     # Get baseline loss
     with torch.no_grad():
         baseline_output = model(eval_input_ids.to(device), labels=labels.to(device))
-        if hasattr(baseline_output, 'loss'):
+        if hasattr(baseline_output, "loss"):
             baseline_loss = baseline_output.loss.item()
         else:
             baseline_loss = baseline_output.item()
@@ -193,15 +190,13 @@ def analyze_expert_knockout(
     results = {"baseline_loss": baseline_loss, "knockout_losses": {}}
 
     for block_key, block in model.blocks.items():
-        if not hasattr(block, 'feed_forward_moe'):
+        if not hasattr(block, "feed_forward_moe"):
             continue
 
         layer_idx = int(block_key)
         moe = block.feed_forward_moe
 
-        for router_idx, (router, experts) in enumerate(
-            zip(moe.routers_list, moe.experts_list)
-        ):
+        for router_idx, (router, experts) in enumerate(zip(moe.routers_list, moe.experts_list)):
             key = f"layer{layer_idx}_router{router_idx}"
             results["knockout_losses"][key] = {}
 
@@ -217,7 +212,7 @@ def analyze_expert_knockout(
 
                 with torch.no_grad():
                     ko_output = model(eval_input_ids.to(device), labels=labels.to(device))
-                    if hasattr(ko_output, 'loss'):
+                    if hasattr(ko_output, "loss"):
                         ko_loss = ko_output.loss.item()
                     else:
                         ko_loss = ko_output.item()
@@ -233,8 +228,10 @@ def analyze_expert_knockout(
                     "loss_increase": loss_increase,
                 }
 
-            log.info(f"  {key}: max loss increase = "
-                     f"{max(v['loss_increase'] for v in results['knockout_losses'][key].values()):.4f}")
+            log.info(
+                f"  {key}: max loss increase = "
+                f"{max(v['loss_increase'] for v in results['knockout_losses'][key].values()):.4f}"
+            )
 
     del model
     return results
@@ -313,14 +310,14 @@ def analyze_co_activation(
 
 def _extract_step(checkpoint_dir: str) -> int:
     """Extract the training step number from a checkpoint directory name."""
-    basename = os.path.basename(checkpoint_dir.rstrip('/'))
+    basename = os.path.basename(checkpoint_dir.rstrip("/"))
     # Common patterns: "step-1000", "step_1000", "1000"
-    for part in basename.split('-'):
+    for part in basename.split("-"):
         try:
             return int(part)
         except ValueError:
             continue
-    for part in basename.split('_'):
+    for part in basename.split("_"):
         try:
             return int(part)
         except ValueError:
@@ -334,7 +331,9 @@ def find_checkpoints(save_dir: str) -> List[str]:
     for entry in os.listdir(save_dir):
         full_path = os.path.join(save_dir, entry)
         if os.path.isdir(full_path) and any(
-            f.endswith('.pt') for f in os.listdir(full_path) if os.path.isfile(os.path.join(full_path, f))
+            f.endswith(".pt")
+            for f in os.listdir(full_path)
+            if os.path.isfile(os.path.join(full_path, f))
         ):
             checkpoints.append(full_path)
 
@@ -342,23 +341,36 @@ def find_checkpoints(save_dir: str) -> List[str]:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Post-training routing analysis for A+C experiments")
-    parser.add_argument("--checkpoint_dir", type=str, required=True,
-                        help="Directory containing training checkpoints")
-    parser.add_argument("--analysis", nargs="+",
-                        choices=["ossification", "knockout", "co_activation", "all"],
-                        default=["all"],
-                        help="Which analyses to run")
-    parser.add_argument("--output_dir", type=str, default=None,
-                        help="Directory to save results (defaults to checkpoint_dir/routing_analysis)")
-    parser.add_argument("--device", type=str, default="cpu",
-                        help="Device to run analysis on")
-    parser.add_argument("--num_eval_batches", type=int, default=4,
-                        help="Number of evaluation batches to use")
-    parser.add_argument("--batch_size", type=int, default=4,
-                        help="Batch size for evaluation")
-    parser.add_argument("--seq_length", type=int, default=2048,
-                        help="Sequence length for evaluation")
+    parser = argparse.ArgumentParser(
+        description="Post-training routing analysis for A+C experiments"
+    )
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        required=True,
+        help="Directory containing training checkpoints",
+    )
+    parser.add_argument(
+        "--analysis",
+        nargs="+",
+        choices=["ossification", "knockout", "co_activation", "all"],
+        default=["all"],
+        help="Which analyses to run",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="Directory to save results (defaults to checkpoint_dir/routing_analysis)",
+    )
+    parser.add_argument("--device", type=str, default="cpu", help="Device to run analysis on")
+    parser.add_argument(
+        "--num_eval_batches", type=int, default=4, help="Number of evaluation batches to use"
+    )
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for evaluation")
+    parser.add_argument(
+        "--seq_length", type=int, default=2048, help="Sequence length for evaluation"
+    )
 
     args = parser.parse_args()
 

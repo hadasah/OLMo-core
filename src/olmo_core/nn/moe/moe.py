@@ -64,7 +64,7 @@ class MoEConfig(ModuleConfig):
     num_experts_list: List[int] = field(default_factory=lambda: [1])
     hidden_sizes_list: List[int] = field(default_factory=lambda: [1])
     capacity_factor: Optional[float] = None
-    routers_list: List[MoERouterConfig] = field(default_factory=lambda: [MoERouterConfig])
+    routers_list: List[MoERouterConfig] = field(default_factory=lambda: [MoERouterConfig()])
     shared_mlp: Optional[FeedForwardConfig] = None
     lb_loss_weight: Optional[float] = 0.01
     lb_loss_granularity: MoELoadBalancingLossGranularity = (
@@ -81,9 +81,7 @@ class MoEConfig(ModuleConfig):
             num_experts = self.num_experts_list[i]
             hidden_size = self.hidden_sizes_list[i]
             num_params += router.num_params(d_model, num_experts)
-            num_params += (
-                3 * d_model * hidden_size * num_experts
-            )
+            num_params += 3 * d_model * hidden_size * num_experts
         if self.shared_mlp is not None:
             num_params += self.shared_mlp.num_params(d_model)
         return num_params
@@ -94,8 +92,8 @@ class MoEConfig(ModuleConfig):
             router = self.routers_list[i]
             num_experts = self.num_experts_list[i]
             hidden_size = self.hidden_sizes_list[i]
-            active_params -= (3 * d_model * hidden_size * num_experts)
-            active_params += (3 * d_model * hidden_size * router.top_k)
+            active_params -= 3 * d_model * hidden_size * num_experts
+            active_params += 3 * d_model * hidden_size * router.top_k
         return active_params
 
     def build(
@@ -165,25 +163,29 @@ class MoEBase(nn.Module):
             num_experts = num_experts_list[i]
             hidden_size = hidden_sizes_list[i]
             router = routers_list[i]
-            self.routers_list.append(router.build(
-                d_model,
-                num_experts,
-                lb_loss_weight=lb_loss_weight,
-                lb_loss_granularity=lb_loss_granularity,
-                z_loss_weight=z_loss_weight,
-                dtype=dtype,
-                init_device=init_device,
-            ))
-            self.experts_list.append(self._init_parallel_mlp(
-                d_model=d_model,
-                num_experts=num_experts,
-                hidden_size=hidden_size,
-                router=router,
-                dtype=dtype,
-                init_device=init_device,
-                cache=cache,
-                **kwargs,
-            ))
+            self.routers_list.append(
+                router.build(
+                    d_model,
+                    num_experts,
+                    lb_loss_weight=lb_loss_weight,
+                    lb_loss_granularity=lb_loss_granularity,
+                    z_loss_weight=z_loss_weight,
+                    dtype=dtype,
+                    init_device=init_device,
+                )
+            )
+            self.experts_list.append(
+                self._init_parallel_mlp(
+                    d_model=d_model,
+                    num_experts=num_experts,
+                    hidden_size=hidden_size,
+                    router=router,
+                    dtype=dtype,
+                    init_device=init_device,
+                    cache=cache,
+                    **kwargs,
+                )
+            )
         self.shared_mlp = (
             None
             if shared_mlp is None
@@ -389,9 +391,7 @@ class MoEBase(nn.Module):
         shared_mlp_flops = (
             self.shared_mlp.num_flops_per_token(seq_len) if self.shared_mlp is not None else 0
         )
-        expert_flops = sum(
-            experts.num_flops_per_token(seq_len) for experts in self.experts_list
-        )
+        expert_flops = sum(experts.num_flops_per_token(seq_len) for experts in self.experts_list)
         return router_flops + shared_mlp_flops + expert_flops
 
 

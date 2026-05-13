@@ -2,16 +2,14 @@
 """
 
 import argparse
-import sys
-import os
 import logging
+import os
 import traceback
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import List, cast, Optional
+from dataclasses import dataclass
+from typing import List, Optional, cast
 
 import numpy as np
-
 import torch
 import torch.distributed as dist
 
@@ -23,15 +21,15 @@ from olmo_core.data import (
     NumpyPaddedFSLDatasetConfig,
     TokenizerConfig,
 )
-from olmo_core.data.source_mixture import SourceMixtureConfig, SourceMixtureList, SourceMixtureDatasetConfig
-from olmo_core.io import get_file_size
-from olmo_core.distributed.parallel import DataParallelType
-from olmo_core.distributed.utils import get_world_size
-from olmo_core.nn.transformer import (
-    TransformerActivationCheckpointingMode,
-    TransformerConfig,
+from olmo_core.data.source_mixture import (
+    SourceMixtureConfig,
+    SourceMixtureDatasetConfig,
+    SourceMixtureList,
 )
-from olmo_core.optim import CosWithWarmup, OptimGroupOverride, AdamWConfig, WSD
+from olmo_core.distributed.parallel import DataParallelType
+from olmo_core.io import get_file_size
+from olmo_core.nn.transformer import TransformerConfig
+from olmo_core.optim import WSD, AdamWConfig, CosWithWarmup, OptimGroupOverride
 from olmo_core.train import (
     Duration,
     TrainerConfig,
@@ -48,16 +46,13 @@ from olmo_core.train.callbacks import (
     WandBCallback,
 )
 from olmo_core.train.train_module import (
-    TransformerActivationCheckpointingConfig,
     TransformerDataParallelConfig,
     TransformerDataParallelWrappingStrategy,
     TransformerTrainModuleConfig,
 )
 from olmo_core.utils import seed_all
 
-from constants import (
-    PROJECT_SPECS,
-)
+from constants import PROJECT_SPECS
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +81,7 @@ DATAMIX_LOOKUP = {
     "dclm_only": DataMix.dclm_only,
 }
 
-_user = os.environ.get('USER', '')
+_user = os.environ.get("USER", "")
 if _user not in PROJECT_SPECS:
     raise KeyError(f"No PROJECT_SPECS entry for user '{_user}'. Add your config to constants.py.")
 USER_PROJECT_SPECS = PROJECT_SPECS[_user]
@@ -94,6 +89,7 @@ DATA_SEED = 34521
 
 # This will read stream data from the public endpoints by default, but that might be a lot slower
 # than reading data locally.
+
 
 def get_wandb_tags(
     run_name,
@@ -127,8 +123,8 @@ def get_wandb_tags(
         wandb_tags.append(f"{moe_generalist_hidden_multiplier}gen")
     else:
         wandb_tags.append("nogen")
-    
-    wandb_tags.append(model_name.split('_')[1])  # e.g., "100M", "1B"
+
+    wandb_tags.append(model_name.split("_")[1])  # e.g., "100M", "1B"
 
     if unique_data_fraction < 1.0:
         wandb_tags.append(f"frac{unique_data_fraction}")
@@ -150,28 +146,28 @@ class ExperimentConfig(Config):
 
 
 def build_config(
-    run_name: str, 
-    tokenizer_name: str = "dolma2", 
+    run_name: str,
+    tokenizer_name: str = "dolma2",
     model_name: str = "olmo2_100M_moe_32_16",
     train_datamix_name: str = "OLMoE_mix_0824",
     valid_datamix_name: str = "v3_small_ppl_validation",
-    data_root: str = USER_PROJECT_SPECS['DATAROOT'],
-    save_root: str = USER_PROJECT_SPECS['DEFAULT_SAVE_PATH'],
-    valid_data_dir: str = USER_PROJECT_SPECS['VALID_DATA_DIR'],
-    data_work_dir: str = USER_PROJECT_SPECS['DATA_WORK_DIR'],
+    data_root: str = USER_PROJECT_SPECS["DATAROOT"],
+    save_root: str = USER_PROJECT_SPECS["DEFAULT_SAVE_PATH"],
+    valid_data_dir: str = USER_PROJECT_SPECS["VALID_DATA_DIR"],
+    data_work_dir: str = USER_PROJECT_SPECS["DATA_WORK_DIR"],
     sequence_length: int = 2048,
-    global_batch_size: int = 512, # 512 sequences total
+    global_batch_size: int = 512,  # 512 sequences total
     per_gpu_batch_size: int = 4,  # 4 sequences per GPU
     num_data_workers: int = 2,
     train_tokens: int = 200_000_000,
-    save_interval: int = 200, 
+    save_interval: int = 200,
     ephemeral_save_interval: int = 50,
     eval_interval: int = 100,
     metrics_collect_interval: int = 10,
     lr: float = 4e-4,
     warmup_steps: int = 50,
     decay_steps: int = 50,
-    scheduler: str = 'cosine',  # 'wsd' or 'cosine'
+    scheduler: str = "cosine",  # 'wsd' or 'cosine'
     embedding_weight_decay: float = 0.1,
     weight_decay: float = 0.0,
     adam_betas: tuple[float, float] = (0.9, 0.95),
@@ -188,11 +184,10 @@ def build_config(
     unique_data_fraction: float = 1.0,
     num_repetitions: int = 1,
     init_seed: int = 12536,
-    wandb_entity: str = USER_PROJECT_SPECS['WANDB_ENTITY'],
-    wandb_project: str = USER_PROJECT_SPECS['WANDB_PROJECT'],
+    wandb_entity: str = USER_PROJECT_SPECS["WANDB_ENTITY"],
+    wandb_project: str = USER_PROJECT_SPECS["WANDB_PROJECT"],
     overrides: List[str] = [],
 ) -> ExperimentConfig:
-    
     tokenizer_config = TOKENIZER_LOOKUP[tokenizer_name]()
 
     model_config = MODEL_CONFIG_LOOKUP[model_name](
@@ -218,8 +213,10 @@ def build_config(
             elif ov.startswith("trainer.max_duration.value="):
                 actual_train_tokens = int(ov.split("=")[1])
         if actual_train_tokens != train_tokens:
-            log.info(f"Using actual training budget {actual_train_tokens} tokens "
-                     f"(from override) instead of default {train_tokens}")
+            log.info(
+                f"Using actual training budget {actual_train_tokens} tokens "
+                f"(from override) instead of default {train_tokens}"
+            )
         train_tokens = actual_train_tokens
 
         mix = DATAMIX_LOOKUP[train_datamix_name]
@@ -242,8 +239,7 @@ def build_config(
             source_token_counts[name] = sum(get_file_size(p) // itemsize for p in spaths)
         total_tokens_available = sum(source_token_counts.values())
 
-        ratios = {name: source_token_counts[name] / total_tokens_available
-                  for name in source_paths}
+        ratios = {name: source_token_counts[name] / total_tokens_available for name in source_paths}
 
         source_configs = [
             SourceMixtureConfig(
@@ -259,8 +255,11 @@ def build_config(
         # to avoid ceil-rounding inflation. For moderate repetition, keep
         # original batch size for checkpoint compatibility.
         if requested_unique_tokens < 4096 * 1000:
-            src_mix_batch_size = max(sequence_length,
-                                    ((requested_unique_tokens + sequence_length - 1) // sequence_length) * sequence_length)
+            src_mix_batch_size = max(
+                sequence_length,
+                ((requested_unique_tokens + sequence_length - 1) // sequence_length)
+                * sequence_length,
+            )
         else:
             src_mix_batch_size = global_batch_size * sequence_length
 
@@ -274,7 +273,9 @@ def build_config(
         # For extreme repetition (128x+), per-file token allocation can drop below 4096,
         # causing 0 instances with max_target_sequence_length=4096. Use sequence_length
         # in that case. For moderate repetition, keep 4096 for checkpoint compatibility.
-        max_tgt_seq_len = sequence_length if requested_unique_tokens < 4096 * 1000 else max(4096, sequence_length)
+        max_tgt_seq_len = (
+            sequence_length if requested_unique_tokens < 4096 * 1000 else max(4096, sequence_length)
+        )
 
         dataset_config = NumpyFSLDatasetConfig.from_src_mix(
             src_mix_config,
@@ -284,9 +285,11 @@ def build_config(
             work_dir=data_work_dir,
         )
 
-        log.info(f"Data repetition: using {int(train_tokens * unique_data_fraction)} unique tokens "
-                 f"from {len(source_paths)} sources "
-                 f"(fraction={unique_data_fraction}, expected ~{num_repetitions}x repetition)")
+        log.info(
+            f"Data repetition: using {int(train_tokens * unique_data_fraction)} unique tokens "
+            f"from {len(source_paths)} sources "
+            f"(fraction={unique_data_fraction}, expected ~{num_repetitions}x repetition)"
+        )
     else:
         dataset_config = NumpyFSLDatasetConfig.from_data_mix(
             DATAMIX_LOOKUP[train_datamix_name],
@@ -311,14 +314,18 @@ def build_config(
             weight_decay=weight_decay,
             betas=adam_betas,
             group_overrides=[
-                OptimGroupOverride(params=["embeddings.weight"], opts=dict(weight_decay=embedding_weight_decay))
+                OptimGroupOverride(
+                    params=["embeddings.weight"], opts=dict(weight_decay=embedding_weight_decay)
+                )
             ],
             fused=True,
         ),
-        scheduler=WSD(warmup_steps=warmup_steps, decay=decay_steps, decay_fraction=None) if scheduler == 'wsd' else CosWithWarmup(warmup_steps=warmup_steps),
+        scheduler=WSD(warmup_steps=warmup_steps, decay=decay_steps, decay_fraction=None)
+        if scheduler == "wsd"
+        else CosWithWarmup(warmup_steps=warmup_steps),
         compile_model=True,
         dp_config=TransformerDataParallelConfig(
-            name=DataParallelType.fsdp,  
+            name=DataParallelType.fsdp,
             param_dtype=DType.bfloat16,
             reduce_dtype=DType.float32,
             wrapping_strategy=TransformerDataParallelWrappingStrategy.full,  # Added from small-moe.py
@@ -359,7 +366,15 @@ def build_config(
                 entity=wandb_entity,
                 project=wandb_project,
                 cancel_check_interval=10,
-                tags=get_wandb_tags(run_name, model_name, moe_num_experts_list, moe_generalist_hidden_multiplier, moe_type, unique_data_fraction, num_repetitions),
+                tags=get_wandb_tags(
+                    run_name,
+                    model_name,
+                    moe_num_experts_list,
+                    moe_generalist_hidden_multiplier,
+                    moe_type,
+                    unique_data_fraction,
+                    num_repetitions,
+                ),
                 enabled=True,  # NOTE: change to true to enable
             ),
         )
@@ -406,17 +421,13 @@ def build_config(
     ).merge(overrides)
 
 
-def main(
-    args: argparse.Namespace,
-    overrides: List[str]
-) -> None:
+def main(args: argparse.Namespace, overrides: List[str]) -> None:
     # Set up logging
     logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     logger = logging.getLogger(__name__)
-    
+
     try:
         # Log environment info
         logger.info(f"World size: {dist.get_world_size()}")
@@ -424,9 +435,9 @@ def main(
             logger.info(f"CUDA device count: {torch.cuda.device_count()}")
             logger.info(f"Current CUDA device: {torch.cuda.current_device()}")
             logger.info(f"CUDA device name: {torch.cuda.get_device_name()}")
-        
+
         config = build_config(
-            args.run_name, 
+            args.run_name,
             tokenizer_name=args.tokenizer_name,
             model_name=args.model_name,
             train_datamix_name=args.train_datamix_name,
@@ -439,9 +450,11 @@ def main(
             global_batch_size=args.global_batch_size,
             scheduler=args.scheduler,
             per_gpu_batch_size=args.per_gpu_batch_size,
-            moe_hidden_multipliers_list=[float(v) for v in args.moe_hidden_multipliers_list.split(',')], 
-            moe_num_experts_list=[int(v) for v in args.moe_num_experts_list.split(',')], 
-            moe_router_top_ks_list=[int(v) for v in args.moe_router_top_ks_list.split(',')], 
+            moe_hidden_multipliers_list=[
+                float(v) for v in args.moe_hidden_multipliers_list.split(",")
+            ],
+            moe_num_experts_list=[int(v) for v in args.moe_num_experts_list.split(",")],
+            moe_router_top_ks_list=[int(v) for v in args.moe_router_top_ks_list.split(",")],
             moe_generalist_hidden_multiplier=float(args.moe_generalist_hidden_multiplier),
             moe_type=args.moe_type,
             moe_bias_gamma=args.moe_bias_gamma,
@@ -449,7 +462,8 @@ def main(
             moe_lb_loss_weight=args.moe_lb_loss_weight,
             unique_data_fraction=args.unique_data_fraction,
             num_repetitions=args.num_repetitions,
-            overrides=overrides)
+            overrides=overrides,
+        )
         logger.info("Config built successfully")
 
         # Set RNG states on all devices.
@@ -464,7 +478,9 @@ def main(
         logger.info("Building dataset...")
         dataset = config.dataset.build()
         logger.info("Building data loader...")
-        data_loader = config.data_loader.build(dataset, dp_process_group=train_module.dp_process_group)
+        data_loader = config.data_loader.build(
+            dataset, dp_process_group=train_module.dp_process_group
+        )
         logger.info("Building trainer...")
         trainer = config.trainer.build(train_module, data_loader)
         logger.info("All components built successfully")
@@ -478,7 +494,7 @@ def main(
         # Train.
         logger.info("Starting training...")
         trainer.fit()
-        
+
     except Exception as e:
         logger.error(f"Error occurred: {str(e)}")
         logger.error("Traceback:")
@@ -490,31 +506,113 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("run_name", type=str, help="Name of the run")
-    parser.add_argument("--tokenizer_name", type=str, default="dolma2", help="Name of the tokenizer to use")
-    parser.add_argument("--model_name", type=str, default="olmo2_100M_moe_32_16", help="Name of the model configuration to use")
-    parser.add_argument("--train_datamix_name", type=str, default="OLMoE_mix_0824", help="Name of the training data mix")
-    parser.add_argument("--valid_datamix_name", type=str, default="v3_small_ppl_validation", help="Name of the validation data mix")
-    parser.add_argument("--data_root", type=str, default="https://olmo-data.org/", help="Root URL for the data")
-    parser.add_argument("--save_root", type=str, default=USER_PROJECT_SPECS['DEFAULT_SAVE_PATH'], help="Parent directory for saving the model")
-    parser.add_argument("--valid_data_dir", type=str, default=USER_PROJECT_SPECS['VALID_DATA_DIR'], help="Directory for validation data")
-    parser.add_argument("--data_work_dir", type=str, default=USER_PROJECT_SPECS['DATA_WORK_DIR'], help="Working directory for data")
-    parser.add_argument("--sequence_length", type=int, default=2048, help="Sequence length for training")
+    parser.add_argument(
+        "--tokenizer_name", type=str, default="dolma2", help="Name of the tokenizer to use"
+    )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="olmo2_100M_moe_32_16",
+        help="Name of the model configuration to use",
+    )
+    parser.add_argument(
+        "--train_datamix_name",
+        type=str,
+        default="OLMoE_mix_0824",
+        help="Name of the training data mix",
+    )
+    parser.add_argument(
+        "--valid_datamix_name",
+        type=str,
+        default="v3_small_ppl_validation",
+        help="Name of the validation data mix",
+    )
+    parser.add_argument(
+        "--data_root", type=str, default="https://olmo-data.org/", help="Root URL for the data"
+    )
+    parser.add_argument(
+        "--save_root",
+        type=str,
+        default=USER_PROJECT_SPECS["DEFAULT_SAVE_PATH"],
+        help="Parent directory for saving the model",
+    )
+    parser.add_argument(
+        "--valid_data_dir",
+        type=str,
+        default=USER_PROJECT_SPECS["VALID_DATA_DIR"],
+        help="Directory for validation data",
+    )
+    parser.add_argument(
+        "--data_work_dir",
+        type=str,
+        default=USER_PROJECT_SPECS["DATA_WORK_DIR"],
+        help="Working directory for data",
+    )
+    parser.add_argument(
+        "--sequence_length", type=int, default=2048, help="Sequence length for training"
+    )
     parser.add_argument("--global_batch_size", type=int, default=512, help="Batch size total")
-    parser.add_argument("--scheduler", type=str, default="cosine", choices=["wsd", "cosine"], help="Scheduler type to use")
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        default="cosine",
+        choices=["wsd", "cosine"],
+        help="Scheduler type to use",
+    )
     parser.add_argument("--per_gpu_batch_size", type=int, default=16, help="Batch size per GPU")
-    parser.add_argument("--moe_num_experts_list", type=str, default="32,64", help="List of number of experts for MoE")
-    parser.add_argument("--moe_hidden_multipliers_list", type=str, default="1024,2048", help="List of hidden sizes multiplers for MoE")
-    parser.add_argument("--moe_router_top_ks_list", type=str, default="4,8", help="List of router top-k values for MoE")
-    parser.add_argument("--moe_generalist_hidden_multiplier", type=float, default=1, help="Hidden size multiplier for the generalist expert in MoE")
-    parser.add_argument("--moe_type", type=str, help="type of MoE", default="default", choices=["default", "dropless"])
-    parser.add_argument("--moe_bias_gamma", type=float, default=None, help="Gamma value for MoE bias")
-    parser.add_argument("--moe_z_loss_weight", type=float, default=0.001, help="Weight for the z-loss in MoE")
-    parser.add_argument("--moe_lb_loss_weight", type=float, default=0.01, help="Weight for the LB loss in MoE")
-    parser.add_argument("--unique_data_fraction", type=float, default=1.0,
+    parser.add_argument(
+        "--moe_num_experts_list",
+        type=str,
+        default="32,64",
+        help="List of number of experts for MoE",
+    )
+    parser.add_argument(
+        "--moe_hidden_multipliers_list",
+        type=str,
+        default="1024,2048",
+        help="List of hidden sizes multiplers for MoE",
+    )
+    parser.add_argument(
+        "--moe_router_top_ks_list",
+        type=str,
+        default="4,8",
+        help="List of router top-k values for MoE",
+    )
+    parser.add_argument(
+        "--moe_generalist_hidden_multiplier",
+        type=float,
+        default=1,
+        help="Hidden size multiplier for the generalist expert in MoE",
+    )
+    parser.add_argument(
+        "--moe_type",
+        type=str,
+        help="type of MoE",
+        default="default",
+        choices=["default", "dropless"],
+    )
+    parser.add_argument(
+        "--moe_bias_gamma", type=float, default=None, help="Gamma value for MoE bias"
+    )
+    parser.add_argument(
+        "--moe_z_loss_weight", type=float, default=0.001, help="Weight for the z-loss in MoE"
+    )
+    parser.add_argument(
+        "--moe_lb_loss_weight", type=float, default=0.01, help="Weight for the LB loss in MoE"
+    )
+    parser.add_argument(
+        "--unique_data_fraction",
+        type=float,
+        default=1.0,
         help="Fraction of source data paths to use (1.0=full, 0.5=half, 0.25=quarter, 0.125=eighth). "
-             "Lower fraction + same max_duration = more data repetition.")
-    parser.add_argument("--num_repetitions", type=int, default=1,
-        help="Expected number of data repetitions (for naming/tagging only, does not affect training)")
+        "Lower fraction + same max_duration = more data repetition.",
+    )
+    parser.add_argument(
+        "--num_repetitions",
+        type=int,
+        default=1,
+        help="Expected number of data repetitions (for naming/tagging only, does not affect training)",
+    )
     args, overrides = parser.parse_known_args()
 
     prepare_training_environment()
