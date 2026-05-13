@@ -28,8 +28,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import torch  # noqa: E402
-
 from olmo_core.data import TokenizerConfig  # noqa: E402
 from olmo_core.nn.transformer.config import SharedBlockConfig  # noqa: E402
 
@@ -91,7 +89,9 @@ def main() -> int:
         if shared_model.blocks[str(idx)].feed_forward_moe is not canonical:
             print(f"FAIL: block {idx} feed_forward_moe is not the canonical instance")
             return 1
-    print(f"  module identity:        OK  (blocks {list(sb.layer_indices())} share one feed_forward_moe)")
+    print(
+        f"  module identity:        OK  (blocks {list(sb.layer_indices())} share one feed_forward_moe)"
+    )
 
     # --- 2) Parameter counts.
     seen: set[int] = set()
@@ -102,28 +102,36 @@ def main() -> int:
         seen.add(id(p))
         unique_param_sum += p.numel()
     if shared_config.num_params != unique_param_sum:
-        print(f"FAIL: config.num_params={shared_config.num_params}, "
-              f"sum-by-id={unique_param_sum}")
+        print(
+            f"FAIL: config.num_params={shared_config.num_params}, " f"sum-by-id={unique_param_sum}"
+        )
         return 1
     if shared_model.num_params != unique_param_sum:
-        print(f"FAIL: model.num_params={shared_model.num_params}, "
-              f"sum-by-id={unique_param_sum}")
+        print(f"FAIL: model.num_params={shared_model.num_params}, " f"sum-by-id={unique_param_sum}")
         return 1
     if shared_config.num_params >= unshared_config.num_params:
-        print(f"FAIL: sharing didn't reduce param count: "
-              f"shared={shared_config.num_params}, unshared={unshared_config.num_params}")
+        print(
+            f"FAIL: sharing didn't reduce param count: "
+            f"shared={shared_config.num_params}, unshared={unshared_config.num_params}"
+        )
         return 1
-    print(f"  num_params (unique):    OK  shared={shared_config.num_params:,} "
-          f"unshared={unshared_config.num_params:,} "
-          f"saving={unshared_config.num_params - shared_config.num_params:,}")
+    print(
+        f"  num_params (unique):    OK  shared={shared_config.num_params:,} "
+        f"unshared={unshared_config.num_params:,} "
+        f"saving={unshared_config.num_params - shared_config.num_params:,}"
+    )
 
     # --- 3) num_param_uses matches unshared num_params.
     if shared_model.num_param_uses != unshared_model.num_params:
-        print(f"FAIL: num_param_uses={shared_model.num_param_uses} != "
-              f"unshared.num_params={unshared_model.num_params}")
+        print(
+            f"FAIL: num_param_uses={shared_model.num_param_uses} != "
+            f"unshared.num_params={unshared_model.num_params}"
+        )
         return 1
-    print(f"  num_param_uses:         OK  shared.num_param_uses={shared_model.num_param_uses:,} "
-          f"equals unshared.num_params")
+    print(
+        f"  num_param_uses:         OK  shared.num_param_uses={shared_model.num_param_uses:,} "
+        f"equals unshared.num_params"
+    )
 
     # --- 4) state_dict dedup: no alias keys leak.
     sd = shared_model.state_dict()
@@ -139,7 +147,8 @@ def main() -> int:
 
     # --- 5) W&B tag generation.
     tags = get_wandb_tags(
-        "smoke_test", model_name,
+        "smoke_test",
+        model_name,
         moe_num_experts_list=[8],
         moe_generalist_hidden_multiplier=0,
         moe_type="dropless",

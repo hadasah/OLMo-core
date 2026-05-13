@@ -126,9 +126,7 @@ class Transformer(nn.Module):
                 # producing a shape mismatch far from the config site. Forbid the
                 # combination outright; the user should either move the override
                 # outside the shared range or shrink the range.
-                conflicting = sorted(
-                    set(block_overrides) & set(shared_blocks.layer_indices())
-                )
+                conflicting = sorted(set(block_overrides) & set(shared_blocks.layer_indices()))
                 if conflicting:
                     raise OLMoConfigurationError(
                         f"block_overrides indices {conflicting} fall inside the "
@@ -215,9 +213,9 @@ class Transformer(nn.Module):
                 f"{shared_blocks.start_layer} has no feed_forward_moe"
             )
 
-        has_shared_mlp = canonical_moe is not None and getattr(
-            canonical_moe, "shared_mlp", None
-        ) is not None
+        has_shared_mlp = (
+            canonical_moe is not None and getattr(canonical_moe, "shared_mlp", None) is not None
+        )
         share_whole_moe = (
             shared_blocks.share_routers
             and shared_blocks.share_experts
@@ -230,6 +228,9 @@ class Transformer(nn.Module):
             block = self.blocks[str(idx)]
 
             if wants_moe_sharing:
+                # Earlier check raises if `wants_moe_sharing` is True and `canonical_moe`
+                # is None; this assert just helps mypy narrow the union type here.
+                assert canonical_moe is not None
                 if not hasattr(block, "feed_forward_moe"):
                     raise OLMoConfigurationError(
                         f"SharedBlockConfig requested MoE sharing but block {idx} has no "
@@ -408,7 +409,11 @@ class Transformer(nn.Module):
                 )
 
             # Warm up attention backend cache.
-            if max_seq_len is not None and att.backend is not None and id(att.backend) not in seen_warmup:
+            if (
+                max_seq_len is not None
+                and att.backend is not None
+                and id(att.backend) not in seen_warmup
+            ):
                 seen_warmup.add(id(att.backend))
                 att.backend.warmup_cache(max_seq_len, device)
 

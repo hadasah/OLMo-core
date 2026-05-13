@@ -42,6 +42,7 @@ from olmo_core.nn.transformer import (
     TransformerBlockConfig,
     TransformerBlockType,
     TransformerConfig,
+    TransformerDataParallelWrappingStrategy,
     TransformerType,
 )
 from olmo_core.nn.transformer.config import SharedBlockConfig
@@ -685,15 +686,8 @@ def run_shared_blocks_ep_fsdp_step():
     (which the CPU mock tests can't fully exercise) and that DTensor + FSDP layered
     on shared parameters doesn't corrupt state.
     """
-    from olmo_core.distributed.parallel import (
-        DataParallelType,
-        TransformerDataParallelConfig,
-    )
-
     layer_norm = LayerNormConfig(name=LayerNormType.rms, bias=False)
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=2, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=2, share_routers=True, share_experts=True)
     config = TransformerConfig(
         name=TransformerType.moe,
         d_model=64,
@@ -843,31 +837,27 @@ def _small_shared_hybrid_moe_config(
 
 def test_shared_blocks_module_identity():
     n_layers = 6
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=4, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=4, share_routers=True, share_experts=True)
     config = _small_shared_moe_config(n_layers=n_layers, shared_blocks=sb)
     model = config.build(init_device="cpu")
     assert isinstance(model, MoETransformer)
 
     canonical_moe = model.blocks[str(sb.start_layer)].feed_forward_moe
     for idx in sb.layer_indices():
-        assert model.blocks[str(idx)].feed_forward_moe is canonical_moe, (
-            f"block {idx} should share feed_forward_moe with block {sb.start_layer}"
-        )
+        assert (
+            model.blocks[str(idx)].feed_forward_moe is canonical_moe
+        ), f"block {idx} should share feed_forward_moe with block {sb.start_layer}"
 
     for idx in range(n_layers):
         if idx in sb.layer_indices():
             continue
-        assert model.blocks[str(idx)].feed_forward_moe is not canonical_moe, (
-            f"block {idx} should not share feed_forward_moe (outside shared range)"
-        )
+        assert (
+            model.blocks[str(idx)].feed_forward_moe is not canonical_moe
+        ), f"block {idx} should not share feed_forward_moe (outside shared range)"
 
 
 def test_shared_blocks_param_count():
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=4, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=4, share_routers=True, share_experts=True)
     config = _small_shared_moe_config(n_layers=6, shared_blocks=sb)
     model = config.build(init_device="cpu")
 
@@ -887,9 +877,7 @@ def test_shared_blocks_param_count():
 
 
 def test_shared_blocks_partial_routers_only():
-    sb = SharedBlockConfig(
-        start_layer=0, n_layers=3, share_routers=True, share_experts=False
-    )
+    sb = SharedBlockConfig(start_layer=0, n_layers=3, share_routers=True, share_experts=False)
     config = _small_shared_moe_config(n_layers=4, shared_blocks=sb)
     model = config.build(init_device="cpu")
 
@@ -897,15 +885,15 @@ def test_shared_blocks_partial_routers_only():
     for idx in (1, 2):
         block = model.blocks[str(idx)]
         assert block.feed_forward_moe.routers_list is canonical_block.feed_forward_moe.routers_list
-        assert block.feed_forward_moe.experts_list is not canonical_block.feed_forward_moe.experts_list
+        assert (
+            block.feed_forward_moe.experts_list is not canonical_block.feed_forward_moe.experts_list
+        )
 
 
 @pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="MoE kernels require CUDA")
 def test_shared_blocks_forward_backward_grad_accumulates():
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=3, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=3, share_routers=True, share_experts=True)
     config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
     device = torch.device("cuda")
     model = config.build(init_device=device.type)
@@ -922,16 +910,12 @@ def test_shared_blocks_forward_backward_grad_accumulates():
 
 
 def test_shared_blocks_num_param_uses():
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=4, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=4, share_routers=True, share_experts=True)
     config = _small_shared_moe_config(n_layers=6, shared_blocks=sb)
     model = config.build(init_device="cpu")
 
     # Usage-weighted count should match a manual sum walking every (module, param) pair.
-    expected_uses = sum(
-        p.numel() for _, p in model.named_parameters(remove_duplicate=False)
-    )
+    expected_uses = sum(p.numel() for _, p in model.named_parameters(remove_duplicate=False))
     assert model.num_param_uses == expected_uses
     assert config.num_param_uses == expected_uses
 
@@ -997,9 +981,7 @@ def test_shared_blocks_init_called_once_per_shared_submodule():
     Directly count how many times init_method.init_feed_forward_moe runs on the shared
     submodule. Should be exactly 1, not n_shared.
     """
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=4, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=4, share_routers=True, share_experts=True)
     config = _small_shared_moe_config(n_layers=6, shared_blocks=sb)
     config.init_method = InitMethod.llama_depth
 
@@ -1020,9 +1002,9 @@ def test_shared_blocks_init_called_once_per_shared_submodule():
 
     shared_id = id(model.blocks[str(sb.start_layer)].feed_forward_moe)
     shared_calls = [(idx, mid) for idx, mid in call_log if mid == shared_id]
-    assert len(shared_calls) == 1, (
-        f"shared MoE should be inited exactly once, got {len(shared_calls)} calls: {shared_calls}"
-    )
+    assert (
+        len(shared_calls) == 1
+    ), f"shared MoE should be inited exactly once, got {len(shared_calls)} calls: {shared_calls}"
     assert shared_calls[0][0] == sb.start_layer, (
         f"canonical (lowest) block_idx={sb.start_layer} should drive init, "
         f"got block_idx={shared_calls[0][0]}"
@@ -1037,6 +1019,7 @@ def test_shared_blocks_apply_tp_dedup():
     Patch out the actual TP calls so we can run on CPU and count invocations by id().
     """
     import unittest.mock as mock
+
     import olmo_core.nn.transformer.block as block_mod
     import olmo_core.nn.transformer.model as model_mod
 
@@ -1072,11 +1055,17 @@ def test_shared_blocks_apply_tp_dedup():
     moe_cls = type(model.blocks["0"].feed_forward_moe)
     lm_head_cls = type(model.lm_head)
 
-    with mock.patch.object(block_mod, "parallelize_module", side_effect=record_parallelize), \
-         mock.patch.object(model_mod, "parallelize_module", side_effect=record_parallelize), \
-         mock.patch.object(attention_cls, "apply_tp", record_apply_tp), \
-         mock.patch.object(moe_cls, "apply_tp", record_apply_tp), \
-         mock.patch.object(lm_head_cls, "apply_tp", lambda *a, **kw: None):
+    with mock.patch.object(
+        block_mod, "parallelize_module", side_effect=record_parallelize
+    ), mock.patch.object(
+        model_mod, "parallelize_module", side_effect=record_parallelize
+    ), mock.patch.object(
+        attention_cls, "apply_tp", record_apply_tp
+    ), mock.patch.object(
+        moe_cls, "apply_tp", record_apply_tp
+    ), mock.patch.object(
+        lm_head_cls, "apply_tp", lambda *a, **kw: None
+    ):
         fake_mesh = mock.MagicMock()
         model.apply_tp(fake_mesh)
 
@@ -1125,9 +1114,9 @@ def test_shared_blocks_apply_cp_dedup():
     moe_cls = type(model.blocks["0"].feed_forward_moe)
     lm_head_cls = type(model.lm_head)
 
-    with mock.patch.object(attention_cls, "apply_cp", record_apply_cp), \
-         mock.patch.object(moe_cls, "apply_cp", record_apply_cp), \
-         mock.patch.object(lm_head_cls, "apply_cp", lambda *a, **kw: None):
+    with mock.patch.object(attention_cls, "apply_cp", record_apply_cp), mock.patch.object(
+        moe_cls, "apply_cp", record_apply_cp
+    ), mock.patch.object(lm_head_cls, "apply_cp", lambda *a, **kw: None):
         fake_mesh = mock.MagicMock()
         model.apply_cp(fake_mesh)
 
@@ -1145,9 +1134,7 @@ def test_shared_blocks_state_dict_dedups_alias_paths():
     Parameter aliased via shared_blocks, not N copies. The total key count drops
     by (n_layers_shared - 1) * (number of submodule paths shared per layer).
     """
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=4, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=4, share_routers=True, share_experts=True)
     config = _small_shared_moe_config(n_layers=6, shared_blocks=sb)
     model = config.build(init_device="cpu")
 
@@ -1179,9 +1166,7 @@ def test_shared_blocks_state_dict_roundtrip():
     Save a shared-blocks model's state_dict, load it back into a fresh shared-blocks
     model with the same config, and assert weights are bitwise identical.
     """
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=3, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=3, share_routers=True, share_experts=True)
     config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
     model_a = config.build(init_device="cpu")
     model_a.init_weights(device=torch.device("cpu"))
@@ -1196,9 +1181,7 @@ def test_shared_blocks_state_dict_roundtrip():
     assert not result.unexpected_keys, f"unexpected extra keys: {result.unexpected_keys[:5]}"
 
     # All parameters identical after round-trip.
-    for (name, pa), (_, pb) in zip(
-        model_a.named_parameters(), model_b.named_parameters()
-    ):
+    for (name, pa), (_, pb) in zip(model_a.named_parameters(), model_b.named_parameters()):
         assert torch.equal(pa, pb), f"mismatch at {name}"
 
 
@@ -1208,9 +1191,7 @@ def test_shared_blocks_load_raises_on_disagreeing_unshared_source():
     source has distinct per-layer weights for what's now a single Parameter. We
     should raise with a clear message rather than silently picking last-write-wins.
     """
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=3, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=3, share_routers=True, share_experts=True)
     # Source: unshared model with the same overall shape.
     unshared_config = _small_shared_moe_config(n_layers=5, shared_blocks=None)
     source_model = unshared_config.build(init_device="cpu")
@@ -1234,17 +1215,14 @@ def test_shared_blocks_load_accepts_agreeing_alias_keys():
     If the source state_dict has multiple alias keys but their values agree (e.g.
     saved before the dedup fix landed), loading should succeed without raising.
     """
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=3, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=3, share_routers=True, share_experts=True)
     config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
     model_a = config.build(init_device="cpu")
     model_a.init_weights(device=torch.device("cpu"))
 
     # Produce a pre-dedup state_dict by walking with remove_duplicate=False.
     legacy_sd = {
-        name: p.detach().clone()
-        for name, p in model_a.named_parameters(remove_duplicate=False)
+        name: p.detach().clone() for name, p in model_a.named_parameters(remove_duplicate=False)
     }
     legacy_sd.update(
         {name: b.detach().clone() for name, b in model_a.named_buffers(remove_duplicate=False)}
@@ -1255,9 +1233,7 @@ def test_shared_blocks_load_accepts_agreeing_alias_keys():
     # Should not raise — all alias values agree.
     model_b.load_state_dict(legacy_sd, strict=True)
 
-    for (name, pa), (_, pb) in zip(
-        model_a.named_parameters(), model_b.named_parameters()
-    ):
+    for (name, pa), (_, pb) in zip(model_a.named_parameters(), model_b.named_parameters()):
         assert torch.equal(pa, pb), f"mismatch at {name}"
 
 
@@ -1306,25 +1282,27 @@ def test_shared_router_metric_accumulates_across_calls():
 
     inputs = torch.randn(2, 16, 64, generator=torch.Generator().manual_seed(1))
 
-    # First call: state populates.
+    # First call: state populates. lb_loss_weight is set, so load_balancing_loss is not None.
     router(inputs)
+    assert router.load_balancing_loss is not None
     lb1 = router.load_balancing_loss.detach().clone()
     bz1 = router.batch_size_per_expert.detach().clone()
 
     # Second call: state should accumulate, not overwrite.
     router(inputs)
+    assert router.load_balancing_loss is not None
     lb2 = router.load_balancing_loss.detach().clone()
     bz2 = router.batch_size_per_expert.detach().clone()
 
     # Accumulation: second is ~2x the first (with identical inputs).
     assert lb2.item() > lb1.item(), f"lb_loss did not accumulate: {lb1.item()} -> {lb2.item()}"
-    assert torch.allclose(lb2, lb1 * 2, rtol=1e-4), (
-        f"lb_loss accumulation off: lb2={lb2.item()}, 2*lb1={2*lb1.item()}"
-    )
+    assert torch.allclose(
+        lb2, lb1 * 2, rtol=1e-4
+    ), f"lb_loss accumulation off: lb2={lb2.item()}, 2*lb1={2*lb1.item()}"
     assert torch.all(bz2 >= bz1), "batch_size_per_expert went down"
-    assert torch.equal(bz2, bz1 * 2), (
-        f"batch_size_per_expert accumulation off: got {bz2}, expected {bz1 * 2}"
-    )
+    assert torch.equal(
+        bz2, bz1 * 2
+    ), f"batch_size_per_expert accumulation off: got {bz2}, expected {bz1 * 2}"
 
 
 def test_shared_blocks_num_flops_per_token_equals_unshared():
@@ -1337,9 +1315,7 @@ def test_shared_blocks_num_flops_per_token_equals_unshared():
     """
     n_layers = 5
     seq_len = 64
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=3, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=3, share_routers=True, share_experts=True)
     shared_model = _small_shared_moe_config(n_layers=n_layers, shared_blocks=sb).build(
         init_device="cpu"
     )
@@ -1358,7 +1334,10 @@ def test_shared_blocks_num_flops_per_token_equals_unshared():
 def test_shared_blocks_share_attention_identity():
     """TODO #11: share_attention aliases self.attention across the shared range."""
     sb = SharedBlockConfig(
-        start_layer=1, n_layers=3, share_routers=False, share_experts=False,
+        start_layer=1,
+        n_layers=3,
+        share_routers=False,
+        share_experts=False,
         share_attention=True,
     )
     config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
@@ -1366,9 +1345,9 @@ def test_shared_blocks_share_attention_identity():
 
     canonical_attn = model.blocks[str(sb.start_layer)].attention
     for idx in sb.layer_indices():
-        assert model.blocks[str(idx)].attention is canonical_attn, (
-            f"block {idx} attention should alias canonical"
-        )
+        assert (
+            model.blocks[str(idx)].attention is canonical_attn
+        ), f"block {idx} attention should alias canonical"
     # Outside the shared range, attention must NOT alias.
     assert model.blocks["0"].attention is not canonical_attn
     assert model.blocks["4"].attention is not canonical_attn
@@ -1383,7 +1362,10 @@ def test_shared_blocks_share_attention_identity():
 def test_shared_blocks_share_norms_identity():
     """TODO #11: share_norms aliases attention_norm and feed_forward_norm across the range."""
     sb = SharedBlockConfig(
-        start_layer=1, n_layers=3, share_routers=False, share_experts=False,
+        start_layer=1,
+        n_layers=3,
+        share_routers=False,
+        share_experts=False,
         share_norms=True,
     )
     config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
@@ -1403,7 +1385,10 @@ def test_shared_blocks_share_shared_mlp_identity():
     Requires the hybrid block type since shared_mlp doesn't exist on pure-MoE blocks.
     """
     sb = SharedBlockConfig(
-        start_layer=1, n_layers=3, share_routers=False, share_experts=False,
+        start_layer=1,
+        n_layers=3,
+        share_routers=False,
+        share_experts=False,
         share_shared_mlp=True,
     )
     config = _small_shared_hybrid_moe_config(n_layers=5, shared_blocks=sb)
@@ -1412,9 +1397,9 @@ def test_shared_blocks_share_shared_mlp_identity():
     canonical_shared_mlp = model.blocks[str(sb.start_layer)].feed_forward_moe.shared_mlp
     assert canonical_shared_mlp is not None, "hybrid MoE should have shared_mlp"
     for idx in sb.layer_indices():
-        assert model.blocks[str(idx)].feed_forward_moe.shared_mlp is canonical_shared_mlp, (
-            f"block {idx} shared_mlp should alias canonical"
-        )
+        assert (
+            model.blocks[str(idx)].feed_forward_moe.shared_mlp is canonical_shared_mlp
+        ), f"block {idx} shared_mlp should alias canonical"
     assert model.blocks["0"].feed_forward_moe.shared_mlp is not canonical_shared_mlp
     assert model.blocks["4"].feed_forward_moe.shared_mlp is not canonical_shared_mlp
 
@@ -1425,9 +1410,7 @@ def test_shared_blocks_rejects_block_overrides_in_shared_range():
     silently clobbered by _apply_shared_blocks. Reject the combination at construction
     time with a clear error rather than producing a wrong model.
     """
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=3, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=3, share_routers=True, share_experts=True)
     config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
     # Pretend the user added an override on block 2, which is inside [1, 2, 3].
     config.block_overrides = {2: config.block}
@@ -1440,9 +1423,7 @@ def test_shared_blocks_allows_block_overrides_outside_shared_range():
     block_overrides at indices outside the shared range are fine and should build
     normally. Sanity check that the validation isn't over-eager.
     """
-    sb = SharedBlockConfig(
-        start_layer=1, n_layers=3, share_routers=True, share_experts=True
-    )
+    sb = SharedBlockConfig(start_layer=1, n_layers=3, share_routers=True, share_experts=True)
     config = _small_shared_moe_config(n_layers=5, shared_blocks=sb)
     # Block 0 and block 4 are outside [1, 2, 3] — overrides there are legal.
     config.block_overrides = {0: config.block, 4: config.block}
