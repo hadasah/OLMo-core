@@ -84,6 +84,7 @@ def str2bool(v) -> bool:
         return False
     raise argparse.ArgumentTypeError(f"Expected boolean-like value, got: {v!r}")
 
+
 TOKENIZER_LOOKUP = {
     "dolma2": TokenizerConfig.dolma2,
     "gpt_neox_olmo_dolma_v1_5": TokenizerConfig.gpt_neox_olmo_dolma_v1_5,

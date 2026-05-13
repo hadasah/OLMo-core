@@ -345,9 +345,7 @@ class SharedBlockConfig(Config):
                 self.share_norms,
             )
         ):
-            raise OLMoConfigurationError(
-                "SharedBlockConfig must enable at least one share_* flag"
-            )
+            raise OLMoConfigurationError("SharedBlockConfig must enable at least one share_* flag")
 
     @property
     def end_layer(self) -> int:
