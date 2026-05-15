@@ -359,6 +359,11 @@ if __name__ == "__main__":
                         help="Batch size for evaluation")
     parser.add_argument("--seq_length", type=int, default=2048,
                         help="Sequence length for evaluation")
+    parser.add_argument("--data_path", type=str, default=None,
+                        help="Path to a tokenized .npy file to use for evaluation "
+                             "(e.g. a v3-small-ppl-validation file). If omitted, falls "
+                             "back to random tokens (knockout / co-activation will be "
+                             "uninformative on random input — only ossification is meaningful).")
 
     args = parser.parse_args()
 
@@ -369,9 +374,26 @@ if __name__ == "__main__":
     output_dir = args.output_dir or os.path.join(args.checkpoint_dir, "routing_analysis")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Create dummy eval data (in practice, load from the actual validation set)
-    log.info("Creating evaluation data...")
-    eval_input_ids = torch.randint(0, 50257, (args.batch_size, args.seq_length))
+    log.info("Preparing evaluation data...")
+    total_needed = args.batch_size * args.seq_length
+    if args.data_path is not None:
+        log.info(f"  Loading real tokens from {args.data_path}")
+        raw_tokens = np.load(args.data_path, mmap_mode='r')
+        log.info(f"  Token array dtype={raw_tokens.dtype}, total tokens={raw_tokens.size}")
+        if raw_tokens.size < total_needed:
+            raise ValueError(
+                f"Eval file has {raw_tokens.size} tokens but need "
+                f"{total_needed} (batch_size {args.batch_size} x seq_length {args.seq_length})"
+            )
+        tokens_slice = np.asarray(raw_tokens[:total_needed]).astype(np.int64)
+        eval_input_ids = torch.from_numpy(tokens_slice).view(args.batch_size, args.seq_length)
+    else:
+        log.warning(
+            "No --data_path provided — falling back to RANDOM tokens. "
+            "Knockout and co-activation results will be uninformative; only ossification is meaningful."
+        )
+        eval_input_ids = torch.randint(0, 50257, (args.batch_size, args.seq_length))
+
     labels = eval_input_ids.clone()
     labels[:, :-1] = eval_input_ids[:, 1:]
     labels[:, -1] = -100
