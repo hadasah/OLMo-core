@@ -378,7 +378,9 @@ if __name__ == "__main__":
     total_needed = args.batch_size * args.seq_length
     if args.data_path is not None:
         log.info(f"  Loading real tokens from {args.data_path}")
-        raw_tokens = np.load(args.data_path, mmap_mode='r')
+        # OLMo-core stores tokens as raw binary (no .npy header) — use np.memmap, not np.load.
+        # dolma2 vocab is 100,278 so tokens require uint32 (uint16 caps at 65535).
+        raw_tokens = np.memmap(args.data_path, dtype=np.uint32, mode='r')
         log.info(f"  Token array dtype={raw_tokens.dtype}, total tokens={raw_tokens.size}")
         if raw_tokens.size < total_needed:
             raise ValueError(
