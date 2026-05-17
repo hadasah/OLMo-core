@@ -211,14 +211,38 @@ def analyze_expert_knockout(
             results["knockout_losses"][key] = {}
 
             num_experts = router.num_experts
+            expert_mlp = experts.mlp
+
+            # OLMo-core's MoEMLP / DroplessMoEMLP flatten the first 2 dims of expert
+            # weight tensors as [num_experts * stride, ...] for FSDP-friendly sharding.
+            # To zero expert e we must zero a CONTIGUOUS slice of `stride` rows, not row e.
+            #   DroplessMoEMLP: w1, w2, w3 all have shape [num_experts * hidden_size, d_model]
+            #   MoEMLP:         w1, w3 are [num_experts * d_model, hidden_size]
+            #                   w2     is [num_experts * hidden_size, d_model]
+            d_model = expert_mlp.d_model
+            hidden_size = expert_mlp.hidden_size
+            mlp_cls_name = type(expert_mlp).__name__
+
+            def stride_for(name: str):
+                if mlp_cls_name == "DroplessMoEMLP":
+                    return hidden_size
+                if mlp_cls_name == "MoEMLP":
+                    return hidden_size if name == "w2" else d_model
+                return None  # unknown layout, will be skipped
+
             for expert_id in range(num_experts):
-                # Zero out the expert's weights temporarily
                 original_weights = {}
-                expert_mlp = experts.mlp
                 for name, param in expert_mlp.named_parameters():
-                    if param.dim() >= 2 and param.shape[0] >= num_experts:
-                        original_weights[name] = param.data[expert_id].clone()
-                        param.data[expert_id].zero_()
+                    stride = stride_for(name)
+                    if stride is None:
+                        continue
+                    expected_dim0 = num_experts * stride
+                    if param.dim() < 2 or param.shape[0] != expected_dim0:
+                        continue
+                    start = expert_id * stride
+                    end = (expert_id + 1) * stride
+                    original_weights[name] = param.data[start:end].clone()
+                    param.data[start:end].zero_()
 
                 with torch.no_grad():
                     ko_output = model(eval_input_ids.to(device), labels=labels.to(device))
@@ -230,7 +254,10 @@ def analyze_expert_knockout(
                 # Restore weights
                 for name, param in expert_mlp.named_parameters():
                     if name in original_weights:
-                        param.data[expert_id] = original_weights[name]
+                        stride = stride_for(name)
+                        start = expert_id * stride
+                        end = (expert_id + 1) * stride
+                        param.data[start:end] = original_weights[name]
 
                 loss_increase = ko_loss - baseline_loss
                 results["knockout_losses"][key][expert_id] = {
