@@ -35,31 +35,36 @@ log = logging.getLogger(__name__)
 
 
 def load_model_from_checkpoint(checkpoint_path: str, device: str = "cpu"):
-    """Load a model from an OLMo-core checkpoint directory."""
+    """Load a model from an OLMo-core distributed-checkpoint directory.
+
+    Expected layout (Layout A — OLMo-core FSDP/DDP):
+        checkpoint_path/
+            config.json
+            model_and_optim/   ← directory of .distcp shards
+            train/
+    """
     from olmo_core.nn.transformer import TransformerConfig
-    from olmo_core.train import TrainerConfig
+    from olmo_core.distributed.checkpoint import load_model_and_optim_state
 
     config_path = os.path.join(checkpoint_path, "config.json")
     if not os.path.exists(config_path):
-        # Try parent directory for config
+        # Fallback: config may live at the sweep level rather than per-step
         config_path = os.path.join(os.path.dirname(checkpoint_path), "config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"No config.json found at or above {checkpoint_path}")
 
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            config_dict = json.load(f)
-        model_config = TransformerConfig.from_dict(config_dict.get("model", config_dict))
-    else:
-        raise FileNotFoundError(f"No config found at {config_path}")
-
+    with open(config_path) as f:
+        config_dict = json.load(f)
+    model_config = TransformerConfig.from_dict(config_dict.get("model", config_dict))
     model = model_config.build(init_device=device)
 
-    # Load weights
-    weights_path = os.path.join(checkpoint_path, "model.pt")
-    if os.path.exists(weights_path):
-        state_dict = torch.load(weights_path, map_location=device)
-        model.load_state_dict(state_dict)
-    else:
-        log.warning(f"No model weights found at {weights_path}")
+    model_and_optim_path = os.path.join(checkpoint_path, "model_and_optim")
+    if not os.path.isdir(model_and_optim_path):
+        raise FileNotFoundError(
+            f"No model_and_optim/ directory at {model_and_optim_path}. "
+            f"This script expects OLMo-core distributed checkpoints."
+        )
+    load_model_and_optim_state(model_and_optim_path, model)
 
     model.eval()
     return model
@@ -329,15 +334,15 @@ def _extract_step(checkpoint_dir: str) -> int:
 
 
 def find_checkpoints(save_dir: str) -> List[str]:
-    """Find all checkpoint directories sorted by step."""
+    """Find all OLMo-core checkpoint directories (step*/model_and_optim/) sorted by step."""
     checkpoints = []
     for entry in os.listdir(save_dir):
         full_path = os.path.join(save_dir, entry)
-        if os.path.isdir(full_path) and any(
-            f.endswith('.pt') for f in os.listdir(full_path) if os.path.isfile(os.path.join(full_path, f))
-        ):
+        if not os.path.isdir(full_path):
+            continue
+        # OLMo-core layout: a checkpoint dir contains a model_and_optim/ subdir of .distcp files.
+        if os.path.isdir(os.path.join(full_path, "model_and_optim")):
             checkpoints.append(full_path)
-
     return sorted(checkpoints, key=_extract_step)
 
 
@@ -366,6 +371,17 @@ if __name__ == "__main__":
                              "uninformative on random input — only ossification is meaningful).")
 
     args = parser.parse_args()
+
+    # OLMo-core's distributed checkpoint loader (torch.distributed.checkpoint) requires an
+    # initialized process group, even on a single GPU. Spin up a 1-rank gloo group.
+    import torch.distributed as dist
+    if not dist.is_initialized():
+        os.environ.setdefault("MASTER_ADDR", "localhost")
+        os.environ.setdefault("MASTER_PORT", "29500")
+        os.environ.setdefault("WORLD_SIZE", "1")
+        os.environ.setdefault("RANK", "0")
+        os.environ.setdefault("LOCAL_RANK", "0")
+        dist.init_process_group(backend="gloo", rank=0, world_size=1)
 
     analyses = set(args.analysis)
     if "all" in analyses:
