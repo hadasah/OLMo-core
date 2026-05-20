@@ -10,6 +10,7 @@ Walkthroughs of each correctness fix landed for the `SharedBlockConfig` feature 
 | #8 | `apply_tp` / `apply_cp` dedup | `f273d77` |
 | #3 | `state_dict` deduplication | `a1f04c2` |
 | #10 | `block_overrides` × `shared_blocks` validation | `a7d9785` |
+| #2 | Skip per-block FSDP wrap when `shared_blocks` is set (workaround) | (this commit) |
 
 **Companion files:**
 - `ml/SHARED_MOE_TODOS.md` — backlog index of follow-ups (status of all 12 items).
@@ -362,3 +363,84 @@ Refusing outright is simpler, the error message is actionable, and the user can 
 - `src/test/nn/transformer/model_test.py` — two new tests:
   - `test_shared_blocks_rejects_block_overrides_in_shared_range` — building with an override at an index inside the shared range raises with the expected message.
   - `test_shared_blocks_allows_block_overrides_outside_shared_range` — sanity check that overrides at non-shared indices still work.
+
+---
+
+## TODO #2 — Skip per-block FSDP wrap when `shared_blocks` is set (workaround)
+
+### How the bug surfaced
+
+The first multi-GPU smoke test of the shared-MoE feature crashed during `train_module.build(model)`:
+
+```
+RuntimeError: Cannot concatenate overlapping meshes:
+  [DeviceMesh((dp=2), 'cuda', stride=(1,)), DeviceMesh((dp=2), 'cuda', stride=(1,))]
+```
+
+Stack trace:
+
+```
+single_train_launch.py:549   train_module = config.train_module.build(model)
+train_module.py:162          self.model = parallelize_model(...)
+common.py:128                m.apply_fsdp(...)
+model.py:928                 block.apply_fsdp(...)        ← iterating blocks
+block.py:802                 fully_shard(self, mesh=dp_mesh, ...)
+torch/.../fsdp_param.py:442  self._spmd_mesh = DeviceMesh._concatenate([dp_mesh, tp_mesh])
+torch/.../device_mesh.py:1452 raise RuntimeError("Cannot concatenate overlapping meshes...")
+```
+
+### Why it happens
+
+`Transformer.apply_fsdp` iterates `self.blocks.values()` and calls `block.apply_fsdp(...)` for each block. Each block's `apply_fsdp` calls `fully_shard(self, mesh=dp_mesh, ...)` — that's PyTorch's FSDP2 entry point, which walks the wrapped module's tree and turns every Parameter into a DTensor sharded on `dp_mesh`.
+
+Without `shared_blocks` this works fine: each block owns its own Parameters, each gets wrapped exactly once. With `shared_blocks`, multiple blocks alias the same `feed_forward_moe` (and possibly `attention` / norms). The first block's wrap turns those shared Parameters into DTensors. The *second* block's wrap walks into the same shared submodule, sees the Parameters are already DTensors, and FSDP2's `_init_sharding_spec_tp` path fires — which tries to "concatenate" the existing DTensor mesh with the new DP mesh. Since both are the same `(dp=2)` mesh, the concatenation rejects them as overlapping.
+
+This is the same bug class we hit earlier with `apply_tp` / `apply_cp` and "fixed" by threading a `skip_modules` set through the per-block calls (TODO #8). The fix didn't extend to `apply_fsdp` because I incorrectly assumed only `wrapping_strategy="fine_grained"` would re-wrap shared submodules — and pre-emptively added a guard that raised if you tried that combo. The smoke test showed that all FSDP wrapping strategies hit the bug, not just `fine_grained`: PyTorch's FSDP2 always walks into the wrapped module's tree regardless of strategy.
+
+### The workaround (Option A)
+
+Skip the per-block FSDP wrap entirely when `shared_blocks` is set:
+
+```python
+# Transformer.apply_fsdp
+if self.shared_blocks is None:
+    for block in self.blocks.values():
+        block.apply_fsdp(dp_mesh=dp_mesh, ...)
+
+# ... embeddings, lm_head wraps ...
+
+fully_shard(self, ...)  # root wrap — runs unconditionally
+```
+
+The trailing `fully_shard(self, ...)` at the end wraps the whole model as one FSDP unit. PyTorch's FSDP2 walks each unique Parameter exactly once during that wrap — so shared Parameters get wrapped once, not N times. Correctness restored.
+
+Also removed the `wrapping_strategy="fine_grained"` guard that used to raise: it's now redundant because the per-block loop (which fine-grained needed in order to wrap individual inner modules) is skipped entirely.
+
+### What this costs
+
+Per-block FSDP units exist for a reason: each block becomes its own all-gather / reduce-scatter unit, and FSDP2 can overlap one block's communication with the next block's compute. By skipping per-block wraps and only doing the root wrap, we collapse the model into a single FSDP unit — communication happens once at the boundary, with no overlap opportunity.
+
+For tiny models (4-layer, 20M params) this is irrelevant — the comm cost is small absolutely. For deep production models the throughput hit could be 10-30%. That's the trade-off encoded in TODO #2.
+
+### Why not the "proper" fix now?
+
+The architecturally clean fix is the same `skip_modules` pattern used for TP/CP: pre-wrap each unique shared submodule once at the model level, then thread a skip set into `block.apply_fsdp` so each block's wrap doesn't re-enter the shared subtree. But there's an unknown: PyTorch's `fully_shard(block, ...)` walks into the block's children unconditionally — there's no public API to say "don't traverse this subtree." We'd likely need to:
+
+- Either restructure the model so shared submodules are no longer children of the block (Option C in the diagnosis — checkpoint-breaking refactor), or
+- Decompose each block's wrap into explicit `fully_shard` calls on its individual non-shared children (Option B — requires every block class's `apply_fsdp` to be rewritten in fine-grained style).
+
+Both are substantial. The workaround unblocks the smoke test and any single-host or modest-scale shared-MoE training; the proper fix can be done later when throughput becomes the bottleneck.
+
+### Aside: how does this interact with EP?
+
+The smoke test was 2-GPU with `dp_mesh = ep_mesh` (same 1-D mesh used for both). EP turns expert weights into DTensors on the `ep` axis; FSDP then wraps the whole model on the same axis. After this workaround:
+
+- EP wraps the expert weights as DTensors (one wrap per unique experts module — dedup'd by TODO #8 fix).
+- FSDP's root `fully_shard(self, ...)` wraps each unique Parameter once. For already-DTensor expert params, FSDP detects them and uses the existing sharding rather than re-wrapping.
+
+This *should* work, but the smoke test is the actual proof. Re-running the smoke test after this commit is the verification.
+
+### Files touched
+
+- `src/olmo_core/nn/transformer/model.py` — `Transformer.apply_fsdp`: removed the (now-too-narrow) `fine_grained` guard; gated the per-block FSDP loop on `self.shared_blocks is None`; also gated the prefetch-setup block on the same condition (blocks aren't FSDPModules when we skip the loop, so prefetch is a no-op anyway).
+- `ml/SHARED_MOE_TODOS.md` — rewrote TODO #2 to reflect the corrected scope (all strategies, not just fine-grained) and document the workaround.

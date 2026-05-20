@@ -905,16 +905,6 @@ class Transformer(nn.Module):
             in more aggressive prefetching.
         :wrapping_strategy: The wrapping strategy.
         """
-        if (
-            self.shared_blocks is not None
-            and wrapping_strategy == TransformerDataParallelWrappingStrategy.fine_grained
-        ):
-            raise OLMoConfigurationError(
-                "wrapping_strategy='fine_grained' is not supported together with shared_blocks; "
-                "fine-grained wrapping would FSDP-shard the shared submodule(s) more than once. "
-                "Use 'blocks' or 'full' instead."
-            )
-
         mp_policy = MixedPrecisionPolicy(
             param_dtype=param_dtype or self.dtype, reduce_dtype=reduce_dtype
         )
@@ -923,15 +913,25 @@ class Transformer(nn.Module):
         # which can be expensive and non-overlapped
         reshard_after_forward = False if pp_enabled else True
 
-        for block in self.blocks.values():
-            block = cast(TransformerBlockBase, block)
-            block.apply_fsdp(
-                dp_mesh=dp_mesh,
-                prefetch_factor=prefetch_factor,
-                wrapping_strategy=wrapping_strategy,
-                reshard_after_forward=reshard_after_forward,
-                mp_policy=mp_policy,
-            )
+        # When `shared_blocks` is set, a Parameter is aliased by multiple blocks.
+        # Per-block `fully_shard(block, ...)` calls would each try to wrap the shared
+        # Parameter, but FSDP2 rejects that with "Cannot concatenate overlapping
+        # meshes" because the first wrap already turned the params into DTensors on
+        # the same DP mesh. Workaround: skip the per-block FSDP wraps entirely and
+        # rely on the root `fully_shard(self, ...)` below — it walks each unique
+        # Parameter exactly once. This trades some per-block communication overlap
+        # for correctness; revisit if throughput becomes a bottleneck (see TODO #2
+        # in `ml/SHARED_MOE_TODOS.md` for the proper fix).
+        if self.shared_blocks is None:
+            for block in self.blocks.values():
+                block = cast(TransformerBlockBase, block)
+                block.apply_fsdp(
+                    dp_mesh=dp_mesh,
+                    prefetch_factor=prefetch_factor,
+                    wrapping_strategy=wrapping_strategy,
+                    reshard_after_forward=reshard_after_forward,
+                    mp_policy=mp_policy,
+                )
 
         if self.embeddings is not None:
             fully_shard(
@@ -956,7 +956,10 @@ class Transformer(nn.Module):
             _unhide_cpu_inputs_from_torch, prepend=False, with_kwargs=True
         )
 
-        if prefetch_factor > 0:
+        # Prefetch setup requires each block to be its own FSDPModule. With
+        # shared_blocks we skipped the per-block wrap above, so the blocks aren't
+        # FSDPModules and there's nothing to prefetch between.
+        if prefetch_factor > 0 and self.shared_blocks is None:
             blocks = cast(List[FSDPModule], list(self.blocks.values()))
             for i in range(len(blocks)):
                 block = blocks[i]

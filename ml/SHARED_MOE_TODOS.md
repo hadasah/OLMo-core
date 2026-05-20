@@ -7,7 +7,7 @@ Backlog of follow-ups for the `SharedBlockConfig` feature (shared routers/expert
 | # | Item | Status | Commit |
 |---|------|--------|--------|
 | 1 | Memory-efficient construction | ⏳ open | — |
-| 2 | Fine-grained FSDP support | ⏳ open | — |
+| 2 | Per-block FSDP wrapping with shared submodules | 🚧 workaround | (this commit) |
 | 3 | `state_dict` deduplication | ✅ done | `a1f04c2` |
 | 4 | EP + FSDP-blocks integration test | ✅ done (multi-GPU only) | `de45303` |
 | 5 | Router metric regression test | ✅ done | `850009c` |
@@ -19,7 +19,7 @@ Backlog of follow-ups for the `SharedBlockConfig` feature (shared routers/expert
 | 11 | Tests for `share_attention` / `share_norms` / `share_shared_mlp` | ✅ done | `850009c` |
 | 12 | Usage example for `SharedBlockConfig` | 🚧 partial — `ml/README.md` has the section; `SharedBlockConfig` docstring still has no inline example |
 
-**Completion summary:** 9 of 12 closed, 1 partial, 3 open. The three open items (#1, #2, #7) are all efficiency / large-scale hardening — none are correctness blockers for single-node training.
+**Completion summary:** 9 of 12 closed, 2 partial/workaround (#2, #12), 2 open (#1, #7). #2 has a correctness workaround in place that costs some FSDP throughput; the others are non-blocking efficiency / hardening items.
 
 Per-fix walkthroughs for completed items live in `SHARED_MOE_FIX_NOTES.md`. Implementation plans for the highest-priority items are in `SHARED_MOE_TOP3_PLANS.md`.
 
@@ -35,13 +35,15 @@ Per-fix walkthroughs for completed items live in `SHARED_MOE_FIX_NOTES.md`. Impl
 
 **Suggested fix:** Add a `build_skipping_moe(...)` (or similar) path on `TransformerBlockConfig` that lets `Transformer.__init__` construct non-canonical blocks without instantiating the components that will be overwritten by sharing. Walk the `SharedBlockConfig` flags to decide which components to skip per index.
 
-## 2. Fine-grained FSDP support for shared modules
+## 2. Per-block FSDP wrapping with shared submodules
 
-**What:** `Transformer.apply_fsdp` currently raises `OLMoConfigurationError` if `wrapping_strategy="fine_grained"` is requested together with `shared_blocks`. The reason: fine-grained wrapping calls `fully_shard(self.feed_forward_moe, ...)` from inside each block's `apply_fsdp`, and wrapping the same module twice corrupts FSDP state.
+**Current state (workaround in place):** When `shared_blocks` is set, `Transformer.apply_fsdp` skips the per-block `block.apply_fsdp(...)` loop entirely and only wraps the whole model with the root `fully_shard(self, ...)` call. This was added after the first multi-GPU smoke test failed with `RuntimeError: Cannot concatenate overlapping meshes`. The model trains correctly but loses per-block FSDP communication overlap — at scale this is a 10-30% throughput hit on deep models, irrelevant on small ones.
 
-**Why it might matter:** Fine-grained wrapping can improve memory and overlap for very large models. We're forcing users to fall back to whole-block wrapping when sharing is enabled.
+**What the original bug was:** All FSDP wrapping strategies (`full` / `blocks` / `fine_grained`) call `fully_shard(block, ...)` once per block during `Transformer.apply_fsdp`'s loop. FSDP2 walks the wrapped block's tree and turns its Parameters into DTensors on the DP mesh. When block 2 (which aliases block 1's `feed_forward_moe`) gets wrapped, it tries to wrap the same Parameters again. FSDP2 sees they're already DTensors on the DP mesh and errors out with `Cannot concatenate overlapping meshes: [DeviceMesh((dp=N)), DeviceMesh((dp=N))]`. I previously mis-scoped this as only affecting `fine_grained`; the smoke test showed all strategies have it.
 
-**Suggested fix:** At the `Transformer` level, identify the unique shared submodules up front and wrap them with `fully_shard` once. Pass a `skip_modules: set[int]` (set of `id(...)`) into `block.apply_fsdp` so each block's fine-grained pass skips already-wrapped children. The pattern already exists for TP/CP (`#8` below) — same trick, applied to FSDP. Touches every block class that overrides `apply_fsdp` (TransformerBlock, MoETransformerBlock, hybrid variants), so it's mechanical but not zero-cost to land.
+**Proper fix (deferred):** Mirror the TP/CP `skip_modules` pattern. At the `Transformer` level, pre-wrap each unique shared submodule once via `fully_shard(shared_submodule, ...)`. Plumb a `skip_modules: set[int]` kwarg through `TransformerBlockBase.apply_fsdp` and all concrete overrides, so each block's call skips the inner-submodule wraps for shared ids. The unknown is whether `fully_shard(block, ...)` can be told "don't walk into this submodule" — if not, we may need to make blocks call `fully_shard` on individual *non-shared* children explicitly (akin to fine-grained) rather than wrapping the whole block at once.
+
+**Why it might matter:** Per-block FSDP wrap is the main mechanism for hiding all-gather behind compute. Skipping it (current state) gives correctness at the cost of throughput. Fine for short runs and smaller models; potentially significant for very large MoE training.
 
 ## 7. Pipeline-parallelism interaction
 
