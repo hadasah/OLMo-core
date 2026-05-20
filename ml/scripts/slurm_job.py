@@ -104,6 +104,7 @@ echo
 nvidia-smi
 
 source ~/.bashrc
+source ~/init_scripts/.olmoe-core-ml.sh
 
 echo "SLURM_PROCID"=$SLURM_PROCID
 echo "node-list: $SLURM_JOB_NODELIST"

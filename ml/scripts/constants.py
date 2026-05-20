@@ -140,11 +140,11 @@ MODEL_HP_DEFAULTS = {
 PROJECT_SPECS = {
     "margsli": {
         "DEFAULT_SAVE_PATH": os.path.join(DEFAULT_DIR_PATH, "models"),
-        "DATA_WORK_DIR": "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data",
-        "VALID_DATA_DIR": "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed",
-        "WANDB_PROJECT": "moe",
+        "DATA_WORK_DIR": os.path.join(DEFAULT_DIR_PATH, "ml", "data"),
+        "VALID_DATA_DIR": os.path.join(DEFAULT_DIR_PATH, "ml", "data", "preprocessed"),
+        "WANDB_PROJECT": "unimoe",
         "WANDB_ENTITY": "ml-moe",
-        "CONDA_ENV_NAME": "moe",
+        "CONDA_ENV_NAME": "olmoe-core-ml",
         "PROJECT_DIR": DEFAULT_DIR_PATH,
         "SLURM_ACCOUNT": "zlab",
         "SLURM_PARTITION": "ckpt-g2",

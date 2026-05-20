@@ -20,7 +20,7 @@ module load cuda/12.6.3
 mamba create -n $ENV_NAME python=3.11
 mamba activate $ENV_NAME
 
-git clone https://github.com/sneha-rk/OLMo-core.git
+git clone https://github.com/hadasah/OLMo-core.git
 cd OLMo-core
 pip install -e .[all]
 
