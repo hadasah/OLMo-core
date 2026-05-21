@@ -2,12 +2,11 @@
 """
 
 import argparse
-import sys
-import os
 import logging
+import os
 import traceback
-from dataclasses import dataclass, field
-from typing import List, cast, Optional
+from dataclasses import dataclass
+from typing import List, Optional, cast
 
 import torch
 import torch.distributed as dist
@@ -16,17 +15,13 @@ from olmo_core.config import Config, DType
 from olmo_core.data import (
     DataMix,
     NumpyDataLoaderConfig,
-    NumpyDatasetConfig,
-    NumpyDatasetType,
+    NumpyFSLDatasetConfig,
+    NumpyPaddedFSLDatasetConfig,
     TokenizerConfig,
 )
 from olmo_core.distributed.parallel import DataParallelType
-from olmo_core.distributed.utils import get_world_size
-from olmo_core.nn.transformer import (
-    TransformerActivationCheckpointingMode,
-    TransformerConfig,
-)
-from olmo_core.optim import CosWithWarmup, OptimGroupOverride, AdamWConfig, WSD
+from olmo_core.nn.transformer import TransformerConfig
+from olmo_core.optim import AdamWConfig, CosWithWarmup, OptimGroupOverride, WSD
 from olmo_core.train import (
     Duration,
     TrainerConfig,
@@ -43,7 +38,6 @@ from olmo_core.train.callbacks import (
     WandBCallback,
 )
 from olmo_core.train.train_module import (
-    TransformerActivationCheckpointingConfig,
     TransformerDataParallelConfig,
     TransformerDataParallelWrappingStrategy,
     TransformerTrainModuleConfig,
@@ -78,19 +72,16 @@ DATAMIX_LOOKUP = {
     "OLMoE_mix_0824": DataMix.OLMoE_mix_0824,
 }
 
-USER_PROJECT_SPECS ={
-        "DEFAULT_SAVE_PATH": os.path.join(DEFAULT_DIR_PATH, "models"),
-        "DATA_WORK_DIR": "",
-        "VALID_DATA_DIR": "",
-        "WANDB_PROJECT": "",
-        "WANDB_ENTITY": "",
-        "PROJECT_DIR": DEFAULT_DIR_PATH,
-        "NUM_GPUS": 4,
-        "MODEL": [],
-        "DATAROOT": "",
-        "DATA_DIR": "",
-        "NAME_KEYS": [],
-    },
+USER_PROJECT_SPECS = {
+    "DEFAULT_SAVE_PATH": os.path.join(DEFAULT_DIR_PATH, "models"),
+    "DATA_WORK_DIR": "",
+    "VALID_DATA_DIR": "",
+    "WANDB_PROJECT": "",
+    "WANDB_ENTITY": "",
+    "PROJECT_DIR": DEFAULT_DIR_PATH,
+    "DATAROOT": "",
+    "NAME_KEYS": [],
+}
 
 DATA_SEED = 34521
 
@@ -112,7 +103,7 @@ def get_wandb_tags(
 @dataclass
 class ExperimentConfig(Config):
     model: TransformerConfig
-    dataset: NumpyDatasetConfig
+    dataset: NumpyFSLDatasetConfig
     data_loader: NumpyDataLoaderConfig
     train_module: TransformerTrainModuleConfig
     trainer: TrainerConfig
@@ -120,8 +111,8 @@ class ExperimentConfig(Config):
 
 
 def build_config(
-    run_name: str,
-    tokenizer_name: str = "dolma2",
+    run_name: str, 
+    tokenizer_name: str = "dolma2", 
     model_name: str = "olmo2_ml_100M",
     train_datamix_name: str = "OLMoE_mix_0824",
     valid_datamix_name: str = "v3_small_ppl_validation",
@@ -134,7 +125,7 @@ def build_config(
     per_gpu_batch_size: int = 4,  # 4 sequences per GPU
     num_data_workers: int = 4,
     train_tokens: int = 200_000_000,
-    save_interval: int = 400,
+    save_interval: int = 400, 
     ephemeral_save_interval: int = 50,
     eval_interval: int = 100,
     metrics_collect_interval: int = 10,
@@ -161,7 +152,7 @@ def build_config(
     wandb_project: str = USER_PROJECT_SPECS['WANDB_PROJECT'],
     overrides: List[str] = [],
 ) -> ExperimentConfig:
-
+    
     tokenizer_config = TOKENIZER_LOOKUP[tokenizer_name]()
 
     model_config = MODEL_CONFIG_LOOKUP[model_name](
@@ -178,7 +169,7 @@ def build_config(
         uniform_expert_assignment=True if expert_assignment == "uniform" else False,
     )
 
-    dataset_config = NumpyDatasetConfig.from_data_mix(
+    dataset_config = NumpyFSLDatasetConfig.from_data_mix(
         DATAMIX_LOOKUP[train_datamix_name],
         tokenizer=tokenizer_config,
         mix_base_dir=data_root,
@@ -195,7 +186,7 @@ def build_config(
 
     train_module_config = TransformerTrainModuleConfig(
         rank_microbatch_size=per_gpu_batch_size * sequence_length,
-        max_sequence_length=dataset_config.effective_sequence_length,
+        max_sequence_length=dataset_config.sequence_length,
         optim=AdamWConfig(
             lr=lr,
             weight_decay=weight_decay,
@@ -208,7 +199,7 @@ def build_config(
         scheduler=WSD(warmup_steps=warmup_steps, decay=decay_steps, decay_fraction=None) if scheduler == 'wsd' else CosWithWarmup(warmup_steps=warmup_steps),
         compile_model=True,
         dp_config=TransformerDataParallelConfig(
-            name=DataParallelType.fsdp,
+            name=DataParallelType.fsdp,  
             param_dtype=DType.bfloat16,
             reduce_dtype=DType.float32,
             wrapping_strategy=TransformerDataParallelWrappingStrategy.full,
@@ -222,7 +213,7 @@ def build_config(
             save_folder=f"{save_root}/{run_name}",
             save_overwrite=True,
             metrics_collect_interval=metrics_collect_interval,
-            cancel_check_interval=1,
+            cancel_check_interval=1, 
             max_duration=Duration.tokens(train_tokens),
             eval_only=True,  # Set to True to only run evaluations without training
         )
@@ -235,16 +226,22 @@ def build_config(
                 save_async=True,
             ),
         )
+        .with_callback(
+            "comet",
+            CometCallback(
+                name=run_name,
+                cancel_check_interval=10,
+                enabled=False,  # NOTE: change to true to enable
+            ),
+        )
         .with_callback("config_saver", ConfigSaverCallback())
         .with_callback(
             "lm_evaluator",
             LMEvaluatorCallbackConfig(
-                name="lm",
-                eval_dataset=NumpyDatasetConfig.from_data_mix(
+                eval_dataset=NumpyPaddedFSLDatasetConfig.from_data_mix(
                     DATAMIX_LOOKUP[valid_datamix_name],
-                    name=NumpyDatasetType.padded_fsl,
                     mix_base_dir=valid_data_dir,
-                    sequence_length=dataset_config.effective_sequence_length,
+                    sequence_length=dataset_config.sequence_length,
                     tokenizer=tokenizer_config,
                     work_dir=data_work_dir,
                 ),
@@ -255,7 +252,6 @@ def build_config(
         .with_callback(
             "downstream_evaluator",
             DownstreamEvaluatorCallbackConfig(
-                name="downstream",
                 tasks=[
                     "mmlu_stem_mc_5shot_test",
                     "mmlu_humanities_mc_5shot_test",
@@ -279,7 +275,7 @@ def build_config(
                 cancel_check_interval=10,
                 group="dense" if len(moe_num_experts_list) == 1 and moe_num_experts_list[0] == 1 else "MoE" if len(moe_num_experts_list) == 1 else "HetMoE",
                 tags=get_wandb_tags(run_name, model_name, moe_num_experts_list, moe_generalist_hidden_multiplier, moe_type),
-                enabled=True,
+                enabled=True,  
             ),
         )
     )
@@ -304,17 +300,17 @@ def main(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     logger = logging.getLogger(__name__)
-
+    
     try:
         # Log environment info
-        logger.info(f"World size: {dist.get_world_size()}")7
+        logger.info(f"World size: {dist.get_world_size()}")
         if torch.cuda.is_available():
             logger.info(f"CUDA device count: {torch.cuda.device_count()}")
             logger.info(f"Current CUDA device: {torch.cuda.current_device()}")
             logger.info(f"CUDA device name: {torch.cuda.get_device_name()}")
-
+        
         config = build_config(
-            args.run_name,
+            args.run_name, 
             tokenizer_name=args.tokenizer_name,
             model_name=args.model_name,
             train_datamix_name=args.train_datamix_name,
@@ -327,9 +323,9 @@ def main(
             global_batch_size=args.global_batch_size,
             scheduler=args.scheduler,
             per_gpu_batch_size=args.per_gpu_batch_size,
-            moe_hidden_multipliers_list=[float(v) for v in args.moe_hidden_multipliers_list.split(',')],
-            moe_num_experts_list=[int(v) for v in args.moe_num_experts_list.split(',')],
-            moe_router_top_ks_list=[int(v) for v in args.moe_router_top_ks_list.split(',')],
+            moe_hidden_multipliers_list=[float(v) for v in args.moe_hidden_multipliers_list.split(',')], 
+            moe_num_experts_list=[int(v) for v in args.moe_num_experts_list.split(',')], 
+            moe_router_top_ks_list=[int(v) for v in args.moe_router_top_ks_list.split(',')], 
             moe_generalist_hidden_multiplier=float(args.moe_generalist_hidden_multiplier),
             moe_type=args.moe_type,
             moe_bias_gamma=args.moe_bias_gamma,
@@ -366,7 +362,7 @@ def main(
         # Train.
         logger.info("Starting training...")
         trainer.fit()
-
+        
     except Exception as e:
         logger.error(f"Error occurred: {str(e)}")
         logger.error("Traceback:")
@@ -380,7 +376,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("run_name", type=str, help="Name of the run")
     parser.add_argument("--tokenizer_name", type=str, default="dolma2", help="Name of the tokenizer to use")
-    parser.add_argument("--model_name", type=str, default="olmo2_ml_100M", help="Name of the model configuration to use")
+    parser.add_argument("--model_name", type=str, default="olmo2_ml_100M", choices=sorted(MODEL_CONFIG_LOOKUP.keys()), help="Name of the model configuration to use")
     parser.add_argument("--train_datamix_name", type=str, default="OLMoE_mix_0824", help="Name of the training data mix")
     parser.add_argument("--valid_datamix_name", type=str, default="v3_small_ppl_validation", help="Name of the validation data mix")
     parser.add_argument("--data_root", type=str, default=USER_PROJECT_SPECS['DATAROOT'], help="Root URL for the data")
@@ -402,8 +398,6 @@ if __name__ == "__main__":
     parser.add_argument("--expert_assignment", type=str, default="learned", choices=["learned", "uniform"])
     args, overrides = parser.parse_known_args()
 
-
-    print(overrides)
     prepare_training_environment()
     try:
         main(args, overrides=overrides)
