@@ -78,16 +78,16 @@ DATAMIX_LOOKUP = {
     "OLMoE_mix_0824": DataMix.OLMoE_mix_0824,
 }
 
-USER_PROJECT_SPECS ={
-        "DEFAULT_SAVE_PATH": os.path.join(DEFAULT_DIR_PATH, "models"),
-        "DATA_WORK_DIR": "",
-        "VALID_DATA_DIR": "",
-        "WANDB_PROJECT": "",
-        "WANDB_ENTITY": "",
-        "PROJECT_DIR": DEFAULT_DIR_PATH,
-        "DATAROOT": "",
-        "NAME_KEYS": [],
-    },
+USER_PROJECT_SPECS = {
+    "DEFAULT_SAVE_PATH": os.path.join(DEFAULT_DIR_PATH, "models"),
+    "DATA_WORK_DIR": "",
+    "VALID_DATA_DIR": "",
+    "WANDB_PROJECT": "",
+    "WANDB_ENTITY": "",
+    "PROJECT_DIR": DEFAULT_DIR_PATH,
+    "DATAROOT": "",
+    "NAME_KEYS": [],
+}
 
 DATA_SEED = 34521
 
@@ -145,7 +145,7 @@ def build_config(
     adam_betas: tuple[float, float] = (0.9, 0.95),
     z_loss_multiplier: float = 1e-5,
     moe_num_experts_list: List[int] = [32, 64],
-    moe_hidden_multipliers_list: List[int] = [1024, 2048],
+    moe_hidden_multipliers_list: List[float] = [1024.0, 2048.0],
     moe_router_top_ks_list: List[int] = [4, 8],
     moe_generalist_hidden_multiplier: int = 1,
     moe_type: str = "default",  # "default" or "dropless"
@@ -153,6 +153,7 @@ def build_config(
     max_grad_norm: float = 1.0,
     moe_z_loss_weight: float = 0.001,
     moe_lb_loss_weight: float = 0.01,
+    expert_assignment: str = "learned",
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS["WANDB_ENTITY"],
     wandb_project: str = USER_PROJECT_SPECS["WANDB_PROJECT"],
@@ -171,6 +172,7 @@ def build_config(
         bias_gamma=moe_bias_gamma,
         z_loss_weight=moe_z_loss_weight,
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
+        uniform_expert_assignment=(expert_assignment == "uniform"),
     )
 
     dataset_config = NumpyFSLDatasetConfig.from_data_mix(
@@ -340,6 +342,7 @@ def main(args: argparse.Namespace, overrides: List[str]) -> None:
             moe_bias_gamma=args.moe_bias_gamma,
             moe_z_loss_weight=args.moe_z_loss_weight,
             moe_lb_loss_weight=args.moe_lb_loss_weight,
+            expert_assignment=args.expert_assignment,
             overrides=overrides,
         )
         logger.info("Config built successfully")
@@ -390,7 +393,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         type=str,
-        default="olmo2_100M_moe_32_16",
+        default="olmo2_ml_100M",
+        choices=sorted(MODEL_CONFIG_LOOKUP.keys()),
         help="Name of the model configuration to use",
     )
     parser.add_argument(
@@ -406,7 +410,10 @@ if __name__ == "__main__":
         help="Name of the validation data mix",
     )
     parser.add_argument(
-        "--data_root", type=str,
+        "--data_root",
+        type=str,
+        default=USER_PROJECT_SPECS["DATAROOT"],
+        help="Root URL or directory for the training data mix",
     )
     parser.add_argument(
         "--save_root",
@@ -477,6 +484,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--moe_lb_loss_weight", type=float, default=0.01, help="Weight for the LB loss in MoE"
+    )
+    parser.add_argument(
+        "--expert_assignment",
+        type=str,
+        default="learned",
+        choices=["learned", "uniform"],
+        help="Expert assignment strategy ('learned' uses the router; 'uniform' bypasses it)",
     )
     args, overrides = parser.parse_known_args()
 
