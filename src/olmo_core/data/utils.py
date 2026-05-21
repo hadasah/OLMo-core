@@ -1,4 +1,4 @@
-import functools as ft
+import logging
 import gzip
 import math
 import os
@@ -6,7 +6,6 @@ import random
 from collections import defaultdict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from itertools import islice
 from pathlib import Path
 from typing import (
     Any,
@@ -19,7 +18,6 @@ from typing import (
     Sequence,
     Tuple,
     Type,
-    TypeVar,
     Union,
 )
 
@@ -28,16 +26,12 @@ import torch
 import torch.nn.functional as F
 
 from olmo_core.aliases import PathOrStr
-from olmo_core.io import (
-    add_cached_path_clients,
-    get_bytes_range,
-    get_file_size,
-    is_url,
-    resource_path,
-)
+from olmo_core.io import add_cached_path_clients, get_bytes_range, is_url, resource_path
 from olmo_core.utils import capped_powers_of_2
 
 from .types import LongDocStrategy
+
+log = logging.getLogger(__name__)
 
 
 def split_batch(batch: Dict[str, Any], num_microbatch_instances: int) -> List[Dict[str, Any]]:
@@ -173,7 +167,6 @@ def iter_document_indices(
     local_cache: Optional[PathOrStr] = None,
     use_array_if_local: Optional[bool] = None,
     eos_token_id: Optional[int] = None,
-    bos_token_id: Optional[int] = None,
     dtype=None,
 ) -> Generator[Tuple[int, int], None, None]:
     """
@@ -195,25 +188,22 @@ def iter_document_indices(
             use_array_if_local = True
 
     if use_array_if_local and not is_url(data_path):
+        log.info("loading document indices from array mmap for data at '%s'", data_path)
         if eos_token_id is None or dtype is None:
             raise ValueError(
                 "'eos_token_id' and 'dtype' are required to use the local array for finding document indices"
             )
         mmap = np.memmap(data_path, mode="r", dtype=dtype)
-        if bos_token_id is None:
-            doc_boundaries = (mmap == eos_token_id).nonzero()[0]
-        else:
-            doc_boundaries = np.logical_and(
-                mmap[:-1] == eos_token_id, mmap[1:] == bos_token_id
-            ).nonzero()[0]
-            if mmap[-1] == eos_token_id:
-                doc_boundaries = np.append(doc_boundaries, mmap.shape[0] - 1)
+        doc_boundaries = (mmap == eos_token_id).nonzero()[0]
         start_idx = 0
+        end_idx = 0
         for idx in doc_boundaries:
             end_idx = idx + 1
+            log.info("yielding document indices from array mmap: %d to %d", start_idx, end_idx)
             yield start_idx, end_idx
             start_idx = end_idx
     else:
+        log.info("loading document indices from metadata for data at '%s'", data_path)
         metadata_filename = os.path.basename(data_path).replace(".npy", ".csv.gz")
         try:
             metadata_path = resource_path(
@@ -228,26 +218,11 @@ def iter_document_indices(
                 "indices can be inferred from the source file."
             ) from e
 
-        total_tokens: Optional[int] = None
-        if dtype is not None:
-            total_tokens = get_file_size(data_path) // dtype(0).itemsize
-
         with gzip.open(metadata_path, "rt") as f:
             for line in f:
-                start_index_str, end_index_str, *_ = line.split(",")
-                start_index, end_index = int(start_index_str), int(end_index_str)
-                if total_tokens is not None:
-                    if start_index >= total_tokens:
-                        raise RuntimeError(
-                            f"Document start index {start_index:,d} from metadata file "
-                            f"for source '{data_path}' with {total_tokens:,d} tokens is out-of-bounds"
-                        )
-                    if end_index > total_tokens:
-                        raise RuntimeError(
-                            f"Document end index {end_index:,d} from metadata file "
-                            f"for source '{data_path}' with {total_tokens:,d} tokens is out-of-bounds"
-                        )
-                yield start_index, end_index
+                start_index, end_index, *_ = line.split(",")
+                log.info("yielding document indices from metadata: %d to %d", start_idx, end_idx)
+                yield int(start_index), int(end_index)
 
 
 def iter_document_indices_with_max_sequence_length(
@@ -257,7 +232,6 @@ def iter_document_indices_with_max_sequence_length(
     local_cache: Optional[PathOrStr] = None,
     use_array_if_local: Optional[bool] = None,
     eos_token_id: Optional[int] = None,
-    bos_token_id: Optional[int] = None,
     dtype=None,
     long_doc_strategy: LongDocStrategy = LongDocStrategy.truncate,
 ) -> Generator[Tuple[int, int], None, None]:
@@ -265,12 +239,12 @@ def iter_document_indices_with_max_sequence_length(
     Like :func:`iter_document_indices` but will either truncate or split documents that are
     longer than ``max_sequence_length``.
     """
+    log.info("making document indices with max sequence length %d for data at '%s'", max_sequence_length, data_path)
     for start_idx, end_idx in iter_document_indices(
         data_path,
         local_cache=local_cache,
         use_array_if_local=use_array_if_local,
         eos_token_id=eos_token_id,
-        bos_token_id=bos_token_id,
         dtype=dtype,
     ):
         if end_idx - start_idx > max_sequence_length:
@@ -291,6 +265,7 @@ def get_document_indices(
     """
     Like :func:`iter_document_indices` but returns a list.
     """
+    log.info("getting document indices for data at '%s'", data_path)
     return list(iter_document_indices(data_path, local_cache=local_cache))
 
 
@@ -336,44 +311,22 @@ def load_array_slice_into_tensor(
         return torch.tensor(array.astype(np.int_), dtype=torch.long)
 
 
-def get_document_lengths(
-    input_ids: Union[torch.Tensor, np.ndarray],
-    eos_token_id: int,
-    bos_token_id: Optional[int] = None,
-) -> torch.Tensor:
+def get_document_lengths(input_ids: torch.Tensor, eos_token_id: int) -> torch.Tensor:
     """
     Get the length of documents.
 
     :param input_ids: An integer-type tensor of token IDs.
     :param eos_token_id: The ID of the EOS token (use to denote document boundaries).
-    :param bos_token_id: The ID of the BOS token (use to denote document boundaries). When provided,
-        every document must start with a BOS token.
     """
-    if not isinstance(input_ids, torch.Tensor):
-        input_ids = torch.tensor(input_ids.astype(np.int_), dtype=torch.long)
-
-    if bos_token_id is None:
-        doc_boundaries = torch.cat(
-            [
-                torch.tensor([-1], dtype=torch.int32),
-                (input_ids == eos_token_id).nonzero(as_tuple=True)[0].to(dtype=torch.int32),
-                torch.tensor(
-                    [] if input_ids[-1] == eos_token_id else [input_ids.shape[0] - 1],
-                    dtype=torch.int32,
-                ),
-            ]
-        )
-    else:
-        doc_boundaries = torch.cat(
-            [
-                torch.tensor([-1], dtype=torch.int32),
-                torch.logical_and(input_ids[:-1] == eos_token_id, input_ids[1:] == bos_token_id)
-                .nonzero(as_tuple=True)[0]
-                .to(dtype=torch.int32),
-                torch.tensor([input_ids.shape[0] - 1], dtype=torch.int32),
-            ]
-        )
-
+    doc_boundaries = torch.cat(
+        [
+            torch.tensor([-1], dtype=torch.int32),
+            (input_ids == eos_token_id).nonzero(as_tuple=True)[0].to(dtype=torch.int32),
+            torch.tensor(
+                [] if input_ids[-1] == eos_token_id else [input_ids.shape[0] - 1], dtype=torch.int32
+            ),
+        ]
+    )
     return doc_boundaries[1:] - doc_boundaries[:-1]
 
 
@@ -434,9 +387,7 @@ def memmap_to_write(
     file until the context exists successfully.
     """
     path.parent.mkdir(exist_ok=True, parents=True)
-    # NOTE: we use 'random.SystemRandom' here to minimize the probability of collisions in temp
-    # filenames from different runs using the same seed and working directory.
-    tmp_path = path.with_suffix(f".{random.SystemRandom().randint(0, 2**32)}.npy.tmp")
+    tmp_path = path.with_suffix(f".{random.randint(0,2**32)}.npy.tmp")
     mmap = np.memmap(tmp_path, dtype=dtype, mode="w+", shape=shape)
     try:
         yield mmap
@@ -444,15 +395,7 @@ def memmap_to_write(
         tmp_path.unlink(missing_ok=True)
     mmap.flush()
     del mmap
-    try:
-        tmp_path.replace(path)
-    except FileNotFoundError:
-        # Handle potential race condition if multiple processes are trying to replace the same
-        # 'tmp_path' concurrently, in which case we might get a FileNotFoundError because the
-        # 'tmp_path' was already moved by another process.
-        # In this case we'll ignore the error if 'path' already exists.
-        if not path.is_file():
-            raise
+    tmp_path.replace(path)
 
 
 def write_array_to_disk(arr: np.ndarray, path: Path):
@@ -508,6 +451,7 @@ def bucket_documents(
 
     Returns the number of original documents and the number of new bucketed documents.
     """
+    log.info("making bucketed document indices for data at '%s'", path)
     max_sequence_length = max(buckets)
     min_sequence_length = min(buckets)
 
@@ -542,7 +486,6 @@ def segment_documents_into_instances(
     indices_dtype: Union[
         Type[np.uint8], Type[np.uint16], Type[np.uint32], Type[np.uint64]
     ] = np.uint32,
-    bos_token_id: Optional[int] = None,
     sample: Optional[Tuple[int, int]] = None,
 ) -> Tuple[int, int]:
     """
@@ -553,11 +496,12 @@ def segment_documents_into_instances(
 
     Returns the number of original documents and the number of resulting instances documents.
     """
+    log.info("making document indices for data at '%s'", path)
     total_og_docs = 0
     idx_gen = (
         idx
         for start_idx, end_idx in iter_document_indices(
-            path, eos_token_id=eos_token_id, bos_token_id=bos_token_id, dtype=dtype
+            path, eos_token_id=eos_token_id, dtype=dtype
         )
         for idx in (start_idx, start_idx + min(end_idx - start_idx, max_sequence_length))
     )
@@ -720,21 +664,6 @@ def find_periodic_sequences(
                 yield out
 
 
-T = TypeVar("T")
-
-
-def _take(n: int, iterable: Iterable[T]) -> List[T]:
-    return list(islice(iterable, n))
-
-
-def chunked(iterable: Iterable[T], n: int) -> Iterable[List[T]]:
-    """
-    Group items in the iterable into chunks of size `n`, at most. This is equivalent to the function
-    from ``more-itertools`` with the same name and ``strict=False``.
-    """
-    return iter(ft.partial(_take, n, iter(iterable)), [])
-
-
 #########################################################################################################################
 # Implementation of the Optimized Best-Fit Decreasing (OBFD) bin packing algorithm from https://arxiv.org/pdf/2404.10830.
 # See Appendix B for a detailed illustration of the algorithm.
@@ -865,7 +794,7 @@ class InstancePacker:
 
         # Sort document indices by document length, decreasing.
         document_lengths = document_indices[:, 1] - document_indices[:, 0]
-        sorted_index = np.argsort(-1 * document_lengths.astype(np.int64))
+        sorted_index = np.argsort(-1 * document_lengths)
         document_indices = np.take(document_indices, sorted_index, axis=0)
 
         # Pack documents into instances.
@@ -883,26 +812,23 @@ class InstancePacker:
 
 
 def pack_documents_into_instances(
-    *paths: PathOrStr,
+    path: PathOrStr,
+    *,
     max_sequence_length: int,
     eos_token_id: int,
     dtype: Union[Type[np.uint8], Type[np.uint16], Type[np.uint32], Type[np.uint64]],
-    bos_token_id: Optional[int] = None,
     indices_dtype: Union[
         Type[np.uint8], Type[np.uint16], Type[np.uint32], Type[np.uint64]
     ] = np.uint64,
     long_doc_strategy: LongDocStrategy = LongDocStrategy.truncate,
 ) -> Tuple[List[List[int]], np.ndarray, int]:
     """
-    Pack document from source files into instances of at most ``max_sequence_length`` using
+    Pack document from a source file into instances of at most ``max_sequence_length`` using
     a best-fit-decreasing algorithm described in https://arxiv.org/pdf/2404.10830.
 
-    :param paths: Paths/URLs to the source files of token IDs. When multiple sources are given, they'll
-        be treated as if they've been concatenated together into a single source file.
+    :param path: Path/URL to the source file of token IDs.
     :param max_sequence_length: The maximum sequence length of each *instance*.
     :param eos_token_id: The EOS token ID, used to find document boundaries.
-    :param bos_token_id: The BOS token ID, used to find document boundaries in conjunction with the EOS
-        token ID.
     :param dtype: The numpy datatype of the source file.
     :param indices_dtype: The numpy datatype to use for document indices.
     :param long_doc_strategy: Specifies how to handle document that are longer than ``max_sequence_length``.
@@ -915,60 +841,20 @@ def pack_documents_into_instances(
         of the corresponding document start and end indices, with shape ``(num_documents, 2)``,
         and the total number of tokens packed into instances.
     """
-    if len(paths) == 0:
-        raise RuntimeError("At least one source path must be provided")
-
-    def doc_idx_gen() -> Generator[int, None, None]:
-        start_offset = 0
-        for path in paths:
-            for start_idx, end_idx in iter_document_indices_with_max_sequence_length(
-                path,
-                max_sequence_length,
-                eos_token_id=eos_token_id,
-                bos_token_id=bos_token_id,
-                dtype=dtype,
-                long_doc_strategy=long_doc_strategy,
-            ):
-                yield start_offset + start_idx
-                yield start_offset + end_idx
-            start_offset += get_file_size(path) // dtype(0).itemsize
-
+    doc_idx_gen = (
+        idx
+        for (start_idx, end_idx) in iter_document_indices_with_max_sequence_length(
+            path,
+            max_sequence_length,
+            eos_token_id=eos_token_id,
+            dtype=dtype,
+            long_doc_strategy=long_doc_strategy,
+        )
+        for idx in (start_idx, end_idx)
+    )
     # shape: (num_docs, 2)
-    document_indices = np.fromiter(doc_idx_gen(), dtype=indices_dtype).reshape(-1, 2)
+    document_indices = np.fromiter(doc_idx_gen, dtype=indices_dtype).reshape(-1, 2)
 
     # Pack documents into instances.
     instance_packer = InstancePacker(max_sequence_length)
     return instance_packer.pack_documents(document_indices)
-
-
-def attention_mask_to_cache_leftpad(
-    attention_mask: torch.Tensor,
-) -> torch.Tensor:
-    """Convert a left-padding attention mask into a cache leftpad for Flash-Attention.
-
-    The mask is expected to be a boolean or 0/1 tensor of shape ``(batch, seq_len)`` where
-    ``True``/1 indicates a *valid* token and the padding is on the **left** side of the
-    sequence (i.e. all padding tokens come *before* all valid tokens).
-
-    Returns:
-        cache_leftpad: (batch_size,), dtype torch.int32. The index that the KV cache starts.
-    """
-    if attention_mask.ndim != 2:
-        raise ValueError(
-            f"expected 2-D attention_mask (batch, seq_len), got shape {attention_mask.shape}"
-        )
-    if attention_mask.dtype != torch.bool:
-        attention_mask = attention_mask != 0
-
-    # Verify prefix-padding property
-    # Check that once we see a valid token (True), we don't see any padding tokens (False) after it
-    prefix_ok = (attention_mask.cummax(dim=1).values & ~attention_mask).any().item() is False
-    if not prefix_ok:
-        raise ValueError(
-            "attention_mask must represent *prefix padding* (all padding tokens precede valid tokens) "
-            "for conversion to flash attention cache leftpad."
-        )
-
-    # Find the first True value in each row (where valid tokens start)
-    cache_leftpad = attention_mask.int().argmax(dim=-1).int()  # (B,)
-    return cache_leftpad

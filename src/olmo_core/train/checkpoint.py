@@ -24,10 +24,10 @@ from ..distributed.checkpoint import (
 )
 from ..distributed.utils import (
     barrier,
-    broadcast_object,
     get_fs_local_rank,
     get_rank,
     is_distributed,
+    scatter_object,
 )
 from ..exceptions import OLMoConfigurationError
 from ..io import (
@@ -57,7 +57,6 @@ class CheckpointerConfig(Config):
     pre_download: bool = False
     save_thread_count: Optional[int] = None
     load_thread_count: Optional[int] = None
-    #  save_process_count: Optional[int] = None
     throttle_uploads: bool = False
 
     def build(self, process_group: Optional[dist.ProcessGroup] = None, **kwargs) -> "Checkpointer":
@@ -81,7 +80,6 @@ class Checkpointer:
 
     METADATA_FNAME: ClassVar[str] = ".metadata.json"
     CHECKPOINT_DIR: ClassVar[str] = "step{step}"
-    FS_TIMEOUT: ClassVar[float] = 120.0
 
     work_dir: Path
     save_overwrite: bool = False
@@ -89,7 +87,6 @@ class Checkpointer:
     process_group: Optional[dist.ProcessGroup] = None
     save_thread_count: Optional[int] = None
     load_thread_count: Optional[int] = None
-    #  save_process_count: Optional[int] = None  # TODO: leads to some MP issues, needs more investigating.
     throttle_uploads: bool = False
 
     def __post_init__(self):
@@ -101,8 +98,6 @@ class Checkpointer:
         """
         Save model, optim, and other training state to a local or remote directory.
         """
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
         dir = normalize_path(dir)
         with self._temporary_wd(dir) as wd:
             # Save trainer state.
@@ -114,13 +109,9 @@ class Checkpointer:
                 train_module_dir,
                 train_module.state_dict_to_save(),
                 process_group=self.process_group,
+                save_overwrite=self.save_overwrite,
                 thread_count=self.save_thread_count,
-                #  process_count=self.save_process_count,
                 throttle_uploads=self.throttle_uploads,
-                enable_plan_caching=True,
-                # NOTE: we've already checked and cleared the directory at this point so we can skip
-                # the extra synchronization.
-                _skip_prepare=True,
             )
 
         self._save_metadata(dir, CheckpointMetadata())
@@ -136,8 +127,6 @@ class Checkpointer:
                 "a checkpointer process group is required for async checkpointing!"
             )
 
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
         dir = normalize_path(dir)
 
         with self._temporary_wd(dir) as wd:
@@ -150,13 +139,9 @@ class Checkpointer:
             train_module_dir,
             train_module.state_dict_to_save(),
             process_group=self.process_group,
+            save_overwrite=self.save_overwrite,
             thread_count=self.save_thread_count,
-            #  process_count=self.save_process_count,
             throttle_uploads=self.throttle_uploads,
-            enable_plan_caching=True,
-            # NOTE: we've already checked and cleared the directory at this point so we can skip
-            # the extra synchronization.
-            _skip_prepare=True,
         )
 
         def done_callback(fut: Future):
@@ -174,7 +159,6 @@ class Checkpointer:
         train_module: TrainModule,
         *,
         load_trainer_state: Optional[bool] = None,
-        load_optim_state: Optional[bool] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Load model, optim, and other training state from a local or remote checkpoint directory
@@ -212,11 +196,11 @@ class Checkpointer:
                 else:
                     raise
 
-        train_module_dir = broadcast_object(train_module_dir)
+        train_module_dir = scatter_object(train_module_dir)
         if metadata is None:
             metadata = get_checkpoint_metadata(train_module_dir)
 
-        state_dict = train_module.state_dict_to_load(metadata, optim=load_optim_state)
+        state_dict = train_module.state_dict_to_load(metadata)
         load_state_dict(
             train_module_dir,
             state_dict,
@@ -252,12 +236,7 @@ class Checkpointer:
         tmp_path = Path(tmp_file.name)
         try:
             tmp_file.write(contents)
-
-            # Ensure all data is written to disk.
             tmp_file.flush()
-            if hasattr(os, "fdatasync"):  # only available on linux
-                os.fdatasync(tmp_file)  # type: ignore
-            tmp_file.close()
 
             target: PathOrStr
             if is_url(dir):
@@ -268,11 +247,10 @@ class Checkpointer:
                 if target.is_file() and not self.save_overwrite:
                     raise FileExistsError(target)
                 target.parent.mkdir(exist_ok=True, parents=True)
-                tmp_path.replace(target)
+                tmp_path.rename(target)
 
             return target
         finally:
-            tmp_file.close()
             tmp_path.unlink(missing_ok=True)
 
     @classmethod
@@ -353,11 +331,7 @@ class Checkpointer:
         # NOTE: if 'dir' is a URL, the 'wd' will be a different temp dir for each rank.
         if is_url(dir) or get_fs_local_rank() == 0:
             train_dir.mkdir(exist_ok=True, parents=True)
-        wait_for(
-            train_dir.exists,
-            description=f"waiting for '{train_dir}' to be created...",
-            timeout=self.FS_TIMEOUT,
-        )
+        wait_for(train_dir.exists, description=f"Waiting for '{train_dir}' to be created...")
         torch.save(train_state, train_dir / f"rank{get_rank()}.pt")
 
     def _save_metadata(self, dir: PathOrStr, metadata: CheckpointMetadata):
@@ -367,34 +341,22 @@ class Checkpointer:
     def _prepare_dir(self, dir: PathOrStr, ensure_exists: bool = True) -> str:
         dir = normalize_path(dir)
 
-        # Make sure checkpoint directory is empty.
-        if self.save_overwrite:
-            if get_fs_local_rank() == 0:
-                clear_directory(dir)
-        elif not dir_is_empty(dir):
-            raise FileExistsError(dir)
-
-        # NOTE: We need a barrier here in both cases.
-        # 1. If 'self.save_overwrite' then we clear the directory, and anytime we clear a directory in
-        # preparation to use it we should have a barrier right after, otherwise one rank might get
-        # ahead and write something to the directory prematurely, which then gets removed by the call
-        # to `clear_directory()`.
-        # 2. And otherwise we are checking if the directory is empty and raising an error if it's not,
-        # so we need to make sure all ranks are synchronized on that check before they can proceed
-        # to write to the directory.
-        barrier()
+        # Make sure checkpoint directory doesn't exist unless it's okay to overwrite it.
+        if not dir_is_empty(dir):
+            if self.save_overwrite:
+                if get_fs_local_rank() == 0:
+                    clear_directory(dir)
+            else:
+                raise FileExistsError(dir)
 
         if ensure_exists and not is_url(dir):
             if get_fs_local_rank() == 0:
                 Path(dir).mkdir(exist_ok=True, parents=True)
             # Ensure the dir exists for all ranks before continuing. This might take a second if we're
             # saving to an NFS drive or something like that.
-            wait_for(
-                Path(dir).exists,
-                description=f"waiting on '{dir}' to be created...",
-                timeout=self.FS_TIMEOUT,
-            )
+            wait_for(Path(dir).exists, description=f"Waiting on '{dir}' to be created...")
 
+        barrier()
         return dir
 
     def _get_tmp_dir(self, dir: PathOrStr) -> Path:
@@ -407,29 +369,17 @@ class Checkpointer:
             if get_fs_local_rank() == 0:
                 clear_directory(tmp_dir)
                 tmp_dir.mkdir(exist_ok=True, parents=True)
-            # NOTE: anytime we clear a directory in preparation to use it we should have a barrier
-            # right after, otherwise one rank might get ahead and write something to the directory
-            # prematurely, which then gets removed by the call to `clear_directory()`.
-            barrier()
 
-            # In the cases where we're using a shared NFS drive between ranks to save checkpoints,
-            # creating the temp directory from rank 0 might not be immediately
-            # realized in the file systems of the other ranks.
-            # So we wait here across all ranks until that tmp checkpoint directory is visible.
-            wait_for(
-                lambda: tmp_dir.exists(),
-                "Waiting for checkpoint directory",
-                timeout=self.FS_TIMEOUT,
-            )
-
+        # In the cases where we're using a shared NFS drive between ranks to save checkpoints,
+        # creating the temp directory from rank 0 might not be immediately
+        # realized in the file systems of the other ranks.
+        # So we wait here across all ranks until that tmp checkpoint directory is visible.
+        wait_for(lambda: tmp_dir.exists(), "Waiting for checkpoint directory", timeout=10.0)
+        barrier()
         return tmp_dir
 
     def _teardown_tmp_dir(self, dir: PathOrStr, tmp_dir: Path):
         if not is_url(dir):
-            # NOTE: When dir is not a URL, tmp dir is shared among ranks so we need a barrier before
-            # we tear it down to avoid overwriting the work of other ranks.
-            barrier()
-
             # Replace the temporary directory with the actual checkpoint directory.
             if get_fs_local_rank() == 0:
                 # Replace temp directory with target checkpoint directory.
@@ -446,15 +396,9 @@ class Checkpointer:
             # replacing the temp directory with the final directory from rank 0 might not be immediately
             # realized in the file systems of the other ranks.
             # So we wait here across all ranks until that final checkpoint directory is visible.
-            wait_for(
-                lambda: Path(dir).exists(),
-                f"waiting for checkpoint directory '{dir}' from rank {get_rank()}",
-                timeout=self.FS_TIMEOUT,
-            )
+            wait_for(lambda: Path(dir).exists(), "Waiting for checkpoint directory", timeout=10.0)
         else:
-            # NOTE: When dir is a URL, each rank will have its own tmp dir so synchronizing with a
-            # barrier isn't necessary.
-
+            # NOTE: each rank will have its own tmp dir
             # Upload files to final location.
             for path in tmp_dir.glob("**/*"):
                 if not path.is_file():
@@ -468,6 +412,8 @@ class Checkpointer:
             # Then remove the temp dir.
             clear_directory(tmp_dir)
 
+        barrier()
+
     @contextmanager
     def _temporary_wd(self, dir: PathOrStr) -> Generator[Path, None, None]:
         # No need to mkdir here since we'll directly replace the temporary directory with
@@ -477,5 +423,7 @@ class Checkpointer:
         tmp_dir = self._get_tmp_dir(dir)
 
         yield tmp_dir
+
+        barrier()
 
         self._teardown_tmp_dir(dir, tmp_dir)

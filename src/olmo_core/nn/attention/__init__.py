@@ -1,12 +1,12 @@
-import logging
 import math
-import warnings
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributed import DeviceMesh
 from torch.distributed.tensor import Placement, Replicate, Shard
 from torch.distributed.tensor.parallel import parallelize_module
@@ -15,12 +15,8 @@ from olmo_core.config import Config, DType, StrEnum
 from olmo_core.distributed.parallel.tensor_parallel import SequenceParallel
 from olmo_core.doc_utils import beta_feature
 from olmo_core.exceptions import OLMoConfigurationError
-from olmo_core.nn.attention.base import SequenceMixer, SequenceMixerConfig
-from olmo_core.nn.attention.kv_cache import KVCacheManager
-from olmo_core.nn.attention.recurrent import GatedDeltaNet, GatedDeltaNetConfig
 
 from ..buffer_cache import BufferCache
-from ..config import ModuleConfig
 from ..functional import l2_normalize
 from ..layer_norm import LayerNorm, LayerNormConfig
 from ..rope import (
@@ -30,39 +26,23 @@ from ..rope import (
     RotaryEmbedding,
 )
 from ..utils import get_tp_wrappers
-from . import flash_attn_api
-from .backend import (
-    AttentionBackend,
-    AttentionBackendName,
-    FlashAttention2Backend,
-    FlashAttention3Backend,
-    FlashAttention4Backend,
-    TEAttentionBackend,
-    TorchAttentionBackend,
+from .flash_attn_api import (
+    dispatch_flash_attn,
+    dispatch_flash_attn_qkvpacked,
+    dispatch_ring_flash_attn,
+    dispatch_ring_flash_attn_qkvpacked,
 )
 from .ring import (
     RingAttentionLlama3LoadBalancer,
     RingAttentionLoadBalancer,
     RingAttentionLoadBalancerType,
     RingAttentionZigZagLoadBalancer,
-    RingContextParallelStyle,
-    UlyssesContextParallelStyle,
-    UlyssesLoadBalancer,
 )
 
 __all__ = [
-    "SlidingWindowAttentionConfig",
-    "GateGranularity",
-    "GateConfig",
     "AttentionType",
-    "AttentionBackendName",
-    "AttentionBackend",
-    "TorchAttentionBackend",
-    "FlashAttention2Backend",
-    "FlashAttention3Backend",
-    "FlashAttention4Backend",
-    "TEAttentionBackend",
     "AttentionConfig",
+    "AttentionBase",
     "Attention",
     "FusedAttention",
     "NormalizedAttention",
@@ -70,87 +50,7 @@ __all__ = [
     "RingAttentionLoadBalancer",
     "RingAttentionZigZagLoadBalancer",
     "RingAttentionLlama3LoadBalancer",
-    "UlyssesLoadBalancer",
-    "RingContextParallelStyle",
-    "UlyssesContextParallelStyle",
-    "GatedDeltaNetConfig",
-    "GatedDeltaNet",
 ]
-
-log = logging.getLogger(__name__)
-
-
-class GateGranularity(StrEnum):
-    headwise = "headwise"
-    """Head-wise gating: one gate value per attention head, broadcast across head dimension."""
-    elementwise = "elementwise"
-    """Element-wise gating: one gate value per output element."""
-
-
-@dataclass
-class GateConfig(Config):
-    granularity: GateGranularity = GateGranularity.headwise
-    """The granularity of gating to use."""
-    full_precision: bool = True
-    """Whether to always apply gating in full precision regardless of the input data type."""
-
-
-@dataclass
-class SlidingWindowAttentionConfig(Config):
-    pattern: List[int]
-    """
-    The pattern of window sizes to use for attention, repeated to cover all layers.
-    A value of -1 indicates full attention. For example, a pattern of ``[4096, 4096, 4096, -1]``
-    means that for each set of 4 layers, the first 3 will use a window size of 4096,
-    and the last layer will use full attention.
-    """
-
-    force_full_attention_on_first_layer: bool = True
-    """
-    If `True`, the first transformer layer will always use full attention, regardless of the pattern.
-    """
-
-    force_full_attention_on_last_layer: bool = True
-    """
-    If `True`, the last transformer layer will always use full attention, regardless of the pattern.
-    """
-
-    def _get_window_size(self, layer_idx: int, n_layers: int) -> int:
-        """
-        Get the window size for a given layer, returning -1 for full attention.
-        """
-        if self.force_full_attention_on_first_layer and layer_idx == 0:
-            return -1
-        if self.force_full_attention_on_last_layer and layer_idx == (n_layers - 1):
-            return -1
-
-        # Adjust the layer index if the first layer is special-cased to full attention
-        # (in which case the pattern is applied starting from the second layer)
-        effective_layer_idx = layer_idx
-        if self.force_full_attention_on_first_layer:
-            effective_layer_idx -= 1
-
-        window_size = self.pattern[effective_layer_idx % len(self.pattern)]
-        if window_size <= 0 and window_size != -1:
-            raise OLMoConfigurationError(
-                f"Sliding window size must be positive or -1 (got {window_size})"
-            )
-        return window_size
-
-    def should_use_swa(self, layer_idx: int, n_layers: int) -> bool:
-        """
-        Returns `True` if the given layer uses sliding window attention.
-        """
-        return self._get_window_size(layer_idx, n_layers) != -1
-
-    def get_window_size(self, layer_idx: int, n_layers: int) -> int:
-        """
-        Get the sliding window size for a given layer.
-        """
-        window_size = self._get_window_size(layer_idx, n_layers)
-        if window_size == -1:
-            raise ValueError(f"Layer {layer_idx} is not configured for sliding window attention.")
-        return window_size
 
 
 class AttentionType(StrEnum):
@@ -172,9 +72,8 @@ class AttentionType(StrEnum):
     """
 
 
-@SequenceMixerConfig.register("attention")
 @dataclass
-class AttentionConfig(SequenceMixerConfig["SequenceMixer"]):
+class AttentionConfig(Config):
     """
     A configuration class for easily building any of the different attention modules.
 
@@ -187,18 +86,13 @@ class AttentionConfig(SequenceMixerConfig["SequenceMixer"]):
     """
     n_heads: int = 16
     n_kv_heads: Optional[int] = None
-    head_dim: Optional[int] = None
     bias: Optional[bool] = None
-    gate: Optional[GateConfig] = None
     rope: Optional[RoPEConfig] = None
     clip_qkv: Optional[float] = None
     qk_norm: Optional[LayerNormConfig] = None
     dropout: Optional[float] = None
     use_flash: Optional[bool] = None
-    backend: Optional[AttentionBackendName] = None
     dtype: DType = DType.float32
-    sliding_window: Optional[SlidingWindowAttentionConfig] = None
-    use_head_qk_norm: Optional[bool] = None
 
     def num_params(self, d_model: int) -> int:
         """
@@ -208,15 +102,15 @@ class AttentionConfig(SequenceMixerConfig["SequenceMixer"]):
         """
         n_heads = self.n_heads
         n_kv_heads = self.n_kv_heads or n_heads
-        head_dim = self.head_dim or d_model // n_heads
+        head_dim = d_model // n_heads
         bias = self.bias if self.bias is not None else self.name != AttentionType.normalized
 
         params = 0
 
         # Block attention Q projection.
-        params += d_model * n_heads * head_dim
+        params += d_model * d_model
         if bias:
-            params += n_heads * head_dim
+            params += d_model
 
         # Block attention KV projections.
         params += 2 * d_model * n_kv_heads * head_dim
@@ -225,30 +119,16 @@ class AttentionConfig(SequenceMixerConfig["SequenceMixer"]):
 
         # Block attention QK norm.
         if self.qk_norm is not None:
-            if self.use_head_qk_norm:
-                params += 2 * self.qk_norm.num_params(head_dim)
-            else:
-                params += self.qk_norm.num_params(n_heads * head_dim)  # q_norm
-                params += self.qk_norm.num_params(n_kv_heads * head_dim)  # k_norm
+            params += 2 * self.qk_norm.num_params(d_model)
 
         # Block attention out.
-        params += n_heads * head_dim * d_model
+        params += d_model * d_model
         if bias:
             params += d_model
 
-        # Block attention gate projection.
-        if self.gate is not None:
-            if self.gate.granularity == GateGranularity.headwise:
-                params += d_model * n_heads
-                if bias:
-                    params += n_heads
-            elif self.gate.granularity == GateGranularity.elementwise:
-                params += d_model * (n_heads * head_dim)
-                if bias:
-                    params += n_heads * head_dim
-
         # Block QK scaling factors.
         if self.name == AttentionType.normalized:
+            head_dim = d_model // n_heads
             params += n_heads * head_dim
             params += n_kv_heads * head_dim
 
@@ -258,32 +138,17 @@ class AttentionConfig(SequenceMixerConfig["SequenceMixer"]):
         self,
         d_model: int,
         *,
-        layer_idx: int,
-        n_layers: int,
         init_device: str = "cpu",
         cache: Optional[BufferCache] = None,
-    ) -> "SequenceMixer":
+    ) -> "AttentionBase":
         """
         Build the corresponding attention module.
 
         :param d_model: The model dimensionality.
-        :param init_device: The device to initialize the parameters on, e.g. "cpu", "meta".
+        :param init_device: The device initialize the parameters on, e.g. "cpu", "meta".
         """
         kwargs = self.as_dict(exclude_none=True, recurse=False)
         kwargs.pop("name")
-
-        sliding_window_config: Optional[SlidingWindowAttentionConfig] = kwargs.pop(
-            "sliding_window", None
-        )
-        if sliding_window_config is not None and sliding_window_config.should_use_swa(
-            layer_idx, n_layers
-        ):
-            kwargs["window_size"] = sliding_window_config.get_window_size(layer_idx, n_layers)
-        else:  # global (non-SWA) layer
-            rope_config: Optional[RoPEConfig] = kwargs.get("rope")
-            if rope_config is not None and rope_config.no_global_rope:
-                kwargs["rope"] = None
-
         kwargs.update(
             dtype=kwargs.pop("dtype").as_pt(),
             d_model=d_model,
@@ -296,16 +161,8 @@ class AttentionConfig(SequenceMixerConfig["SequenceMixer"]):
                 return Attention(**kwargs)
             elif self.name == "fused":
                 kwargs.pop("use_flash", None)
-                if "window_size" in kwargs:
-                    raise OLMoConfigurationError(
-                        "'window_size' is not supported with fused attention"
-                    )
                 return FusedAttention(**kwargs)
             elif self.name == "normalized":
-                if "window_size" in kwargs:
-                    raise OLMoConfigurationError(
-                        "'window_size' is not supported with normalized attention"
-                    )
                 return NormalizedAttention(**kwargs)
             else:
                 raise NotImplementedError(self.name)
@@ -315,14 +172,35 @@ class AttentionConfig(SequenceMixerConfig["SequenceMixer"]):
             ) from e
 
 
-class Attention(SequenceMixer):
+class AttentionBase(nn.Module):
+    """
+    Base class for attention modules.
+    """
+
+    @abstractmethod
+    def apply_tp(
+        self,
+        tp_mesh: DeviceMesh,
+        input_layout: Optional[Placement] = None,
+        output_layout: Optional[Placement] = None,
+        use_local_output: bool = True,
+        float8_enabled: bool = False,
+    ):
+        raise NotImplementedError
+
+    @abstractmethod
+    def apply_cp(self, cp_mesh: DeviceMesh, load_balancer: RingAttentionLoadBalancerType):
+        raise NotImplementedError
+
+
+class Attention(AttentionBase):
     """
     An implementation of multi-head self-attention with support for multi-query (MQA)
     and grouped-query (GQA) attention.
 
     Intra-document masking is also supported by passing in the
-    ``max_doc_len`` and ``cu_doc_lens`` parameters to :meth:`forward()`. This requires
-    a backend that supports it, like the flash backend.
+    ``max_doc_len`` and ``cu_doc_lens`` parameters to :meth:`forward()`. Currently this requires
+    `flash-attn <https://github.com/Dao-AILab/flash-attention>`_ (``use_flash=True``).
 
     .. seealso::
         :class:`FusedAttention` if you have flash-attn installed and you're not using MQA or GQA.
@@ -331,13 +209,12 @@ class Attention(SequenceMixer):
     :param n_heads: The number of attention heads.
     :param n_kv_heads: The number of key and value heads, if different.
     :param bias: Include biases with linear layers.
-    :param gate: Configuration for attention gating. If None, no gating is applied.
     :param rope: The config for RoPE, if RoPE should be used.
     :param clip_qkv: Clip QKV to this value, if set.
     :param qk_norm: Configuration a layer norm for queries and keys.
     :param dropout: Dropout probability.
-    :param use_flash: Deprecated, use ``backend="flash_2"`` instead.
-    :param backend: The attention backend to use. If not set, it will be chosen automatically.
+    :param use_flash: Use flash attention.
+        This requires `flash-attn <https://github.com/Dao-AILab/flash-attention>`_ to be installed.
     :param dtype: The default data type to use for parameters.
     :param init_device: The device to initialize weights on.
     """
@@ -348,75 +225,40 @@ class Attention(SequenceMixer):
         d_model: int,
         n_heads: int,
         n_kv_heads: Optional[int] = None,
-        head_dim: Optional[int] = None,
         bias: bool = True,
-        gate: Optional[GateConfig] = None,
         rope: Optional[RoPEConfig] = None,
         clip_qkv: Optional[float] = None,
         qk_norm: Optional[LayerNormConfig] = None,
         dropout: float = 0.0,
-        softmax_scale: Optional[float] = None,
-        use_flash: Optional[bool] = None,
-        backend: Optional[AttentionBackendName] = None,
-        window_size: Optional[int] = None,
+        use_flash: bool = False,
         dtype: torch.dtype = torch.float32,
         init_device: str = "cpu",
         cache: Optional[BufferCache] = None,
-        use_head_qk_norm: bool = False,
     ):
         super().__init__()
 
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads or n_heads
-        self.d_model = d_model
-        # Some models (e.g. Qwen3) use explicit head_dim that differs from d_model // n_heads.
-        if head_dim is not None:
-            self.head_dim = head_dim
-        else:
-            self.head_dim = d_model // n_heads
-        self.w_q = nn.Linear(
-            d_model, n_heads * self.head_dim, bias=bias, dtype=dtype, device=init_device
-        )
+        self.n_rep = self.n_heads // self.n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.w_q = nn.Linear(d_model, d_model, bias=bias, dtype=dtype, device=init_device)
         self.w_k = nn.Linear(
             d_model, self.n_kv_heads * self.head_dim, bias=bias, dtype=dtype, device=init_device
         )
         self.w_v = nn.Linear(
             d_model, self.n_kv_heads * self.head_dim, bias=bias, dtype=dtype, device=init_device
         )
-        self.w_out = nn.Linear(
-            n_heads * self.head_dim, d_model, bias=bias, dtype=dtype, device=init_device
-        )
-
-        self.gate = gate
-        self.w_g: Optional[nn.Linear] = None
-        if gate is not None:
-            if gate.granularity == GateGranularity.headwise:
-                self.w_g = nn.Linear(
-                    d_model, self.n_heads, bias=bias, dtype=dtype, device=init_device
-                )
-            elif gate.granularity == GateGranularity.elementwise:
-                self.w_g = nn.Linear(
-                    d_model,
-                    self.n_heads * self.head_dim,
-                    bias=bias,
-                    dtype=dtype,
-                    device=init_device,
-                )
-
+        self.w_out = nn.Linear(d_model, d_model, bias=bias, dtype=dtype, device=init_device)
         self.clip_qkv = clip_qkv
-        self.use_head_qk_norm = use_head_qk_norm
+        self.dropout_p = dropout
 
         self.q_norm: Optional[LayerNorm] = None
         self.k_norm: Optional[LayerNorm] = None
         if qk_norm is not None:
-            if use_head_qk_norm:
-                self.q_norm = qk_norm.build(size=self.head_dim, init_device=init_device)
-                self.k_norm = qk_norm.build(size=self.head_dim, init_device=init_device)
-            else:
-                self.q_norm = qk_norm.build(size=n_heads * self.head_dim, init_device=init_device)
-                self.k_norm = qk_norm.build(
-                    size=self.n_kv_heads * self.head_dim, init_device=init_device
-                )
+            self.q_norm = qk_norm.build(size=d_model, init_device=init_device)
+            self.k_norm = qk_norm.build(
+                size=self.n_kv_heads * self.head_dim, init_device=init_device
+            )
 
         self.rope: Optional[Union[RotaryEmbedding, ComplexRotaryEmbedding]] = None
         if rope is not None:
@@ -428,59 +270,14 @@ class Attention(SequenceMixer):
             assert isinstance(rope_class, (RotaryEmbedding, ComplexRotaryEmbedding))
             self.rope = rope_class
 
-        if backend is not None:
-            backend = AttentionBackendName(backend)
-
-        if use_flash:
-            if backend is not None and backend != AttentionBackendName.flash_2:
-                raise OLMoConfigurationError(
-                    f"'use_flash' is only compatible with 'flash_2' backend (got '{backend}')"
-                )
-            elif backend is None:
-                warnings.warn(
-                    "'use_flash' is deprecated, use 'backend=flash_2' instead", DeprecationWarning
-                )
-                backend = AttentionBackendName.flash_2
-
-        # Translate window size so that we only look left, not right.
-        self.window_size = window_size
-        window_size_tuple: Tuple[int, int] = (-1, -1)
-        if window_size is not None:
-            if window_size <= 0:
-                raise OLMoConfigurationError(f"'window_size' must be positive (got {window_size})")
-
-            if backend is None and flash_attn_api.has_flash_attn_2():
-                # note: flash_3 and te backends are faster than flash_2 and also support SWA
-                backend = AttentionBackendName.flash_2
-
-            # Window size is [i - window_size[0], i + window_size[1]] inclusive
-            window_size_tuple = (window_size - 1, 0)
-
-        if backend is None:
-            backend = AttentionBackendName.torch
-
-        if not torch.cuda.is_available() and backend != AttentionBackendName.torch:
-            warnings.warn(
-                f"Backend is set to {backend}, but GPUs are not available. Defaulting to torch."
-            )
-            backend = AttentionBackendName.torch
-
-        backend.assert_supported()
-        log.info(f"Using attention backend '{backend}'")
-        self.backend = backend.build(
-            head_dim=self.head_dim,
-            n_heads=n_heads,
-            n_kv_heads=self.n_kv_heads,
-            scale=softmax_scale,
-            dropout_p=dropout,
-            window_size=window_size_tuple,
-            cache=cache,
-        )
-        self.kv_cache_manager: Optional[KVCacheManager] = None
+        self.use_flash = use_flash
+        self._cp_pg: Optional[dist.ProcessGroup] = None
+        self._cp_enabled = False
+        self._cp_load_balancer: Optional[RingAttentionLoadBalancerType] = None
 
     @property
     def cp_enabled(self) -> bool:
-        return self.backend.cp_enabled
+        return self._cp_enabled
 
     def sdpa(
         self,
@@ -494,24 +291,84 @@ class Attention(SequenceMixer):
         max_doc_len_q: Optional[int] = None,
         max_doc_len_k: Optional[int] = None,
         local_k_slice: Optional[slice] = None,
-        cache_leftpad: Optional[torch.Tensor] = None,
+        scale: Optional[float] = None,
     ) -> torch.Tensor:
-        if self.kv_cache_manager is not None:
-            self.kv_cache_manager.record_leftpad(cache_leftpad)
-        # shape: (batch_size, seq_len, n_heads, head_dim)
-        att = self.backend(
-            (q, k, v),
-            cu_doc_lens=cu_doc_lens,
-            cu_doc_lens_q=cu_doc_lens_q,
-            cu_doc_lens_k=cu_doc_lens_k,
-            max_doc_len=max_doc_len,
-            max_doc_len_q=max_doc_len_q,
-            max_doc_len_k=max_doc_len_k,
-            local_k_slice=local_k_slice,
-            kv_cache_manager=self.kv_cache_manager,
-        )
-        if self.kv_cache_manager is not None:
-            self.kv_cache_manager.update_seqlen(q.shape[1])
+        att: torch.Tensor
+        if self.cp_enabled:
+            assert self._cp_pg is not None and self._cp_load_balancer is not None
+            if not self.use_flash:
+                raise RuntimeError(
+                    f"'{self.__class__.__name__}' requires flash (use_flash=True) for context parallelism"
+                )
+            att = dispatch_ring_flash_attn(
+                q,
+                k,
+                v,
+                group=self._cp_pg,
+                strategy=self._cp_load_balancer,
+                cu_seqlens=cu_doc_lens,
+                cu_seqlens_q=cu_doc_lens_q,
+                cu_seqlens_k=cu_doc_lens_k,
+                max_seqlen=max_doc_len,
+                max_seqlen_q=max_doc_len_q,
+                max_seqlen_k=max_doc_len_k,
+                heads_k_stride=1,  # TODO: should this ever not be 1?
+                local_k_slice=local_k_slice,
+                dropout_p=self.dropout_p,
+                causal=True,
+                softmax_scale=scale,
+            )
+        elif self.use_flash:
+            att = dispatch_flash_attn(
+                q,
+                k,
+                v,
+                cu_seqlens=cu_doc_lens,
+                cu_seqlens_q=cu_doc_lens_q,
+                cu_seqlens_k=cu_doc_lens_k,
+                max_seqlen=max_doc_len,
+                max_seqlen_q=max_doc_len_q,
+                max_seqlen_k=max_doc_len_k,
+                dropout_p=self.dropout_p,
+                softmax_scale=scale,
+                causal=True,
+            )
+        else:
+            # Fall back to PyTorch's SDPA...
+            if any(
+                opt is not None
+                for opt in (
+                    cu_doc_lens,
+                    cu_doc_lens_q,
+                    cu_doc_lens_k,
+                    max_doc_len,
+                    max_doc_len_q,
+                    max_doc_len_k,
+                )
+            ):
+                raise RuntimeError(
+                    f"{self.__class__.__name__} requires flash-attn (use_flash=True) for intra-document masking"
+                )
+
+            # NOTE: PyTorch's SDPA doesn't support GQA, so we have to do this.
+            # shape: (batch_size, n_heads, seq_len, head_dim)
+            k = repeat_kv(k, self.n_rep)
+            v = repeat_kv(v, self.n_rep)
+
+            # PyTorch's SDPA expects the head dimension to come before the sequence dimension.
+            # shape: (batch_size, n_heads, seq_len, head_dim),
+            #        (batch_size, n_kv_heads, seq_len, head_dim),
+            #        (batch_size, n_kv_heads, seq_len, head_dim)
+            q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+            # shape: (batch_size, n_heads, seq_len, head_dim)
+            att = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=self.dropout_p, is_causal=True, scale=scale
+            )
+
+            # shape: (batch_size, seq_len, n_heads, head_dim)
+            att = att.transpose(1, 2).contiguous()
+
         return att
 
     def forward(
@@ -527,7 +384,6 @@ class Attention(SequenceMixer):
         pos_sin: Optional[torch.Tensor] = None,
         pos_cos: Optional[torch.Tensor] = None,
         freqs_cis: Optional[torch.Tensor] = None,
-        cache_leftpad: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Apply attention to the input.
@@ -554,44 +410,29 @@ class Attention(SequenceMixer):
             k.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
             v.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
 
-        if not self.use_head_qk_norm:
-            if self.q_norm is not None:
-                q = self.q_norm(q)
-            if self.k_norm is not None:
-                k = self.k_norm(k)
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+        if self.k_norm is not None:
+            k = self.k_norm(k)
 
         # NOTE: use -1 instead of `n_heads` / `n_kv_heads` to infer actual local size when
         # using tensor parallelism.
-        # shape: (batch_size, seq_len, n_heads (local), head_dim)
+        # shape: (batch_size, seq_len, n_heads, head_dim)
         q = q.view(B, T, -1, self.head_dim)
-        # shape: (batch_size, seq_len, n_kv_heads (local), head_dim)
+        # shape: (batch_size, seq_len, n_kv_heads, head_dim)
         k = k.view(B, T, -1, self.head_dim)
-        # shape: (batch_size, seq_len, n_kv_heads (local), head_dim)
+        # shape: (batch_size, seq_len, n_kv_heads, head_dim)
         v = v.view(B, T, -1, self.head_dim)
 
-        if self.use_head_qk_norm:
-            if self.q_norm is not None:
-                q = self.q_norm(q)
-            if self.k_norm is not None:
-                k = self.k_norm(k)
-
         if self.rope is not None:
-            # In context-parallel mode we must be given pre-sharded buffers
             if self.cp_enabled and pos_sin is None and pos_cos is None and freqs_cis is None:
                 raise RuntimeError(
                     "RoPE buffers must be passed through to attention after being properly "
                     "sharded by the context parallel load balancer"
                 )
 
-            start_pos = self.kv_cache_manager.current_position() if self.kv_cache_manager else None
             q, k = self.rope(
-                q,
-                k,
-                head_first=False,
-                start_pos=start_pos,
-                pos_sin=pos_sin,
-                pos_cos=pos_cos,
-                freqs_cis=freqs_cis,
+                q, k, head_first=False, pos_sin=pos_sin, pos_cos=pos_cos, freqs_cis=freqs_cis
             )
 
         # shape: (batch_size, seq_len, n_heads, head_dim)
@@ -606,22 +447,7 @@ class Attention(SequenceMixer):
             max_doc_len_q=max_doc_len_q,
             max_doc_len_k=max_doc_len_k,
             local_k_slice=local_k_slice,
-            cache_leftpad=cache_leftpad,
         )
-
-        if self.gate is not None:
-            assert self.w_g is not None
-            g = self.w_g(x)
-            if self.gate.full_precision:
-                g = g.float()
-            gate_values = torch.sigmoid(g).to(att.dtype)
-            if self.gate.granularity == GateGranularity.headwise:
-                # head-wise gating is broadcast across head_dim
-                # shape: (batch_size, seq_len, n_heads, head_dim)
-                att = att * gate_values.unsqueeze(-1)
-            elif self.gate.granularity == GateGranularity.elementwise:
-                att = att.view(B, T, -1) * gate_values
-                # the following att.view op is redundant (a no-op)
 
         # shape: (batch_size, seq_len, d_model)
         att = att.view(B, T, -1)
@@ -664,78 +490,29 @@ class Attention(SequenceMixer):
                 output_layouts=output_layout, use_local_output=use_local_output
             ),
         }
-
-        if self.w_g is not None:
-            plan["w_g"] = colwise_parallel()
-
         if self.q_norm is not None:
-            # if full-dim norm: output is sharded on the embedding dimension (B, T, E [sharded])
-            #    which will be reshaped into (B, T, H [sharded], D)
-            # if head-wise norm: output is sharded on the head dimension (B, T, H [sharded], D)
-            plan["q_norm"] = SequenceParallel(use_local_output=True, output_layouts=Shard(2))
+            plan["q_norm"] = SequenceParallel(use_local_output=True, output_layouts=Shard(-1))
         if self.k_norm is not None:
-            plan["k_norm"] = SequenceParallel(use_local_output=True, output_layouts=Shard(2))
-
+            plan["k_norm"] = SequenceParallel(use_local_output=True, output_layouts=Shard(-1))
         parallelize_module(
             module=self,
             device_mesh=tp_mesh,
             parallelize_plan=plan,
         )
 
-    def apply_cp(
-        self,
-        cp_mesh: DeviceMesh,
-        ring: Optional[RingContextParallelStyle] = None,
-        uly: Optional[UlyssesContextParallelStyle] = None,
-    ):
+    def apply_cp(self, cp_mesh: DeviceMesh, load_balancer: RingAttentionLoadBalancerType):
         """
         Prepare the module for context-parallelism (ring attention).
 
         .. important::
-            This requires a backend that supports CP, such as "flash_2" or "te".
+            This requires flash-attn and ring-flash-attn (``use_flash=True``).
 
         :param cp_mesh: The context parallel device sub-mesh.
-        :param ring: The ring context parallel style.
-        :param uly: The ulysses context parallel style.
+        :param load_balancer: The load balancer type.
         """
-        self.backend.apply_cp(cp_mesh, ring=ring, uly=uly)
-
-    def init_kv_cache_manager(self, batch_size: int, max_seq_len: int):
-        """
-        Initialize the kv cache manager for attention. When the kv cache manager exists,
-        kv caching will be used during the forward pass. This should only be called during inference.
-
-        :param batch_size: The batch size for the cache.
-        :param max_seq_len: The maximum sequence length for the cache.
-        """
-        self.backend.assert_supports_kv_cache()
-        self.kv_cache_manager = KVCacheManager(
-            batch_size=batch_size,
-            max_seq_len=max_seq_len,
-            num_kv_heads=self.n_kv_heads,
-            head_dim=self.head_dim,
-            device=self.w_k.weight.device,
-        )
-
-    def num_flops_per_token(self, seq_len: int) -> int:
-        """
-        This accounts for:
-        - Linear projections (Q, K, V, output, and gating if enabled)
-        - Attention computation (QK^T and softmax(QK^T) @ V)
-        - Sliding window attention (reduced effective sequence length)
-        """
-        # 6 FLOPs per parameter (2 ops * 3 for forward+backward)
-        param_flops = 6 * sum(p.numel() for p in self.parameters())
-
-        # Attention computation (QK^T and Attn*V)
-        # 12x multiplier: 2 matmuls * 2 ops each * 3 for forward+backward
-        # For sliding window attention, effective sequence length is limited by window size
-        # Note that flash attention technically uses more flops (14x multiplier) due to recomputation,
-        # however, we just compute the idealized flops for SDPA.
-        effective_seq_len = min(self.window_size, seq_len) if self.window_size else seq_len
-        attn_flops = 12 * self.n_heads * self.head_dim * effective_seq_len
-
-        return param_flops + attn_flops
+        self._cp_pg = cp_mesh.get_group()
+        self._cp_load_balancer = load_balancer
+        self._cp_enabled = True
 
 
 @beta_feature
@@ -752,8 +529,7 @@ class NormalizedAttention(Attention):
         n_kv_heads: Optional[int] = None,
         rope: Optional[RoPEConfig] = None,
         qk_norm: Optional[LayerNormConfig] = None,
-        use_flash: Optional[bool] = None,
-        backend: Optional[AttentionBackendName] = None,
+        use_flash: bool = False,
         dtype: torch.dtype = torch.float32,
         init_device: str = "cpu",
         cache: Optional[BufferCache] = None,
@@ -765,8 +541,6 @@ class NormalizedAttention(Attention):
             rope=rope,
             qk_norm=qk_norm,
             use_flash=use_flash,
-            backend=backend,
-            softmax_scale=math.sqrt(d_model // n_heads),
             bias=False,
             dtype=dtype,
             init_device=init_device,
@@ -785,6 +559,7 @@ class NormalizedAttention(Attention):
             torch.empty(self.head_dim * self.n_kv_heads, dtype=dtype, device=init_device)
         )
 
+        self.sqrt_head_dim = math.sqrt(self.head_dim)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -807,13 +582,7 @@ class NormalizedAttention(Attention):
         pos_sin: Optional[torch.Tensor] = None,
         pos_cos: Optional[torch.Tensor] = None,
         freqs_cis: Optional[torch.Tensor] = None,
-        cache_leftpad: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if cache_leftpad:
-            raise NotImplementedError(
-                "cache_leftpad is not supported for the normalized attention variant"
-            )
-
         B, T, _ = x.shape
 
         # shape: (batch_size, seq_len, n_heads * head_dim),
@@ -844,16 +613,8 @@ class NormalizedAttention(Attention):
                     "RoPE buffers must be passed through to attention after being properly "
                     "sharded by the context parallel load balancer"
                 )
-
-            start_pos = self.kv_cache_manager.current_position() if self.kv_cache_manager else None
             q, k = self.rope(
-                q,
-                k,
-                head_first=False,
-                start_pos=start_pos,
-                pos_sin=pos_sin,
-                pos_cos=pos_cos,
-                freqs_cis=freqs_cis,
+                q, k, head_first=False, pos_sin=pos_sin, pos_cos=pos_cos, freqs_cis=freqs_cis
             )
 
         # shape: (batch_size, seq_len, n_heads, head_dim)
@@ -868,7 +629,7 @@ class NormalizedAttention(Attention):
             max_doc_len_q=max_doc_len_q,
             max_doc_len_k=max_doc_len_k,
             local_k_slice=local_k_slice,
-            cache_leftpad=cache_leftpad,
+            scale=self.sqrt_head_dim,
         )
 
         # shape: (batch_size, seq_len, d_model)
@@ -904,7 +665,7 @@ class NormalizedAttention(Attention):
         w.copy_(l2_normalize(w, dim=dim))
 
 
-class FusedAttention(SequenceMixer):
+class FusedAttention(AttentionBase):
     """
     An "fused" implementation of multi-head self-attention.
 
@@ -912,7 +673,7 @@ class FusedAttention(SequenceMixer):
     parameters to :meth:`forward()`.
 
     .. warning::
-        Currently this is only supported with the "flash_2" backend.
+        This requires `flash-attn <https://github.com/Dao-AILab/flash-attention>`_ to be installed.
 
     .. warning::
         If using RoPE, this requires that you use the "fused" RoPE implementation
@@ -938,7 +699,6 @@ class FusedAttention(SequenceMixer):
         clip_qkv: Optional[float] = None,
         dropout: float = 0.0,
         dtype: torch.dtype = torch.float32,
-        backend: Optional[AttentionBackendName] = None,
         init_device: str = "cpu",
         cache: Optional[BufferCache] = None,
     ):
@@ -949,6 +709,7 @@ class FusedAttention(SequenceMixer):
         self.w_qkv = nn.Linear(d_model, 3 * d_model, bias=bias, dtype=dtype, device=init_device)
         self.w_out = nn.Linear(d_model, d_model, bias=bias, dtype=dtype, device=init_device)
         self.clip_qkv = clip_qkv
+        self.dropout_p = dropout
         self.rope: Optional[FusedRotaryEmbedding] = None
         if rope is not None:
             if rope.name != "fused":
@@ -957,21 +718,13 @@ class FusedAttention(SequenceMixer):
             assert isinstance(rope_class, FusedRotaryEmbedding)
             self.rope = rope_class
 
-        if backend is not None:
-            backend = AttentionBackendName(backend)
-        elif backend is None:
-            backend = AttentionBackendName.flash_2
-
-        backend.assert_supported()
-        backend.assert_supports_packed_qkv()
-        log.info(f"Using attention backend '{backend}'")
-        self.backend = backend.build(
-            head_dim=self.head_dim, n_heads=self.n_heads, dropout_p=dropout, cache=cache
-        )
+        self._cp_pg: Optional[dist.ProcessGroup] = None
+        self._cp_enabled = False
+        self._cp_load_balancer: Optional[RingAttentionLoadBalancerType] = None
 
     @property
     def cp_enabled(self) -> bool:
-        return self.backend.cp_enabled
+        return self._cp_enabled
 
     def forward(
         self,
@@ -981,7 +734,6 @@ class FusedAttention(SequenceMixer):
         pos_sin: Optional[torch.Tensor] = None,
         pos_cos: Optional[torch.Tensor] = None,
         freqs_cis: Optional[torch.Tensor] = None,
-        cache_leftpad: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Apply attention to the input.
@@ -996,11 +748,6 @@ class FusedAttention(SequenceMixer):
 
         :returns: The output of attention with shape ``(batch_size, seq_len, d_model)``.
         """
-        if cache_leftpad:
-            raise NotImplementedError(
-                "cache_leftpad is not supported for the fused attention variant"
-            )
-
         B, T, _ = x.shape
 
         # shape: (batch_size, seq_len, 3, n_heads, head_dim)
@@ -1017,11 +764,25 @@ class FusedAttention(SequenceMixer):
                 )
             qkv = self.rope(qkv, pos_sin=pos_sin, pos_cos=pos_cos, freqs_cis=freqs_cis)
 
-        att = self.backend(
-            qkv,
-            cu_doc_lens=cu_doc_lens,
-            max_doc_len=max_doc_len,
-        )
+        if self.cp_enabled:
+            assert self._cp_pg is not None and self._cp_load_balancer is not None
+            att = dispatch_ring_flash_attn_qkvpacked(
+                qkv,
+                group=self._cp_pg,
+                strategy=self._cp_load_balancer,
+                cu_seqlens=cu_doc_lens,
+                max_seqlen=max_doc_len,
+                dropout_p=self.dropout_p,
+                causal=True,
+            )
+        else:
+            att = dispatch_flash_attn_qkvpacked(
+                qkv,
+                cu_seqlens=cu_doc_lens,
+                max_seqlen=max_doc_len,
+                dropout_p=self.dropout_p,
+                causal=True,
+            )
 
         # shape: (batch_size, seq_len, d_model)
         att = att.view(B, T, -1)  # type: ignore
@@ -1041,20 +802,19 @@ class FusedAttention(SequenceMixer):
 
         raise NotImplementedError("TP is not implemented yet for the fused attention variant")
 
-    def apply_cp(
-        self,
-        cp_mesh: DeviceMesh,
-        ring: Optional[RingContextParallelStyle] = None,
-        uly: Optional[UlyssesContextParallelStyle] = None,
-    ):
-        self.backend.apply_cp(cp_mesh, ring=ring, uly=uly)
+    def apply_cp(self, cp_mesh: DeviceMesh, load_balancer: RingAttentionLoadBalancerType):
+        self._cp_pg = cp_mesh.get_group()
+        self._cp_load_balancer = load_balancer
+        self._cp_enabled = True
 
-    def num_flops_per_token(self, seq_len: int) -> int:
-        # 6 FLOPs per parameter (2 ops * 3 for forward+backward)
-        param_flops = 6 * sum(p.numel() for p in self.parameters())
 
-        # Attention computation (QK^T and Attn*V)
-        # 12x multiplier: 2 matmuls * 2 ops each * 3 for forward+backward
-        attn_flops = 12 * self.n_heads * self.head_dim * seq_len
-
-        return param_flops + attn_flops
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
+    bs, slen, n_kv_heads, head_dim = x.shape
+    if n_rep == 1:
+        return x
+    return (
+        torch.unsqueeze(x, dim=3)
+        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+    )

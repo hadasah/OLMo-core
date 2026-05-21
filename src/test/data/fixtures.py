@@ -3,11 +3,10 @@ from typing import Type, Union
 
 import numpy as np
 
-from olmo_core.data import NumpyDatasetBase, NumpyFSLDatasetConfig, TokenizerConfig
+from olmo_core.data import NumpyDatasetBase, NumpyDatasetConfig, TokenizerConfig
 from olmo_core.data.source_mixture import (
     SourceMixtureConfig,
     SourceMixtureDatasetConfig,
-    SourceMixtureList,
 )
 from olmo_core.data.types import NumpyDatasetDType
 
@@ -37,31 +36,31 @@ def get_fsl_mixture(
     )
 
     mixture_config = SourceMixtureDatasetConfig(
-        requested_tokens=num_tokens,
-        source_list=SourceMixtureList(
-            [
-                SourceMixtureConfig(
-                    source_name="mmap1",
-                    paths=[str(i[0]) for i in mmap1],
-                    target_ratio=0.8,
-                ),
-                SourceMixtureConfig(
-                    source_name="mmap2",
-                    paths=[str(i[0]) for i in mmap2],
-                    target_ratio=0.2,
-                ),
-            ]
-        ),
+        max_tokens=num_tokens,
+        sequence_length=sequence_length,
+        source_configs=[
+            SourceMixtureConfig(
+                source_name="mmap1",
+                paths=[str(i[0]) for i in mmap1],
+                target_ratio=0.8,
+            ),
+            SourceMixtureConfig(
+                source_name="mmap2",
+                paths=[str(i[0]) for i in mmap2],
+                target_ratio=0.2,
+            ),
+        ],
+        dtype=NumpyDatasetDType.uint16,
+        processes=1,
         seed=seed,
-        global_batch_size=sequence_length * 32,
     )
 
-    ds = NumpyFSLDatasetConfig.from_src_mix(
-        src_mix=mixture_config,
+    ds = NumpyDatasetConfig(
+        source_mixture_config=mixture_config,
         sequence_length=sequence_length,
         tokenizer=tokenizer,
-        dtype=NumpyDatasetDType.uint16,
         include_instance_metadata=False,
     ).build()
     ds.prepare()
+
     return ds

@@ -13,7 +13,7 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 
-from olmo_core.config import DType, StrEnum
+from olmo_core.config import Config, DType, StrEnum
 from olmo_core.distributed.parallel import (
     flatten_mesh,
     get_pp_stage_mesh,
@@ -23,7 +23,6 @@ from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.ops import attach_auxiliary_loss
 
 from ..buffer_cache import BufferCache
-from ..config import ModuleConfig
 from ..feed_forward import FeedForwardConfig
 from .loss import MoELoadBalancingLossGranularity
 from .mlp import DroplessMoEMLP, MoEMLP
@@ -56,7 +55,7 @@ class MoEType(StrEnum):
 
 
 @dataclass
-class MoEConfig(ModuleConfig):
+class MoEConfig(Config):
     name: MoEType = MoEType.default
     """
     The name of the implementation.
@@ -64,7 +63,7 @@ class MoEConfig(ModuleConfig):
     num_experts_list: List[int] = field(default_factory=lambda: [1])
     hidden_sizes_list: List[int] = field(default_factory=lambda: [1])
     capacity_factor: Optional[float] = None
-    routers_list: List[MoERouterConfig] = field(default_factory=lambda: [MoERouterConfig()])
+    routers_list: List[MoERouterConfig] = field(default_factory=lambda: [MoERouterConfig])
     shared_mlp: Optional[FeedForwardConfig] = None
     lb_loss_weight: Optional[float] = 0.01
     lb_loss_granularity: MoELoadBalancingLossGranularity = (
@@ -81,7 +80,9 @@ class MoEConfig(ModuleConfig):
             num_experts = self.num_experts_list[i]
             hidden_size = self.hidden_sizes_list[i]
             num_params += router.num_params(d_model, num_experts)
-            num_params += 3 * d_model * hidden_size * num_experts
+            num_params += (
+                3 * d_model * hidden_size * num_experts
+            )
         if self.shared_mlp is not None:
             num_params += self.shared_mlp.num_params(d_model)
         return num_params
@@ -92,8 +93,8 @@ class MoEConfig(ModuleConfig):
             router = self.routers_list[i]
             num_experts = self.num_experts_list[i]
             hidden_size = self.hidden_sizes_list[i]
-            active_params -= 3 * d_model * hidden_size * num_experts
-            active_params += 3 * d_model * hidden_size * router.top_k
+            active_params -= (3 * d_model * hidden_size * num_experts)
+            active_parms += + (3 * d_model * hidden_size * router.top_k)
         return active_params
 
     def build(
@@ -163,29 +164,25 @@ class MoEBase(nn.Module):
             num_experts = num_experts_list[i]
             hidden_size = hidden_sizes_list[i]
             router = routers_list[i]
-            self.routers_list.append(
-                router.build(
-                    d_model,
-                    num_experts,
-                    lb_loss_weight=lb_loss_weight,
-                    lb_loss_granularity=lb_loss_granularity,
-                    z_loss_weight=z_loss_weight,
-                    dtype=dtype,
-                    init_device=init_device,
-                )
-            )
-            self.experts_list.append(
-                self._init_parallel_mlp(
-                    d_model=d_model,
-                    num_experts=num_experts,
-                    hidden_size=hidden_size,
-                    router=router,
-                    dtype=dtype,
-                    init_device=init_device,
-                    cache=cache,
-                    **kwargs,
-                )
-            )
+            self.routers_list.append(router.build(
+                d_model,
+                num_experts,
+                lb_loss_weight=lb_loss_weight,
+                lb_loss_granularity=lb_loss_granularity,
+                z_loss_weight=z_loss_weight,
+                dtype=dtype,
+                init_device=init_device,
+            ))
+            self.experts_list.append(self._init_parallel_mlp(
+                d_model=d_model,
+                num_experts=num_experts,
+                hidden_size=hidden_size,
+                router=router,
+                dtype=dtype,
+                init_device=init_device,
+                cache=cache,
+                **kwargs,
+            ))
         self.shared_mlp = (
             None
             if shared_mlp is None
@@ -214,10 +211,11 @@ class MoEBase(nn.Module):
     def compute_metrics(
         self, reset: bool = True
     ) -> Dict[str, Tuple[torch.Tensor, Optional["ReduceType"]]]:
-        all_metrics: Dict[str, Tuple[torch.Tensor, Optional["ReduceType"]]] = {}
         for i, router in enumerate(self.routers_list):
-            all_metrics.update(router.compute_metrics(reset=reset, prefix=f"router {i}"))
-        return all_metrics
+            metrics = router.compute_metrics(reset=reset, prefix=f"router {i}")
+            return metrics
+        # return 
+        # return self.router.compute_metrics(reset=reset)
 
     def reset_metrics(self):
         # self.router.reset_metrics()
@@ -383,16 +381,6 @@ class MoEBase(nn.Module):
                 use_local_output=use_local_output,
             ),
         )
-
-    def num_flops_per_token(self, seq_len: int) -> int:
-        router_flops = 6 * sum(
-            p.numel() for router in self.routers_list for p in router.parameters()
-        )
-        shared_mlp_flops = (
-            self.shared_mlp.num_flops_per_token(seq_len) if self.shared_mlp is not None else 0
-        )
-        expert_flops = sum(experts.num_flops_per_token(seq_len) for experts in self.experts_list)
-        return router_flops + shared_mlp_flops + expert_flops
 
 
 class MoE(MoEBase):

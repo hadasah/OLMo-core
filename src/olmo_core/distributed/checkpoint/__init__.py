@@ -76,10 +76,7 @@ def save_state_dict(
     process_group: Optional[dist.ProcessGroup] = None,
     save_overwrite: bool = False,
     thread_count: Optional[int] = None,
-    process_count: Optional[int] = None,
     throttle_uploads: bool = False,
-    enable_plan_caching: bool = False,
-    _skip_prepare: bool = False,
 ):
     """
     Save an arbitrary state dictionary to a distributed format that can loaded again with
@@ -94,22 +91,16 @@ def save_state_dict(
     :param process_group: The process group to use for distributed collectives.
     :param save_overwrite: Overwrite existing files.
     :param thread_count: Set this to override the number of threads used while writing data.
-    :param process_count: Set this to use a process pool instead of a thread pool when possible
-        (currently not compatible with ``throttle_uploads``).
     :param throttle_uploads: If this is set to ``True`` and ``dir`` is a URL then only one
         rank from each node will upload data at a time.
     """
-    if not _skip_prepare:
-        dir = _prepare_env_for_save(dir, process_group=process_group, save_overwrite=save_overwrite)
-    planner = DefaultSavePlanner(
-        dedup_save_to_lowest_rank=True, enable_plan_caching=enable_plan_caching
-    )
+    dir = _prepare_env_for_save(dir, process_group=process_group, save_overwrite=save_overwrite)
+    planner = DefaultSavePlanner(dedup_save_to_lowest_rank=True)
     dist_cp.state_dict_saver.save(
         state_dict,
         storage_writer=RemoteFileSystemWriter(
             dir,
             thread_count=thread_count,
-            process_count=process_count,
             process_group=process_group,
             throttle_uploads=throttle_uploads,
         ),
@@ -126,27 +117,20 @@ def async_save_state_dict(
     process_group: Optional[dist.ProcessGroup] = None,
     save_overwrite: bool = False,
     thread_count: Optional[int] = None,
-    process_count: Optional[int] = None,
     throttle_uploads: bool = False,
-    enable_plan_caching: bool = False,
-    _skip_prepare: bool = False,
 ) -> Future[None]:
     """
     An async version of :func:`save_state_dict()`.
 
     This code first de-stages the state dict on the CPU, then writes it in a separate thread.
     """
-    if not _skip_prepare:
-        dir = _prepare_env_for_save(dir, process_group=process_group, save_overwrite=save_overwrite)
-    planner = DefaultSavePlanner(
-        dedup_save_to_lowest_rank=True, enable_plan_caching=enable_plan_caching
-    )
+    dir = _prepare_env_for_save(dir, process_group=process_group, save_overwrite=save_overwrite)
+    planner = DefaultSavePlanner(dedup_save_to_lowest_rank=True)
     return dist_cp.state_dict_saver.async_save(
         state_dict,
         storage_writer=RemoteFileSystemWriter(
             dir,
             thread_count=thread_count,
-            process_count=process_count,
             process_group=process_group,
             throttle_uploads=throttle_uploads,
         ),
@@ -195,9 +179,7 @@ def save_model_and_optim_state(
     save_overwrite: bool = False,
     flatten_optimizer_state: bool = False,
     thread_count: Optional[int] = None,
-    process_count: Optional[int] = None,
     throttle_uploads: bool = False,
-    enable_plan_caching: bool = False,
 ) -> None:
     """
     Save model and optimizer state dictionaries. The model state can be a sharded model, in which
@@ -224,8 +206,6 @@ def save_model_and_optim_state(
         the setting used when loading the state dict and is needed in a distributed setting when
         the params in some param groups may differ between ranks, such as with pipeline parallelism.
     :param thread_count: Set this to override the number of threads used while writing data.
-    :param process_count: Set this to use a process pool instead of a thread pool when possible
-        (currently not compatible with ``throttle_uploads``).
     :param throttle_uploads: If this is set to ``True`` and ``dir`` is a URL then only one
         rank from each node will upload data at a time.
 
@@ -238,15 +218,12 @@ def save_model_and_optim_state(
         process_group=process_group,
         flatten_optimizer_state=flatten_optimizer_state,
     )
-    planner = DefaultSavePlanner(
-        dedup_save_to_lowest_rank=True, enable_plan_caching=enable_plan_caching
-    )
+    planner = DefaultSavePlanner(dedup_save_to_lowest_rank=True)
     dist_cp.state_dict_saver.save(
         state_dict,
         storage_writer=RemoteFileSystemWriter(
             dir,
             thread_count=thread_count,
-            process_count=process_count,
             process_group=process_group,
             throttle_uploads=throttle_uploads,
         ),
@@ -265,9 +242,7 @@ def async_save_model_and_optim_state(
     save_overwrite: bool = False,
     flatten_optimizer_state: bool = False,
     thread_count: Optional[int] = None,
-    process_count: Optional[int] = None,
     throttle_uploads: bool = False,
-    enable_plan_caching: bool = False,
 ) -> Future[None]:
     """
     An async version of :func:`save_model_and_optim_state()`.
@@ -281,15 +256,12 @@ def async_save_model_and_optim_state(
         process_group=process_group,
         flatten_optimizer_state=flatten_optimizer_state,
     )
-    planner = DefaultSavePlanner(
-        dedup_save_to_lowest_rank=True, enable_plan_caching=enable_plan_caching
-    )
+    planner = DefaultSavePlanner(dedup_save_to_lowest_rank=True)
     return dist_cp.state_dict_saver.async_save(
         state_dict,
         storage_writer=RemoteFileSystemWriter(
             dir,
             thread_count=thread_count,
-            process_count=process_count,
             process_group=process_group,
             throttle_uploads=throttle_uploads,
         ),
@@ -679,14 +651,6 @@ def _prepare_env_for_save(
     elif not dir_is_empty(dir):
         raise FileExistsError(dir)
 
-    # NOTE: We need a barrier here in both cases.
-    # 1. If 'self.save_overwrite' then we clear the directory, and anytime we clear a directory in
-    # preparation to use it we should have a barrier right after, otherwise one rank might get
-    # ahead and write something to the directory prematurely, which then gets removed by the call
-    # to `clear_directory()`.
-    # 2. And otherwise we are checking if the directory is empty and raising an error if it's not,
-    # so we need to make sure all ranks are synchronized on that check before they can proceed
-    # to write to the directory.
     barrier(process_group)
 
     if not is_url(dir):
@@ -695,6 +659,7 @@ def _prepare_env_for_save(
         # Ensure the dir exists for all ranks before continuing. This might take a second if we're
         # saving to an NFS drive or something like that.
         wait_for(Path(dir).exists, description=f"Waiting on '{dir}' to be created...")
+        barrier(process_group)
 
     return dir
 

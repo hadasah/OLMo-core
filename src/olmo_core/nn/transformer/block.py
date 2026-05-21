@@ -14,14 +14,13 @@ from olmo_core.distributed.utils import get_local_tensor
 from olmo_core.doc_utils import beta_feature
 from olmo_core.ops import attach_auxiliary_loss
 
-from ..attention.base import SequenceMixerConfig
-from ..attention.ring import RingContextParallelStyle, UlyssesContextParallelStyle
+from ..attention import AttentionConfig, RingAttentionLoadBalancerType
 from ..buffer_cache import BufferCache
 from ..feed_forward import FeedForward, FeedForwardConfig
 from ..functional import l2_normalize
 from ..layer_norm import LayerNormConfig
-from ..moe import MoEConfig
-from ..residual_stream import ResidualStream
+from ..moe import MoEConfig, MoERouter
+from ..moe.parallel_mlp import ParallelMLPBase
 from .config import TransformerDataParallelWrappingStrategy
 
 if TYPE_CHECKING:
@@ -36,10 +35,6 @@ class TransformerBlockBase(nn.Module):
     def __init__(self, *, n_layers: int):
         super().__init__()
         self.n_layers = n_layers
-
-    @property
-    def is_moe(self) -> bool:
-        return False
 
     @abstractmethod
     def forward(
@@ -66,12 +61,7 @@ class TransformerBlockBase(nn.Module):
         raise NotImplementedError
 
     @abstractmethod
-    def apply_cp(
-        self,
-        cp_mesh: DeviceMesh,
-        ring: Optional[RingContextParallelStyle] = None,
-        uly: Optional[UlyssesContextParallelStyle] = None,
-    ):
+    def apply_cp(self, cp_mesh: DeviceMesh, load_balancer: RingAttentionLoadBalancerType):
         raise NotImplementedError
 
     def apply_compile(self):
@@ -87,10 +77,6 @@ class TransformerBlockBase(nn.Module):
     ):
         raise NotImplementedError
 
-    @abstractmethod
-    def num_flops_per_token(self, seq_len: int) -> int:
-        raise NotImplementedError
-
 
 class TransformerBlock(TransformerBlockBase):
     """
@@ -98,7 +84,7 @@ class TransformerBlock(TransformerBlockBase):
 
     :param d_model: The model dimensionality.
     :param block_idx: The index/position of the block within the model. Ranges from 0 to ``n_layers - 1``.
-    :param sequence_mixer: The sequence mixer module config (e.g. attention, recurrent, convolution, etc.).
+    :param attention: The attention module config.
     :param feed_forward: The feed forward module config.
     :param layer_norm: The layer norm config for both the attention LN and the feed forward LN.
     :param dropout: Dropout probability.
@@ -111,34 +97,21 @@ class TransformerBlock(TransformerBlockBase):
         d_model: int,
         block_idx: int,
         n_layers: int,
-        sequence_mixer: SequenceMixerConfig,
+        attention: AttentionConfig,
         feed_forward: FeedForwardConfig,
         layer_norm: LayerNormConfig,
         dropout: float = 0.0,
-        attention_residual_alpha: float = 1.0,
-        feed_forward_residual_alpha: float = 1.0,
         init_device: str = "cpu",
         cache: Optional[BufferCache] = None,
     ):
         super().__init__(n_layers=n_layers)
         self.d_model = d_model
         self.block_idx = block_idx
-
-        # NOTE: The `self.attention` naming is kept for backwards compatibility with old checkpoints.
-        # `self.attention` could contain any `SequenceMixer` implementation, such as a `GatedDeltaNet`.
-        # Generally it's ok to think of these as "attention" modules at the block level.
-        self.attention = sequence_mixer.build(
-            d_model, layer_idx=block_idx, n_layers=n_layers, init_device=init_device, cache=cache
-        )
+        self.attention = attention.build(d_model, init_device=init_device, cache=cache)
         self.attention_norm = layer_norm.build(d_model, init_device=init_device)
-        self.attention_residual_stream = ResidualStream(
-            alpha=attention_residual_alpha, dropout=dropout
-        )
         self.feed_forward = feed_forward.build(d_model=d_model, init_device=init_device)
         self.feed_forward_norm = layer_norm.build(d_model, init_device=init_device)
-        self.feed_forward_residual_stream = ResidualStream(
-            alpha=feed_forward_residual_alpha, dropout=dropout
-        )
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(
         self,
@@ -148,8 +121,8 @@ class TransformerBlock(TransformerBlockBase):
         **kwargs,
     ) -> torch.Tensor:
         del loss_div_factor
-        h = self.attention_residual_stream(x, self.attention(self.attention_norm(x), **kwargs))
-        return self.feed_forward_residual_stream(h, self.feed_forward(self.feed_forward_norm(h)))
+        h = x + self.dropout(self.attention(self.attention_norm(x), **kwargs))
+        return h + self.dropout(self.feed_forward(self.feed_forward_norm(h)))
 
     def apply_tp(
         self, tp_mesh: DeviceMesh, *, input_layout: Placement, float8_enabled: bool = False
@@ -166,11 +139,6 @@ class TransformerBlock(TransformerBlockBase):
         parallelize_module(
             self.attention_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
         )
-        parallelize_module(
-            self.attention_residual_stream.dropout,
-            device_mesh=tp_mesh,
-            parallelize_plan=SequenceParallel(),
-        )
 
         self.attention.apply_tp(
             tp_mesh,
@@ -183,27 +151,18 @@ class TransformerBlock(TransformerBlockBase):
         parallelize_module(
             self.feed_forward_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
         )
-        parallelize_module(
-            self.feed_forward_residual_stream.dropout,
-            device_mesh=tp_mesh,
-            parallelize_plan=SequenceParallel(),
-        )
 
         self.feed_forward.apply_tp(
             tp_mesh,
-            input_layout=Shard(1),
             output_layout=Shard(1),
             use_local_output=False,
             float8_enabled=float8_enabled,
         )
 
-    def apply_cp(
-        self,
-        cp_mesh: DeviceMesh,
-        ring: Optional[RingContextParallelStyle] = None,
-        uly: Optional[UlyssesContextParallelStyle] = None,
-    ):
-        self.attention.apply_cp(cp_mesh, ring=ring, uly=uly)
+        parallelize_module(self.dropout, device_mesh=tp_mesh, parallelize_plan=SequenceParallel())
+
+    def apply_cp(self, cp_mesh: DeviceMesh, load_balancer: RingAttentionLoadBalancerType):
+        self.attention.apply_cp(cp_mesh, load_balancer)
 
     def apply_fsdp(
         self,
@@ -222,72 +181,6 @@ class TransformerBlock(TransformerBlockBase):
         else:
             fully_shard(self, mesh=dp_mesh, **fsdp_kwargs)
 
-    def num_flops_per_token(self, seq_len: int) -> int:
-        attn_flops = self.attention.num_flops_per_token(seq_len)
-        ff_flops = self.feed_forward.num_flops_per_token(seq_len)
-        return attn_flops + ff_flops
-
-
-class LayerNormScaledTransformerBlock(TransformerBlock):
-    """
-    A variant of ``TransformerBlock`` that applies
-    `LayerNorm Scaling (LNS) <https://github.com/lmsdss/LayerNorm-Scaling>`_.
-
-    Each LayerNorm output is multiplied by ``1 / sqrt(layer_id)`` where ``layer_id`` is the
-    1-based position of the block inside the transformer. Keeping this logic in a dedicated
-    subclass ensures that the vanilla ``TransformerBlock`` remains simple and easy to reason
-    about.
-    """
-
-    def __init__(
-        self,
-        *,
-        d_model: int,
-        block_idx: int,
-        n_layers: int,
-        sequence_mixer: SequenceMixerConfig,
-        feed_forward: FeedForwardConfig,
-        layer_norm: LayerNormConfig,
-        dropout: float = 0.0,
-        attention_residual_alpha: float = 1.0,
-        feed_forward_residual_alpha: float = 1.0,
-        init_device: str = "cpu",
-        cache: Optional[BufferCache] = None,
-    ):
-        super().__init__(
-            d_model=d_model,
-            block_idx=block_idx,
-            n_layers=n_layers,
-            sequence_mixer=sequence_mixer,
-            feed_forward=feed_forward,
-            layer_norm=layer_norm,
-            dropout=dropout,
-            attention_residual_alpha=attention_residual_alpha,
-            feed_forward_residual_alpha=feed_forward_residual_alpha,
-            init_device=init_device,
-            cache=cache,
-        )
-
-        # LayerNorm scaling factor 1/sqrt(layer_id), where layer_id is 1-based.
-        ln_scale_value = 1.0 / math.sqrt(block_idx + 1)
-        self.register_buffer("ln_scale", torch.tensor(ln_scale_value, dtype=torch.float32))
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        *,
-        loss_div_factor: Optional[Union[torch.Tensor, float]] = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        del loss_div_factor
-        scale = self.ln_scale.to(dtype=x.dtype, device=x.device)
-        h = self.attention_residual_stream(
-            x, self.attention(self.attention_norm(x) * scale, **kwargs)
-        )
-        return self.feed_forward_residual_stream(
-            h, self.feed_forward(self.feed_forward_norm(h) * scale)
-        )
-
 
 class ReorderedNormTransformerBlock(TransformerBlock):
     """
@@ -304,71 +197,8 @@ class ReorderedNormTransformerBlock(TransformerBlock):
         **kwargs,
     ) -> torch.Tensor:
         del loss_div_factor
-        h = self.attention_residual_stream(x, self.attention_norm(self.attention(x, **kwargs)))
-        return self.feed_forward_residual_stream(h, self.feed_forward_norm(self.feed_forward(h)))
-
-
-class PeriNormTransformerBlock(TransformerBlock):
-    """
-    A transformer block in the style of `Peri-LN <https://arxiv.org/pdf/2502.02732>`_.
-    """
-
-    def __init__(
-        self,
-        *,
-        d_model: int,
-        block_idx: int,
-        n_layers: int,
-        sequence_mixer: SequenceMixerConfig,
-        feed_forward: FeedForwardConfig,
-        layer_norm: LayerNormConfig,
-        dropout: float = 0.0,
-        attention_residual_alpha: float = 1.0,
-        feed_forward_residual_alpha: float = 1.0,
-        init_device: str = "cpu",
-        cache: Optional[BufferCache] = None,
-    ):
-        super().__init__(
-            d_model=d_model,
-            block_idx=block_idx,
-            n_layers=n_layers,
-            sequence_mixer=sequence_mixer,
-            feed_forward=feed_forward,
-            layer_norm=layer_norm,
-            dropout=dropout,
-            attention_residual_alpha=attention_residual_alpha,
-            feed_forward_residual_alpha=feed_forward_residual_alpha,
-            init_device=init_device,
-            cache=cache,
-        )
-        self.post_attention_norm = layer_norm.build(d_model, init_device=init_device)
-        self.post_feed_forward_norm = layer_norm.build(d_model, init_device=init_device)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        *,
-        loss_div_factor: Optional[Union[torch.Tensor, float]] = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        del loss_div_factor
-        h = self.attention_residual_stream(
-            x, self.post_attention_norm(self.attention(self.attention_norm(x), **kwargs))
-        )
-        return self.feed_forward_residual_stream(
-            h, self.post_feed_forward_norm(self.feed_forward(self.feed_forward_norm(h)))
-        )
-
-    def apply_tp(
-        self, tp_mesh: DeviceMesh, *, input_layout: Placement, float8_enabled: bool = False
-    ):
-        super().apply_tp(tp_mesh, input_layout=input_layout, float8_enabled=float8_enabled)
-        parallelize_module(
-            self.post_feed_forward_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
-        )
-        parallelize_module(
-            self.post_attention_norm, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
-        )
+        h = x + self.dropout(self.attention_norm(self.attention(x, **kwargs)))
+        return h + self.dropout(self.feed_forward_norm(self.feed_forward(h)))
 
 
 @beta_feature
@@ -384,7 +214,7 @@ class NormalizedTransformerBlock(TransformerBlockBase):
         d_model: int,
         block_idx: int,
         n_layers: int,
-        sequence_mixer: SequenceMixerConfig,
+        attention: AttentionConfig,
         feed_forward: FeedForwardConfig,
         init_device: str = "cpu",
         cache: Optional[BufferCache] = None,
@@ -392,13 +222,7 @@ class NormalizedTransformerBlock(TransformerBlockBase):
         super().__init__(n_layers=n_layers)
         self.d_model = d_model
         self.block_idx = block_idx
-
-        # NOTE: The `self.attention` naming is kept for backwards compatibility with old checkpoints.
-        # `self.attention` could contain any `SequenceMixer` implementation, such as a `GatedDeltaNet`.
-        # Generally it's ok to think of these as "attention" modules at the block level.
-        self.attention = sequence_mixer.build(
-            d_model, layer_idx=block_idx, n_layers=n_layers, init_device=init_device, cache=cache
-        )
+        self.attention = attention.build(d_model, init_device=init_device, cache=cache)
         self.feed_forward = feed_forward.build(d_model=d_model, init_device=init_device)
 
         self.attn_alpha_init_value = 0.05
@@ -454,13 +278,8 @@ class NormalizedTransformerBlock(TransformerBlockBase):
             "TP is not implemented yet for the normalized transformer block variant"
         )
 
-    def apply_cp(
-        self,
-        cp_mesh: DeviceMesh,
-        ring: Optional[RingContextParallelStyle] = None,
-        uly: Optional[UlyssesContextParallelStyle] = None,
-    ):
-        self.attention.apply_cp(cp_mesh, ring=ring, uly=uly)
+    def apply_cp(self, cp_mesh: DeviceMesh, load_balancer: RingAttentionLoadBalancerType):
+        self.attention.apply_cp(cp_mesh, load_balancer)
 
     def apply_fsdp(
         self,
@@ -501,11 +320,6 @@ class NormalizedTransformerBlock(TransformerBlockBase):
     def _normalize_matrix(self, w: torch.Tensor, dim: int = -1):
         w.copy_(l2_normalize(w, dim=dim))
 
-    def num_flops_per_token(self, seq_len: int) -> int:
-        attn_flops = self.attention.num_flops_per_token(seq_len)
-        ff_flops = self.feed_forward.num_flops_per_token(seq_len)
-        return attn_flops + ff_flops
-
 
 @beta_feature
 class MoETransformerBlock(TransformerBlockBase):
@@ -520,7 +334,7 @@ class MoETransformerBlock(TransformerBlockBase):
         d_model: int,
         block_idx: int,
         n_layers: int,
-        sequence_mixer: SequenceMixerConfig,
+        attention: AttentionConfig,
         feed_forward_moe: MoEConfig,
         layer_norm: LayerNormConfig,
         dropout: float = 0.0,
@@ -530,13 +344,7 @@ class MoETransformerBlock(TransformerBlockBase):
         super().__init__(n_layers=n_layers)
         self.d_model = d_model
         self.block_idx = block_idx
-
-        # NOTE: The `self.attention` naming is kept for backwards compatibility with old checkpoints.
-        # `self.attention` could contain any `SequenceMixer` implementation, such as a `GatedDeltaNet`.
-        # Generally it's ok to think of these as "attention" modules at the block level.
-        self.attention = sequence_mixer.build(
-            d_model, layer_idx=block_idx, n_layers=n_layers, init_device=init_device, cache=cache
-        )
+        self.attention = attention.build(d_model, init_device=init_device, cache=cache)
         self.attention_norm = layer_norm.build(d_model, init_device=init_device)
         self.feed_forward_moe = feed_forward_moe.build(
             d_model=d_model, n_layers=n_layers, init_device=init_device, cache=cache
@@ -547,24 +355,20 @@ class MoETransformerBlock(TransformerBlockBase):
         self._tp_enabled = False
 
     @property
-    def is_moe(self) -> bool:
-        return True
-
-    @property
-    def routers_list(self) -> nn.ModuleList:
-        return self.feed_forward_moe.routers_list
+    def router(self) -> MoERouter:
+        return self.feed_forward_moe.router
 
     @property
     def shared_mlp(self) -> Optional[FeedForward]:
         return self.feed_forward_moe.shared_mlp
 
     @property
-    def experts_list(self) -> nn.ModuleList:
-        return self.feed_forward_moe.experts_list
+    def experts(self) -> ParallelMLPBase:
+        return self.feed_forward_moe.experts
 
     @property
-    def top_k_sum(self) -> int:
-        return self.feed_forward_moe.top_k_sum
+    def top_k(self) -> int:
+        return self.feed_forward_moe.top_k
 
     @property
     def ep_enabled(self) -> bool:
@@ -641,13 +445,8 @@ class MoETransformerBlock(TransformerBlockBase):
 
         self._tp_enabled = True
 
-    def apply_cp(
-        self,
-        cp_mesh: DeviceMesh,
-        ring: Optional[RingContextParallelStyle] = None,
-        uly: Optional[UlyssesContextParallelStyle] = None,
-    ):
-        self.attention.apply_cp(cp_mesh, ring=ring, uly=uly)
+    def apply_cp(self, cp_mesh: DeviceMesh, load_balancer: RingAttentionLoadBalancerType):
+        self.attention.apply_cp(cp_mesh, load_balancer)
         self.feed_forward_moe.apply_cp(cp_mesh)
 
     def apply_fsdp(
@@ -668,11 +467,6 @@ class MoETransformerBlock(TransformerBlockBase):
                 fsdp_att.set_modules_to_forward_prefetch([fsdp_moe])
         else:
             fully_shard(self, mesh=dp_mesh, **fsdp_kwargs)
-
-    def num_flops_per_token(self, seq_len: int) -> int:
-        attn_flops = self.attention.num_flops_per_token(seq_len)
-        moe_flops = self.feed_forward_moe.num_flops_per_token(seq_len)
-        return attn_flops + moe_flops
 
 
 @beta_feature
@@ -722,7 +516,6 @@ class MoEHybridTransformerBlockBase(MoETransformerBlock):
         *,
         d_model: int,
         n_layers: int,
-        sequence_mixer: SequenceMixerConfig,
         layer_norm: LayerNormConfig,
         feed_forward: FeedForwardConfig,
         init_device: str = "cpu",
@@ -731,7 +524,6 @@ class MoEHybridTransformerBlockBase(MoETransformerBlock):
         super().__init__(
             d_model=d_model,
             n_layers=n_layers,
-            sequence_mixer=sequence_mixer,
             layer_norm=layer_norm,
             init_device=init_device,
             **kwargs,
@@ -825,22 +617,6 @@ class MoEHybridTransformerBlockBase(MoETransformerBlock):
         wrapping_strategy: TransformerDataParallelWrappingStrategy = TransformerDataParallelWrappingStrategy.full,
         **fsdp_kwargs,
     ):
-        from torch.distributed.fsdp import MixedPrecisionPolicy
-
-        # Force routers to be full-precision.
-        fsdp_routers = []
-        for router in self.feed_forward_moe.routers_list:
-            fsdp_routers.append(
-                cast(
-                    FSDPModule,
-                    fully_shard(
-                        router,
-                        mesh=dp_mesh,
-                        mp_policy=MixedPrecisionPolicy(param_dtype=torch.float32),
-                    ),
-                )
-            )
-
         if wrapping_strategy == TransformerDataParallelWrappingStrategy.fine_grained:
             if not self.use_combined_forward:
                 fsdp_att = cast(
@@ -854,7 +630,7 @@ class MoEHybridTransformerBlockBase(MoETransformerBlock):
                 )
                 fsdp_root = cast(FSDPModule, fully_shard(self, mesh=dp_mesh, **fsdp_kwargs))
                 if prefetch_factor > 0:
-                    fsdp_root.set_modules_to_forward_prefetch([*fsdp_routers, fsdp_moe, fsdp_att])
+                    fsdp_root.set_modules_to_forward_prefetch([fsdp_moe, fsdp_att])
                     fsdp_att.set_modules_to_forward_prefetch([fsdp_mlp])
             else:
                 fsdp_att = cast(
@@ -863,10 +639,10 @@ class MoEHybridTransformerBlockBase(MoETransformerBlock):
                 fsdp_mlp = cast(
                     FSDPModule, fully_shard(self.feed_forward, mesh=dp_mesh, **fsdp_kwargs)
                 )
-                #  fsdp_moe = cast(
-                #      FSDPModule,
-                #      fully_shard(self.feed_forward_moe.experts.mlp, mesh=dp_mesh, **fsdp_kwargs),
-                #  )
+                fsdp_moe = cast(
+                    FSDPModule,
+                    fully_shard(self.feed_forward_moe.experts.mlp, mesh=dp_mesh, **fsdp_kwargs),
+                )
                 fsdp_shared_mlp = (
                     None
                     if self.feed_forward_moe.shared_mlp is None
@@ -878,8 +654,7 @@ class MoEHybridTransformerBlockBase(MoETransformerBlock):
                 fsdp_root = cast(FSDPModule, fully_shard(self, mesh=dp_mesh, **fsdp_kwargs))
 
                 if prefetch_factor > 0:
-                    #  fsdp_root.set_modules_to_forward_prefetch([fsdp_att, fsdp_moe])
-                    fsdp_root.set_modules_to_forward_prefetch([fsdp_att, *fsdp_routers])
+                    fsdp_root.set_modules_to_forward_prefetch([fsdp_att, fsdp_moe])
                     if fsdp_shared_mlp is not None:
                         fsdp_att.set_modules_to_forward_prefetch([fsdp_mlp, fsdp_shared_mlp])
                     else:
@@ -991,8 +766,8 @@ class MoEHybridTransformerBlock(MoEHybridTransformerBlockBase):
         ).view(B, -1, D)
 
         if moe_shared_out is not None:
-            moe_shared_out = moe_shared_out / (self.top_k_sum + 1)
-            x_moe = moe_shared_out.add(x_moe, alpha=self.top_k_sum / (self.top_k_sum + 1))
+            moe_shared_out = moe_shared_out / (self.top_k + 1)
+            x_moe = moe_shared_out.add(x_moe, alpha=self.top_k / (self.top_k + 1))
 
         return h + self.dropout(x_moe)
 
@@ -1021,6 +796,7 @@ class MoEHybridReorderedNormTransformerBlock(MoEHybridTransformerBlockBase):
         # dense operations while we wait on expert parallel all-to-all comms.
 
         ## TODO @margsli this needs to be edited to allow for hetMoE implementation
+
 
         B, _, D = x.shape
 
@@ -1100,7 +876,7 @@ class MoEHybridReorderedNormTransformerBlock(MoEHybridTransformerBlockBase):
         ).view(B, -1, D)
 
         if moe_shared_out is not None:
-            moe_shared_out = moe_shared_out / (self.top_k_sum + 1)
-            x_moe = moe_shared_out.add(x_moe, alpha=self.top_k_sum / (self.top_k_sum + 1))
+            moe_shared_out = moe_shared_out / (self.top_k + 1)
+            x_moe = moe_shared_out.add(x_moe, alpha=self.top_k / (self.top_k + 1))
 
         return h + self.dropout(self.feed_forward_moe_norm(x_moe))

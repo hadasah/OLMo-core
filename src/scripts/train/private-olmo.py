@@ -3,12 +3,11 @@ Train an Nx7B OLMo2 model. Run this script without any arguments to see usage in
 """
 
 import logging
-from functools import partial
 
 from olmo_core.config import DType
 from olmo_core.distributed.parallel import DataParallelType
 from olmo_core.float8 import Float8Config
-from olmo_core.internal.experiment import CommonComponents, build_config, main
+from olmo_core.internal.experiment import CommonComponents, main
 from olmo_core.nn.transformer import TransformerConfig
 from olmo_core.optim import AdamWConfig, CosWithWarmup
 from olmo_core.train import TrainerConfig
@@ -21,8 +20,8 @@ from olmo_core.train.train_module import (
 )
 
 log = logging.getLogger(__name__)
+
 CONTEXT_LENGTH = 4096
-GLOBAL_BATCH_SIZE = 64 * CONTEXT_LENGTH  # TODO: adjust as needed
 
 
 def build_model_config(common: CommonComponents) -> TransformerConfig:
@@ -55,8 +54,8 @@ def build_model_config(common: CommonComponents) -> TransformerConfig:
 
 def build_train_module_config(common: CommonComponents) -> TransformerTrainModuleConfig:
     return TransformerTrainModuleConfig(
-        rank_microbatch_size=1 * common.max_sequence_length,
-        max_sequence_length=common.max_sequence_length,
+        rank_microbatch_size=1 * CONTEXT_LENGTH,
+        max_sequence_length=common.dataset.effective_sequence_length,
         optim=AdamWConfig(
             lr=3e-4,
             weight_decay=0.1,
@@ -121,13 +120,11 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
 
 
 if __name__ == "__main__":
-    config_builder = partial(
-        build_config,
-        global_batch_size=GLOBAL_BATCH_SIZE,
-        max_sequence_length=CONTEXT_LENGTH,
+    main(
+        global_batch_size=64 * CONTEXT_LENGTH,  # TODO: adjust as needed
         model_config_builder=build_model_config,
         train_module_config_builder=build_train_module_config,
         trainer_config_builder=build_trainer_config,
+        sequence_length=CONTEXT_LENGTH,
         include_default_evals=False,
     )
-    main(config_builder=config_builder)

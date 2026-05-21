@@ -6,18 +6,14 @@ Overview
 
 For text-based data you should prepare your data by writing token IDs to numpy arrays on disk, using the
 `Dolma toolkit <https://allenai.github.io/dolma/>`_ for example.
-Then configure and build your dataset and data loader using either the :mod:`olmo_core.data.composable` API or one of the
-:class:`~olmo_core.data.numpy_dataset.NumpyDatasetConfigBase` builders
-(e.g. :class:`~olmo_core.data.numpy_dataset.NumpyFSLDatasetConfig`) with the
-:class:`~olmo_core.data.data_loader.NumpyDataLoaderConfig`
-builder. Data loaders can be passed to :meth:`TrainerConfig.build() <olmo_core.train.TrainerConfig.build>`.
+Then configure and build your dataset using the :class:`~olmo_core.data.numpy_dataset.NumpyDatasetConfig`
+builder, build your data loader with the :class:`~olmo_core.data.data_loader.NumpyDataLoaderConfig`
+builder, and pass it to :meth:`TrainerConfig.build() <olmo_core.train.TrainerConfig.build>`.
 """
 
-from . import composable
 from .collator import DataCollator, PaddingDirection
 from .data_loader import (
     DataLoaderBase,
-    DataLoaderConfig,
     NumpyDataLoaderBase,
     NumpyDataLoaderConfig,
     NumpyFSLDataLoader,
@@ -31,14 +27,9 @@ from .numpy_dataset import (
     NumpyDatasetConfig,
     NumpyFSLDataset,
     NumpyFSLDatasetBase,
-    NumpyFSLDatasetConfig,
-    NumpyInterleavedFSLDatasetConfig,
     NumpyPackedFSLDataset,
-    NumpyPackedFSLDatasetConfig,
     NumpyPaddedFSLDataset,
-    NumpyPaddedFSLDatasetConfig,
     NumpyVSLDataset,
-    NumpyVSLDatasetConfig,
     VSLCurriculum,
     VSLCurriculumConfig,
     VSLCurriculumType,
@@ -48,10 +39,9 @@ from .numpy_dataset import (
     VSLNaturalCurriculum,
 )
 from .tokenizer import TokenizerConfig, TokenizerName
-from .types import LongDocStrategy, NumpyDatasetDType
+from .types import LongDocStrategy, NumpyDatasetDType, NumpyDatasetType
 
 __all__ = [
-    "composable",
     "NumpyDatasetBase",
     "NumpyFSLDatasetBase",
     "NumpyFSLDataset",
@@ -64,11 +54,7 @@ __all__ = [
     "VSLGrowP2Curriculum",
     "VSLGrowLinearCurriculum",
     "NumpyDatasetConfig",
-    "NumpyFSLDatasetConfig",
-    "NumpyPaddedFSLDatasetConfig",
-    "NumpyPackedFSLDatasetConfig",
-    "NumpyInterleavedFSLDatasetConfig",
-    "NumpyVSLDatasetConfig",
+    "NumpyDatasetType",
     "InstanceFilterConfig",
     "VSLCurriculumType",
     "VSLCurriculumConfig",
@@ -80,7 +66,6 @@ __all__ = [
     "DataCollator",
     "PaddingDirection",
     "DataLoaderBase",
-    "DataLoaderConfig",
     "TextDataLoaderBase",
     "NumpyDataLoaderBase",
     "NumpyFSLDataLoader",

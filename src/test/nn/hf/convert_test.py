@@ -1,13 +1,7 @@
-import pytest
 import torch
 from transformers import Olmo2Config
 
 from olmo_core.nn.hf.convert import convert_state_from_hf, convert_state_to_hf
-
-try:
-    from transformers import FlexOlmoConfig  # type: ignore
-except ImportError:
-    FlexOlmoConfig = None
 
 
 def _get_olmo2_config() -> Olmo2Config:
@@ -53,9 +47,7 @@ def test_convert_layers_from_hf():
                 f"model.layers.{i}.mlp.gate_proj.weight": torch.randn(
                     hf_config.hidden_size, hf_config.intermediate_size
                 ),
-                f"model.layers.{i}.post_attention_layernorm.weight": torch.randn(
-                    hf_config.hidden_size
-                ),
+                f"model.layers.{i}.input_layernorm.weight": torch.randn(hf_config.hidden_size),
             }
         )
 
@@ -72,11 +64,11 @@ def test_convert_layers_from_hf():
         )
         torch.testing.assert_close(
             converted_state[f"blocks.{i}.attention_norm.weight"],
-            hf_state[f"model.layers.{i}.post_attention_layernorm.weight"],
+            hf_state[f"model.layers.{i}.input_layernorm.weight"],
         )
 
 
-def test_convert_model_type_specific_from_hf():
+def test_convert_model_specific_from_hf():
     hf_config = _get_olmo2_config()
 
     hf_state = {}
@@ -89,7 +81,7 @@ def test_convert_model_type_specific_from_hf():
             }
         )
 
-    converted_state = convert_state_from_hf(hf_config, hf_state, model_type="llama")
+    converted_state = convert_state_from_hf(hf_config, hf_state, model_id="meta-llama/Llama-3.2-1B")
 
     for i in range(hf_config.num_hidden_layers):
         torch.testing.assert_close(
@@ -174,40 +166,6 @@ def test_convert_layers_to_hf():
 def test_convert_state_to_hf_and_unflatten():
     hf_config = _get_olmo2_config()
     hf_config.num_experts = hf_config.hidden_size // 2
-
-    olmo_core_state = {}
-    for i in range(hf_config.num_hidden_layers):
-        olmo_core_state.update(
-            {
-                f"blocks.{i}.feed_forward_moe.router.weight": torch.randn(
-                    hf_config.num_experts * hf_config.hidden_size
-                ),
-            }
-        )
-
-    converted_state = convert_state_to_hf(hf_config, olmo_core_state)
-
-    for i in range(hf_config.num_hidden_layers):
-        torch.testing.assert_close(
-            converted_state[f"model.layers.{i}.mlp.gate.weight"].flatten(),
-            olmo_core_state[f"blocks.{i}.feed_forward_moe.router.weight"],
-        )
-
-
-def test_convert_state_to_flex_olmo_hf():
-    if FlexOlmoConfig is None:
-        pytest.skip("The installed transformers version does not support FlexOlmo")
-
-    hf_config = FlexOlmoConfig(
-        vocab_size=64,
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        num_experts=2,
-        max_position_embeddings=64,
-        eos_token_id=42,
-    )
 
     olmo_core_state = {}
     for i in range(hf_config.num_hidden_layers):

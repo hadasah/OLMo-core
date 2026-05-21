@@ -3,12 +3,11 @@ Train a large OLMoE model. Run this script without any arguments to see usage in
 """
 
 import logging
-from functools import partial
 
 from olmo_core.config import DType
 from olmo_core.distributed.parallel import DataParallelType
 from olmo_core.float8 import AOFloat8LinearConfig, Float8Config
-from olmo_core.internal.experiment import CommonComponents, build_config, main
+from olmo_core.internal.experiment import CommonComponents, main
 from olmo_core.launch.beaker import OLMoCoreBeakerImage
 from olmo_core.nn.transformer import TransformerConfig
 from olmo_core.optim import AdamWConfig, CosWithWarmup, OptimGroupOverride
@@ -20,9 +19,6 @@ from olmo_core.train.train_module import (
     TransformerExpertParallelConfig,
     TransformerTrainModuleConfig,
 )
-
-SEQUENCE_LENGTH = 4096
-GLOBAL_BATCH_SIZE = 2048 * 4096
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +47,7 @@ def build_model_config(common: CommonComponents) -> TransformerConfig:
 def build_train_module_config(common: CommonComponents) -> TransformerTrainModuleConfig:
     return TransformerTrainModuleConfig(
         rank_microbatch_size=2 * 4096,
-        max_sequence_length=common.max_sequence_length,
+        max_sequence_length=common.dataset.effective_sequence_length,
         optim=AdamWConfig(
             lr=3e-4,
             weight_decay=0.1,
@@ -71,7 +67,13 @@ def build_train_module_config(common: CommonComponents) -> TransformerTrainModul
             wrapping_strategy=TransformerDataParallelWrappingStrategy.full,
         ),
         ep_config=TransformerExpertParallelConfig(degree=-1),
-        float8_config=Float8Config(ao=AOFloat8LinearConfig.recommended()),
+        float8_config=Float8Config(
+            ao=AOFloat8LinearConfig(
+                enable_fsdp_float8_all_gather=True,
+                force_recompute_fp8_weight_in_bwd=True,
+                round_scales_to_power_of_2=True,
+            )
+        ),
         z_loss_multiplier=1e-5,
         max_grad_norm=1.0,
         scheduler=CosWithWarmup(warmup_steps=2000),
@@ -118,15 +120,12 @@ def build_trainer_config(common: CommonComponents) -> TrainerConfig:
 
 
 if __name__ == "__main__":
-    config_builder = partial(
-        build_config,
-        global_batch_size=GLOBAL_BATCH_SIZE,
-        max_sequence_length=SEQUENCE_LENGTH,
+    main(
+        global_batch_size=2048 * 4096,
         model_config_builder=build_model_config,
         train_module_config_builder=build_train_module_config,
         trainer_config_builder=build_trainer_config,
         include_default_evals=False,
-        beaker_image=OLMoCoreBeakerImage.tch271_cu126,
+        beaker_image=OLMoCoreBeakerImage.stable_cu126,
         num_nodes=8,
     )
-    main(config_builder=config_builder)

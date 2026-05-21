@@ -120,14 +120,6 @@ class Callback(Stateful):
         """
         del path
 
-    def pre_log_metrics(self, step: int, metrics: Dict[str, float]):
-        """
-        Called when metrics have been gathered for a given step (possibly a previous step),
-        but right before :meth:`log_metrics()`. This can used to modify, add, or remove metrics
-        by updating the ``metrics`` dict in-place.
-        """
-        del step, metrics
-
     def log_metrics(self, step: int, metrics: Dict[str, float]):
         """
         Called when metrics have been gathered for a given step (possibly a previous step).
@@ -146,17 +138,15 @@ class Callback(Stateful):
         """
         pass
 
+    def close(self):
+        pass
+
+
     def on_error(self, exc: BaseException):
         """
         Called when the training loop exits with an error.
         """
         del exc
-
-    def close(self):
-        """
-        Always called right before `Trainer.fit()` exits, even on an error.
-        """
-        pass
 
 
 @dataclass

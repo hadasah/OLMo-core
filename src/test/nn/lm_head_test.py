@@ -15,7 +15,7 @@ from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.nn.layer_norm import LayerNormConfig
 from olmo_core.nn.lm_head import LMHeadConfig, LMHeadType, LMLossImplementation
 from olmo_core.testing import requires_gpu, requires_multi_gpu, run_distributed_test
-from olmo_core.utils import get_default_device, record_flops, seed_all
+from olmo_core.utils import get_default_device, seed_all
 
 
 def test_lm_head_builder_config():
@@ -203,76 +203,4 @@ def test_lm_head_tp(
             z_loss=z_loss.detach().cpu(),
             grad=inputs.grad.detach().cpu(),
         ),
-    )
-
-
-@requires_gpu
-@pytest.mark.parametrize("head_type", [LMHeadType.default, LMHeadType.normalized])
-def test_lm_head_logits_to_keep(head_type):
-    seed_all(42)
-    device = torch.device("cuda")
-    d_model, vocab_size = 256, 1024
-    B, S = 2, 32
-
-    config = LMHeadConfig(name=head_type, loss_implementation=LMLossImplementation.default)
-    lm_head = config.build(d_model=d_model, vocab_size=vocab_size, init_device="cuda")
-
-    inputs = torch.randn(B, S, d_model, device=device)
-    labels = torch.randint(0, vocab_size, (B, S), device=device)
-
-    # Test integer logits_to_keep (keep last N positions)
-    logits_to_keep = 8
-    output = lm_head(inputs, labels=labels, logits_to_keep=logits_to_keep, return_logits=True)
-    assert output.logits.shape == (B, logits_to_keep, vocab_size)
-    output_ref = lm_head(
-        inputs[:, -logits_to_keep:], labels=labels[:, -logits_to_keep:], return_logits=True
-    )
-    assert torch.allclose(output.logits, output_ref.logits) if "output_ref" in locals() else True
-    assert torch.allclose(output.loss, output_ref.loss) if "output_ref" in locals() else True
-
-    # Test tensor logits_to_keep (keep specific positions)
-    positions = torch.tensor([[5, 10, 15, 20], [8, 12, 16, 24]], device=device)
-    output = lm_head(inputs, labels=labels, logits_to_keep=positions, return_logits=True)
-    assert output.logits.shape == (B, 4, vocab_size)
-
-    # Test logits_to_keep=0 (keep all)
-    output = lm_head(inputs, labels=labels, logits_to_keep=0, return_logits=True)
-    assert output.logits.shape == (B, S, vocab_size)
-
-    # Test inference mode
-    logits = lm_head(inputs, logits_to_keep=logits_to_keep)
-    assert logits.shape == (B, logits_to_keep, vocab_size)
-
-
-@pytest.mark.parametrize("head_type", [LMHeadType.default, LMHeadType.normalized])
-@pytest.mark.parametrize(
-    "loss_implementation", [LMLossImplementation.default, LMLossImplementation.fused_linear]
-)
-def test_lm_head_num_flops_per_token(
-    head_type: LMHeadType, loss_implementation: LMLossImplementation
-):
-    seed_all(0)
-
-    d_model = 128
-    seq_len = 32
-    batch_size = 1
-    vocab_size = 1024
-
-    config = LMHeadConfig(name=head_type, loss_implementation=loss_implementation)
-    lm_head = config.build(d_model=d_model, vocab_size=vocab_size, init_device="cpu")
-
-    x = torch.randn(batch_size, seq_len, d_model, requires_grad=True)
-
-    actual_flops = record_flops(lm_head, x, with_backward=True)
-    actual_flops_per_token = actual_flops / seq_len
-
-    estimated_flops_per_token = lm_head.num_flops_per_token(seq_len)
-
-    tolerance = 0.02
-    relative_error = (
-        abs(estimated_flops_per_token - actual_flops_per_token) / actual_flops_per_token
-    )
-    assert relative_error < tolerance, (
-        f"Estimated FLOPs ({estimated_flops_per_token}) differs too much from actual ({actual_flops_per_token}), "
-        f"{relative_error=:.2%}, {tolerance=:.2%}"
     )

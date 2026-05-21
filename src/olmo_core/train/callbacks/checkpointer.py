@@ -9,13 +9,13 @@ import torch.distributed as dist
 from olmo_core.config import StrEnum
 from olmo_core.distributed.utils import (
     backend_supports_cpu,
-    broadcast_object,
     get_fs_local_rank,
     get_rank,
     is_distributed,
+    scatter_object,
 )
 from olmo_core.exceptions import OLMoConfigurationError
-from olmo_core.io import clear_directory, is_url, join_path, remove_file
+from olmo_core.io import clear_directory, is_url
 from olmo_core.utils import wait_for
 
 from ..checkpoint import Checkpointer
@@ -60,7 +60,7 @@ class CheckpointerCallback(Callback):
 
     priority: ClassVar[int] = 1
 
-    save_interval: Optional[int] = 250
+    save_interval: int = 250
     """
     The interval, in steps, with which to save permanent checkoints.
     """
@@ -89,16 +89,6 @@ class CheckpointerCallback(Callback):
     The strategy for removing old checkpoints found in the save folder.
     """
 
-    ephemeral_cooldown: Optional[int] = None
-    """
-    The number of steps to wait after saving a checkpoint before saving another ephemeral one is allowed.
-    """
-
-    fixed_steps: Optional[List[int]] = None
-    """
-    A list of fixed steps at which to save additional permanent checkpoints.
-    """
-
     enabled: bool = True
 
     # Bookkeeping
@@ -113,15 +103,12 @@ class CheckpointerCallback(Callback):
     _checkpoints_to_remove: List[str] = field(default_factory=list)
 
     def __post_init__(self):
-        if self.save_interval is not None and self.save_interval < 1:
+        if self.save_interval < 1:
             raise OLMoConfigurationError("'save_interval' must be at least 1")
         if self.ephemeral_save_interval is not None:
             if self.ephemeral_save_interval < 1:
                 raise OLMoConfigurationError("'ephemeral_save_interval' must be at least 1")
-            if (
-                self.save_interval is not None
-                and self.ephemeral_save_interval >= self.save_interval
-            ):
+            if self.ephemeral_save_interval >= self.save_interval:
                 raise OLMoConfigurationError(
                     "'ephemeral_save_interval' must be less than 'save_interval'"
                 )
@@ -166,27 +153,11 @@ class CheckpointerCallback(Callback):
 
     def _remove_checkpoint(self, path: str):
         log.info(f"Removing old checkpoint at '{path}'...")
-
-        # Remove metadata file first to invalidate the checkpoint.
-        if get_rank() == 0:
-            try:
-                remove_file(join_path(path, self.trainer.checkpointer.METADATA_FNAME))
-            except FileNotFoundError:
-                pass
-
         if is_url(path):
             if get_rank() == 0:
-                self.trainer.run_bookkeeping_op(
-                    clear_directory,
-                    path,
-                    op_name=f"clear_directory {path}",
-                    distributed=False,
-                    soft_timeout=180,  # this can take a while on GCS, for example
-                )
+                self.trainer.thread_pool.submit(clear_directory, path)
         elif get_fs_local_rank() == 0:
-            self.trainer.run_bookkeeping_op(
-                clear_directory, path, op_name=f"clear_directory {path}", distributed=False
-            )
+            self.trainer.thread_pool.submit(clear_directory, path)
 
     def _schedule_for_removal(self, path: str):
         self._checkpoints_to_remove.append(path)
@@ -231,11 +202,7 @@ class CheckpointerCallback(Callback):
                         if (
                             step_num == 0
                             or step_num > self.step
-                            or (self.fixed_steps is not None and step_num in self.fixed_steps)
-                            or (
-                                self.save_interval is not None
-                                and step_num % self.save_interval == 0
-                            )
+                            or step_num % self.save_interval == 0
                         ):
                             continue
                         elif (
@@ -247,7 +214,7 @@ class CheckpointerCallback(Callback):
                 except FileNotFoundError:
                     pass
 
-            ephemeral_checkpoints = broadcast_object(ephemeral_checkpoints)
+            ephemeral_checkpoints = scatter_object(ephemeral_checkpoints)
 
             # TODO: handle this if we ever restore callback state.
             assert not self._ephemeral_checkpoints
@@ -269,26 +236,13 @@ class CheckpointerCallback(Callback):
         if not self.checkpoint_pending:
             self._remove_old_checkpoints()
 
-        if self.fixed_steps is not None and self.step in self.fixed_steps:
-            # Save permanent checkpoint.
-            self._checkpoints.append(self._save_checkpoint())
-        elif self.save_interval is not None and self.step % self.save_interval == 0:
-            # Save permanent checkpoint.
+        if self.step % self.save_interval == 0:
             self._checkpoints.append(self._save_checkpoint())
         elif (
             self.ephemeral_save_interval is not None
             and self.step % self.ephemeral_save_interval == 0
         ):
-            # Maybe save ephemeral checkpoint.
-            if (
-                self.ephemeral_cooldown is not None
-                and (self.step - self._latest_checkpoint_step) < self.ephemeral_cooldown
-            ):
-                return
-
             self._ephemeral_checkpoints.append(self._save_checkpoint())
-
-            # Remove old ephemeral checkpoints.
             while len(self._ephemeral_checkpoints) > 1:
                 oldest_path = self._ephemeral_checkpoints.pop(0)
                 self._schedule_for_removal(oldest_path)

@@ -18,12 +18,10 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, TypeVar, Union
 
 import rich
 import torch
-import torch.distributed as dist
 from rich.console import Console, ConsoleRenderable
 from rich.highlighter import NullHighlighter
 from rich.text import Text
 from rich.traceback import Traceback
-from torch.utils.flop_counter import FlopCounterMode
 
 from .config import StrEnum
 from .exceptions import OLMoCLIError, OLMoEnvironmentError, OLMoError, OLMoThreadError
@@ -102,7 +100,7 @@ def move_to_device(o: T, device: torch.device, non_blocking: Optional[bool] = No
     :param device: The device to move to.
     """
     if non_blocking is None:
-        non_blocking = device.type not in ("cpu", "mps")
+        non_blocking = device.type != "cpu"
     if isinstance(o, torch.Tensor):
         return o.to(device, non_blocking=non_blocking)  # type: ignore[return-value]
     elif isinstance(o, dict):
@@ -129,34 +127,12 @@ def get_default_device() -> torch.device:
     """
     Get the default device.
     """
-
-    from .distributed.utils import (
-        backend_supports_cpu,
-        backend_supports_cuda,
-        is_distributed,
-    )
-
-    if is_distributed():
-        backend = dist.get_backend()
-        if backend_supports_cuda(backend):
-            return torch.device("cuda")
-        elif backend_supports_cpu(backend):
-            return torch.device("cpu")
-        else:
-            raise NotImplementedError(backend)
-    elif torch.cuda.is_available():
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
         return torch.device("cuda")
     elif torch.mps.is_available():
         return torch.device("mps")
     else:
         return torch.device("cpu")
-
-
-def has_compute_capability(major: int, minor: int) -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
-        major,
-        minor,
-    )
 
 
 def seed_all(seed: int):
@@ -211,30 +187,20 @@ def has_flash_attn() -> bool:
 def set_env_var(name: str, value: str, override: bool = False, secret: bool = False):
     value_str = "****" if secret else value
     if name in os.environ:
-        if os.environ[name] != value:
-            if override:
-                log_or_print(log, f"Overriding env var '{name}' to '{value_str}'", logging.WARNING)
-                os.environ[name] = value
+        if override and os.environ[name] != value:
+            msg = f"Overriding env var '{name}' to '{value_str}'"
+            if logging_configured():
+                log.warning(msg)
             else:
-                log_or_print(
-                    log,
-                    f"Will skip setting env var '{name}' since it's already set to '{value_str}'",
-                    logging.WARNING,
-                )
+                print(msg)
+            os.environ[name] = value
+    else:
+        msg = f"Setting env var '{name}' to '{value_str}'"
+        if logging_configured():
+            log.info(msg)
         else:
-            log_or_print(log, f"Env var '{name}' already set to '{value_str}'")
-    else:
-        log_or_print(log, f"Setting env var '{name}' to '{value_str}'")
+            print(msg)
         os.environ[name] = value
-
-
-def log_or_print(logger: logging.Logger, msg: str, level: int = logging.INFO):
-    if _LOGGING_CONFIGURED or (
-        len(logging.getLogger().handlers) > 0 and logger.getEffectiveLevel() <= level
-    ):
-        logger.log(level, msg)
-    else:
-        print(msg)
 
 
 class LogFilterType(StrEnum):
@@ -312,10 +278,8 @@ def setup_logging(
 
     handler: logging.Handler
     # NOTE: Beaker supports rich logging now.
-    if (
-        os.environ.get("OLMO_RICH_LOGGING") is None
-        and os.environ.get("BEAKER_EXPERIMENT_ID") is None
-        and (os.environ.get("DEBIAN_FRONTEND", None) == "noninteractive" or not sys.stdout.isatty())
+    if os.environ.get("BEAKER_EXPERIMENT_ID") is None and (
+        os.environ.get("DEBIAN_FRONTEND", None) == "noninteractive" or not sys.stdout.isatty()
     ):
         handler = logging.StreamHandler(sys.stdout)
         formatter = logging.Formatter(
@@ -354,7 +318,7 @@ def setup_logging(
 
     if filter is not None:
         handler.addFilter(filter)  # type: ignore
-    logging.basicConfig(handlers=[handler], level=logging.INFO, force=True)
+    logging.basicConfig(handlers=[handler], level=logging.INFO)
 
     logging.captureWarnings(True)
     logging.getLogger("urllib3").setLevel(logging.ERROR)
@@ -566,7 +530,7 @@ class _RichHandler(logging.Handler):
 
     def get_location_text(self, record: logging.LogRecord) -> Text:
         name_and_line = f"{record.name}:{record.lineno}" if record.name != "root" else "root"
-        text = f"[{name_and_line}, {record.hostname}, rank={record.local_rank}]"  # type: ignore
+        text = f"[{name_and_line}, rank={record.local_rank}]"  # type: ignore
         return Text(text, style="log.path")
 
 
@@ -639,55 +603,20 @@ def capped_powers_of_2(x: int, cap: int) -> List[int]:
 
 
 def format_float(value: float) -> str:
-    if math.isnan(value):
-        return "nan"
-    elif math.isinf(value):
-        return "inf" if value > 0 else "-inf"
-    abs_value = abs(value)
-    if abs_value == 0.0:
+    if value == 0.0:
         return "0.0"
-    elif abs_value >= 1e9:
-        for suffix, factor in (("E", 1e18), ("P", 1e15), ("T", 1e12), ("B", 1e9)):
-            if abs_value >= factor:
-                scaled = value / factor
-                abs_scaled = abs(scaled)
-                if abs_scaled > 100:
-                    decimals = 1
-                elif abs_scaled > 10:
-                    decimals = 2
-                elif abs_scaled > 1:
-                    decimals = 3
-                else:
-                    decimals = 4
-                scaled_str = f"{scaled:,.{decimals}f}"
-                return f"{scaled_str}{suffix}"
-
-    if abs_value < 0.0001:
+    elif value < 0.0001:
         return f"{value:.2E}"
-    elif abs_value >= 1000:
+    elif value > 1000:
         return f"{int(value):,d}"
-    elif abs_value > 100:
+    elif value > 100:
         return f"{value:.1f}"
-    elif abs_value > 10:
+    elif value > 10:
         return f"{value:.2f}"
-    elif abs_value > 1:
+    elif value > 1:
         return f"{value:.3f}"
     else:
         return f"{value:.4f}"
-
-
-def format_int(count: int) -> str:
-    """Format a large integer into a more human-readable string."""
-    if count < 1_000:
-        return f"{count}"
-    elif count < 1_000_000:
-        return f"{count / 1_000:.1f}K".replace(".0", "")
-    elif count < 1_000_000_000:
-        return f"{count / 1_000_000:.1f}M".replace(".0", "")
-    elif count < 1_000_000_000_000:
-        return f"{count / 1_000_000_000:.1f}B".replace(".0", "")
-    else:
-        return f"{count / 1_000_000_000_000:.1f}T".replace(".0", "")
 
 
 def format_timedelta(td: timedelta) -> str:
@@ -768,11 +697,6 @@ def log_once(logger: logging.Logger, msg: str, *args, level: int = logging.INFO,
     logger.log(level, msg, *args, **kwargs)
 
 
-@lru_cache(maxsize=128)
-def warn_once(msg: str, *args, **kwargs):
-    warnings.warn(msg, *args, **kwargs)
-
-
 def info_value_of_dtype(dtype: torch.dtype):
     """
     Returns the `finfo` or `iinfo` object of a given PyTorch data type. Does not allow torch.bool.
@@ -792,10 +716,10 @@ def min_value_of_dtype(dtype: torch.dtype):
     return info_value_of_dtype(dtype).min
 
 
-_CUDA_STREAMS: Dict[str, torch.cuda.Stream] = {}
+_CUDA_STREAMS: Dict[int, torch.cuda.Stream] = {}
 
 
-def get_or_init_stream(id: str, priority: int = 0) -> torch.cuda.Stream:
+def get_or_init_stream(id: int = 0, priority: int = 0) -> torch.cuda.Stream:
     global _CUDA_STREAMS
     if id in _CUDA_STREAMS:
         return _CUDA_STREAMS[id]
@@ -803,32 +727,3 @@ def get_or_init_stream(id: str, priority: int = 0) -> torch.cuda.Stream:
         stream = cast(torch.cuda.Stream, torch.cuda.Stream(priority=priority))
         _CUDA_STREAMS[id] = stream
         return stream
-
-
-def record_flops(
-    model: torch.nn.Module,
-    inp: Union[torch.Tensor, tuple],
-    with_backward: bool = False,
-    display: bool = False,
-) -> int:
-    # Source: https://alessiodevoto.github.io/Compute-Flops-with-Pytorch-built-in-flops-counter/
-    istrain = model.training
-    model.eval()
-
-    inp = inp if isinstance(inp, torch.Tensor) else torch.randn(inp)
-
-    # FlopCounterMode has some limitations, for example if activation recomputation is used,
-    # it will count the flops for the recomputation as well. This applies to SDPA kernels as well,
-    # since they use recomputation internally (a la flash attention). Additionally, if custom kernels
-    # are used, it will not count the flops for them unless a custom flop formula is registered.
-    # https://github.com/pytorch/pytorch/issues/123800
-    flop_counter = FlopCounterMode(display=display, depth=999999)
-    with flop_counter:
-        if with_backward:
-            model(inp).sum().backward()
-        else:
-            model(inp)
-    total_flops = flop_counter.get_total_flops()
-    if istrain:
-        model.train()
-    return total_flops

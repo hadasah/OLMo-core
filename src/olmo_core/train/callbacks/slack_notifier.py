@@ -1,18 +1,14 @@
-import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
 
 import requests
 
-from olmo_core.aliases import PathOrStr
 from olmo_core.config import StrEnum
 from olmo_core.distributed.utils import get_rank
 from olmo_core.exceptions import OLMoEnvironmentError
 
 from .callback import Callback
-
-log = logging.getLogger(__name__)
 
 SLACK_WEBHOOK_URL_ENV_VAR = "SLACK_WEBHOOK_URL"
 BEAKER_JOB_ID_ENV_VAR = "BEAKER_JOB_ID"
@@ -41,7 +37,7 @@ class SlackNotificationSetting(StrEnum):
 
     none = "none"
     """
-    Don't send any notifications.
+    Don't send any notifcations.
     """
 
 
@@ -80,20 +76,6 @@ class SlackNotifierCallback(Callback):
 
         if self.notifications == SlackNotificationSetting.all:
             self._post_message("started")
-
-    def post_checkpoint_saved(self, path: PathOrStr):
-        if not self.enabled or get_rank() != 0:
-            return
-
-        if self.notifications == SlackNotificationSetting.all:
-            self._post_message(f"saved a checkpoint to {path}")
-
-    def post_epoch(self):
-        if not self.enabled or get_rank() != 0:
-            return
-
-        if self.notifications == SlackNotificationSetting.all:
-            self._post_message("completed an epoch")
 
     def post_train(self):
         if not self.enabled or get_rank() != 0:
@@ -144,7 +126,4 @@ class SlackNotifierCallback(Callback):
         if BEAKER_JOB_ID_ENV_VAR in os.environ:
             msg = f"{msg}\n*Beaker job:* https://beaker.org/job/{os.environ[BEAKER_JOB_ID_ENV_VAR]}"
 
-        try:
-            requests.post(webhook_url, json={"text": msg})
-        except Exception as e:
-            log.exception(f"Failed to send Slack notification: {e}")
+        requests.post(webhook_url, json={"text": msg})

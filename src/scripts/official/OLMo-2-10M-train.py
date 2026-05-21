@@ -2,8 +2,9 @@
 Official training script for OLMo-2-0325-32B, meant to be launched with torchrun.
 """
 
-import logging
 import sys
+import os
+import logging
 import traceback
 from dataclasses import dataclass
 from typing import List, cast
@@ -264,10 +265,11 @@ def build_config(run_name: str, overrides: List[str]) -> ExperimentConfig:
 def main(run_name: str, overrides: List[str]):
     # Set up logging
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     logger = logging.getLogger(__name__)
-
+    
     try:
         # Log environment info
         logger.info(f"World size: {dist.get_world_size()}")
@@ -278,7 +280,7 @@ def main(run_name: str, overrides: List[str]):
             logger.info(f"CUDA device count: {torch.cuda.device_count()}")
             logger.info(f"Current CUDA device: {torch.cuda.current_device()}")
             logger.info(f"CUDA device name: {torch.cuda.get_device_name()}")
-
+        
         config = build_config(run_name, overrides)
         logger.info("Config built successfully")
 
@@ -294,9 +296,7 @@ def main(run_name: str, overrides: List[str]):
         logger.info("Building dataset...")
         dataset = config.dataset.build()
         logger.info("Building data loader...")
-        data_loader = config.data_loader.build(
-            dataset, dp_process_group=train_module.dp_process_group
-        )
+        data_loader = config.data_loader.build(dataset, dp_process_group=train_module.dp_process_group)
         logger.info("Building trainer...")
         trainer = config.trainer.build(train_module, data_loader)
         logger.info("All components built successfully")
@@ -310,7 +310,7 @@ def main(run_name: str, overrides: List[str]):
         # Train.
         logger.info("Starting training...")
         trainer.fit()
-
+        
     except Exception as e:
         logger.error(f"Error occurred: {str(e)}")
         logger.error("Traceback:")

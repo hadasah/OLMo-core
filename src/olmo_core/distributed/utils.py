@@ -14,7 +14,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, distribute_tensor
 
 from ..exceptions import OLMoEnvironmentError
-from ..utils import log_or_print, move_to_device, set_env_var
+from ..utils import logging_configured, move_to_device, set_env_var
 
 OLMO_SHARED_FS_ENV_VAR = "OLMO_SHARED_FS"
 OLMO_FS_LOCAL_RANK_ENV_VAR = "FS_LOCAL_RANK"
@@ -27,21 +27,11 @@ BEAKER_HOSTNAME_ENV_VAR = "BEAKER_NODE_HOSTNAME"
 log = logging.getLogger(__name__)
 
 
-def init_distributed(
-    backend: str = "nccl",
-    timeout: timedelta = timedelta(minutes=30),
-    shared_filesytem: Optional[bool] = True,
-    **kwargs,
-):
+def init_distributed(backend: str = "nccl", timeout: timedelta = timedelta(minutes=30), **kwargs):
     """
     Initialize the distributed process group with the given backend(s) and check/set the
     relevant environment variables.
     This also calls :func:`torch.cuda.set_device()` for backends that support CUDA.
-
-    If the process group is already initialized, this function will skip the initialization
-    but still set the environment variables and CUDA device. This allows callers to
-    pre-initialize torch.distributed (e.g., without device_id to avoid NCCL hangs when
-    multiple process groups exist) before calling this function.
     """
     # To mitigate the memory issue that collectives using async_op=True hold memory longer
     # than they should such as those in tensor parallelism.
@@ -50,34 +40,27 @@ def init_distributed(
     # Force processes to synchronize at init process group.
     set_env_var("TORCH_DIST_INIT_BARRIER", "1")
 
-    if shared_filesytem:
-        set_env_var(OLMO_SHARED_FS_ENV_VAR, "1")
-
     # Set host-specific env var defaults.
     if _running_in_beaker():
-        node_name = get_node_hostname()
-        log_or_print(log, f"Running in beaker on node '{node_name}'")
         multi_node = int(os.environ.get(OLMO_NUM_NODES_ENV_VAR, "1")) > 1
-
         # See https://beaker-docs.apps.allenai.org/experiments/distributed-training.html
-        if "jupiter" in node_name:
+        if "jupiter" in get_node_hostname():
             set_env_var("NCCL_IB_HCA", "^=mlx5_bond_0")
             if multi_node:
                 # Only for multi-node
                 set_env_var("NCCL_SOCKET_IFNAME", "ib")
-        elif "pluto" in node_name:
+        elif "pluto" in get_node_hostname():
             set_env_var("NCCL_IB_HCA", "^=mlx5_1,mlx5_2")
-        elif "augusta" in node_name:
+        elif "augusta" in get_node_hostname():
             # NOTE: For single-node training we still need all of these settings and we also
             # need host networking enabled so that the ethernet interface names don't change.
             set_env_var("NCCL_CROSS_NIC", "0")
-            #  set_env_var("NCCL_ALGO", "Ring,Tree")
+            set_env_var("NCCL_ALGO", "Ring,Tree")
             set_env_var("NCCL_PROTO", "Simple,LL128")
             set_env_var("NCCL_MIN_NCHANNELS", "4")
             set_env_var("NCCL_P2P_NET_CHUNKSIZE", "524288")
             set_env_var("NCCL_P2P_PCI_CHUNKSIZE", "524288")
             set_env_var("NCCL_P2P_NVL_CHUNKSIZE", "1048576")
-            set_env_var("NCCL_NVLSTREE_MAX_CHUNKSIZE", "131072")
             set_env_var("NCCL_FASTRAK_NUM_FLOWS", "2")
             set_env_var("NCCL_FASTRAK_ENABLE_CONTROL_CHANNEL", "0")
             set_env_var("NCCL_BUFFSIZE", "8388608")
@@ -85,10 +68,8 @@ def init_distributed(
             set_env_var("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
             set_env_var("NCCL_NET_GDR_LEVEL", "PIX")
             set_env_var("NCCL_FASTRAK_ENABLE_HOTPATH_LOGGING", "0")
-            set_env_var(
-                "NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS", str(int(timeout.total_seconds() * 1000))
-            )
-            #  set_env_var("NCCL_NVLS_ENABLE", "0")
+            set_env_var("NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS", "600000")
+            set_env_var("NCCL_NVLS_ENABLE", "0")
             set_env_var("NCCL_USE_SNAP", "1")
             set_env_var("NCCL_FASTRAK_USE_LLCM", "1")
             set_env_var("NCCL_FASTRAK_LLCM_DEVICE_DIRECTORY", "/dev/aperture_devices")
@@ -112,9 +93,7 @@ def init_distributed(
                 "enp6s0,enp7s0,enp13s0,enp14s0,enp134s0,enp135s0,enp141s0,enp142s0",
             )
             set_env_var("NCCL_SOCKET_IFNAME", "enp0s12")
-            set_env_var(  # Add COLL here to log all collective operations. Extremely verbose, don't use for production.
-                "NCCL_DEBUG_SUBSYS", "INIT,NET"
-            )
+            set_env_var("NCCL_DEBUG_SUBSYS", "INIT,NET")
 
     if backend_supports_cuda(backend):
         # Set CUDA device.
@@ -123,27 +102,19 @@ def init_distributed(
         device = torch.device(f"cuda:{int(os.environ[OLMO_LOCAL_RANK_ENV_VAR])}")
         torch.cuda.set_device(device)
 
-    if dist.is_initialized():
-        existing_backend = dist.get_backend()
-        if existing_backend != backend:
-            raise OLMoEnvironmentError(
-                f"Process group already initialized with backend '{existing_backend}', "
-                f"but init_distributed() was called with backend='{backend}'. "
-                f"Either use the same backend or do not pre-initialize the process group."
-            )
-        log_or_print(log, "Process group already initialized, skipping init_process_group")
-    else:
-        log_or_print(log, f"Initializing process group with {timeout=}...")
-        dist.init_process_group(backend, timeout=timeout, **kwargs)
+    dist.init_process_group(backend, timeout=timeout, **kwargs)
 
     validate_env_vars()
 
-    log_or_print(
-        log,
+    msg = (
         f"Global rank {get_rank()} "
         f"= local rank {get_local_rank()} "
-        f"= file system local rank {get_fs_local_rank()}",
+        f"= file system local rank {get_fs_local_rank()}"
     )
+    if logging_configured():
+        log.warning(msg)
+    else:
+        print(msg)
 
 
 def validate_env_vars():
@@ -320,11 +291,7 @@ def synchronize_value(
     """
     if dist.is_available() and dist.is_initialized():
         is_tensor = isinstance(value, torch.Tensor)
-        value_tensor = (
-            move_to_device(value, device)
-            if is_tensor
-            else move_to_device(torch.tensor(value), device)
-        )  # type: ignore
+        value_tensor = move_to_device(value, device) if is_tensor else move_to_device(torch.tensor(value), device)  # type: ignore
         dist.broadcast(value_tensor, src, group=group)
         return value_tensor if is_tensor else value_tensor.item()  # type: ignore
     else:
@@ -348,11 +315,7 @@ def all_reduce_value(
     """
     if dist.is_available() and dist.is_initialized():
         is_tensor = isinstance(value, torch.Tensor)
-        value_tensor = (
-            move_to_device(value, device)
-            if is_tensor
-            else move_to_device(torch.tensor(value), device)
-        )  # type: ignore
+        value_tensor = move_to_device(value, device) if is_tensor else move_to_device(torch.tensor(value), device)  # type: ignore
         dist.all_reduce(value_tensor, op=op, group=group)
         return value_tensor if is_tensor else value_tensor.item()  # type: ignore
     else:
@@ -362,16 +325,17 @@ def all_reduce_value(
 T = TypeVar("T")
 
 
-def broadcast_object(obj: T, src: int = 0, group: Optional[dist.ProcessGroup] = None) -> T:
+def scatter_object(obj: T, src: int = 0, group: Optional[dist.ProcessGroup] = None) -> T:
     """
-    Broadcast an object using pickle to all ranks in the process group.
+    Scatter an object using pickle to all ranks in the process group.
     """
     if not is_distributed():
         return obj
 
-    object_list = [obj]
-    dist.broadcast_object_list(object_list, src=src, group=group)
-    return object_list[0]
+    output_list: List[T] = [obj]
+    input_list = [obj] * get_world_size(group) if get_rank(group) == src else None
+    dist.scatter_object_list(output_list, input_list, src=src, group=group)
+    return output_list[0]
 
 
 def all_gather(

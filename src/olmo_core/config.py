@@ -1,39 +1,24 @@
-import copy
-import dataclasses
-import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from enum import Enum
 from typing import (
     Any,
     Callable,
-    ClassVar,
-    Collection,
     Dict,
     Generator,
     List,
     Optional,
-    Sequence,
     Tuple,
     Type,
     TypeVar,
+    cast,
 )
 
 import torch
-import yaml
-from cached_path import cached_path
-from dataclass_extensions import Registrable, decode
+from omegaconf import OmegaConf as om
+from omegaconf.errors import OmegaConfBaseException
 from typing_extensions import Self
 
-from .aliases import PathOrStr
 from .exceptions import OLMoConfigurationError
-
-__all__ = [
-    "Config",
-    "DType",
-    "StrEnum",
-    "UNSET",
-    "Registrable",  # re-exported for convenience
-]
 
 
 class StrEnum(str, Enum):
@@ -76,19 +61,12 @@ class Config:
     :meth:`as_config_dict()`.
     """
 
-    _IGNORE_FIELDS: ClassVar[Tuple[str, ...]] = ()
-    """
-    Fields to ignore when loading from config (for backwards compatibility).
-    """
-
     def as_dict(
         self,
         *,
         exclude_none: bool = False,
         exclude_private_fields: bool = False,
-        exclude: Optional[Collection[str]] = None,
         include_class_name: bool = False,
-        include_registered_name: bool = False,
         json_safe: bool = False,
         recurse: bool = True,
     ) -> Dict[str, Any]:
@@ -97,20 +75,13 @@ class Config:
 
         :param exclude_none: Don't include values that are ``None``.
         :param exclude_private_fields: Don't include private fields.
-        :param exclude: A list of field names to exclude.
         :param include_class_name: Include a field for the name of the class.
-        :param include_registered_name: If the config is :class:`Registrable`, include the
-            registered name under the key "type".
         :param json_safe: Output only JSON-safe types.
         :param recurse: Recurse into fields that are also configs/dataclasses.
         """
 
-        exclude_set = set(exclude) if exclude is not None else set()
-
         def iter_fields(d) -> Generator[Tuple[str, Any], None, None]:
-            for field in dataclasses.fields(d):
-                if field.name in exclude_set or not field.init:
-                    continue
+            for field in fields(d):
                 value = getattr(d, field.name)
                 if exclude_none and value is None:
                     continue
@@ -120,19 +91,13 @@ class Config:
                     yield (field.name, value)
 
         def as_dict(d: Any, recurse: bool = True) -> Any:
-            if dataclasses.is_dataclass(d):
+            if is_dataclass(d):
                 if recurse:
                     out = {k: as_dict(v) for k, v in iter_fields(d)}
                 else:
                     out = {k: v for k, v in iter_fields(d)}
                 if include_class_name:
                     out[self.CLASS_NAME_FIELD] = f"{d.__class__.__module__}.{d.__class__.__name__}"
-                if include_registered_name and isinstance(d, Registrable):
-                    try:
-                        registered_name = d.get_registered_name()
-                        out["type"] = registered_name
-                    except ValueError:
-                        pass
                 return out
             elif isinstance(d, dict):
                 return {k: as_dict(v) for k, v in d.items()}
@@ -159,7 +124,6 @@ class Config:
             exclude_none=True,
             exclude_private_fields=True,
             include_class_name=True,
-            include_registered_name=True,
             json_safe=True,
             recurse=True,
         )
@@ -175,8 +139,8 @@ class Config:
             if isinstance(d, Config):
                 func(d)
 
-            if dataclasses.is_dataclass(d):
-                for field in dataclasses.fields(d):
+            if is_dataclass(d):
+                for field in fields(d):
                     value = getattr(d, field.name)
                     apply(value)
             elif isinstance(d, dict):
@@ -203,38 +167,38 @@ class Config:
             and strip that prefix (including the subsequent ".") before applying the overrides.
         :param strict: Parse the dotlist strictly.
         """
-        overrides = _clean_opts(dotlist)
-        if prefix is not None:
-            overrides = [
-                (k.replace(f"{prefix}.", "", 1), v)
-                for k, v in overrides
-                if k.startswith(f"{prefix}.")
-            ]
-
-        if not strict:
-            field_names = set(f.name for f in dataclasses.fields(self))
-            overrides = [
-                (k, v)
-                for k, v in overrides
-                if any([k == name or k.startswith(f"{name}.") for name in field_names])
-            ]
-
-        merged_data = self.as_dict(include_class_name=True, include_registered_name=True)
-        for key, value in overrides:
-            _set_nested(merged_data, key, value)
-        return self.from_dict(merged_data)
+        try:
+            dotlist = _clean_opts(dotlist)
+            if prefix is not None:
+                dotlist = [
+                    o.replace(f"{prefix}.", "", 1) for o in dotlist if o.startswith(f"{prefix}.")
+                ]
+            if not strict:
+                field_names = set(f.name for f in fields(self))
+                dotlist = [
+                    o
+                    for o in dotlist
+                    if any(
+                        [
+                            o.startswith(f"{name}=") or o.startswith(f"{name}.")
+                            for name in field_names
+                        ]
+                    )
+                ]
+            merge_fields = om.from_dotlist(dotlist)
+            print(merge_fields)
+            merged = om.merge(self, merge_fields)
+            out = cast(Self, om.to_object(merged))
+            out.apply(lambda c: c.validate())
+            return out
+        except OmegaConfBaseException as e:
+            raise OLMoConfigurationError(str(e))
 
     def replace(self, **changes) -> Self:
         """
         Creates a new object of the same type, replacing fields with values from ``changes``.
         """
-        return dataclasses.replace(self, **changes)
-
-    def copy(self, deep: bool = True) -> Self:
-        """
-        Creates a new object of the same type, with the same values.
-        """
-        return copy.deepcopy(self) if deep else copy.copy(self)
+        return replace(self, **changes)
 
     @classmethod
     def from_dict(cls: Type[C], data: Dict[str, Any], overrides: Optional[List[str]] = None) -> C:
@@ -251,115 +215,59 @@ class Config:
                 *modules, cls_name = cls_name.split(".")
                 module_name = ".".join(modules)
                 module = import_module(module_name)
-                return getattr(module, cls_name, None)
+                return getattr(module, cls_name)
             else:
                 return None
 
-        def decode_data(d: Any, prefix: str) -> Any:
+        def clean_data(d: Any, prefix: str) -> Any:
             if isinstance(d, dict):
-                # HACK: Try to convert string keys to int if they look like integers. Handles cases
-                # where integer keys were serialized as strings (eg "block_overrides")
-                d = {(int(k) if isinstance(k, str) and k.isdigit() else k): v for k, v in d.items()}
-
                 new_dict = {
-                    k: decode_data(v, f"{prefix}.{k}" if prefix else str(k))
+                    k: clean_data(v, f"{prefix}.{k}" if prefix else k)
                     for k, v in d.items()
                     if k != cls.CLASS_NAME_FIELD
                 }
                 if (cls_name := d.get(cls.CLASS_NAME_FIELD)) is not None and (
                     cls_o := resolve_cls(cls_name)
                 ) is not None:
-                    # Remove ignored fields if the class defines any
-                    if (ignore_fields := getattr(cls_o, "_IGNORE_FIELDS", None)) is not None:
-                        new_dict = {k: v for k, v in new_dict.items() if k not in ignore_fields}
-
-                    # Remove the "type" field since the class is already resolved via _CLASS_.
-                    # This avoids a registry lookup on the resolved subclass, whose own
-                    # _registry may be empty (registrations live on the parent class).
-                    new_dict.pop("type", None)
-
+                    schema = om.structured(cls_o)
                     try:
-                        return decode(cls_o, new_dict)  # type: ignore[arg-type]
-                    except Exception as e:
+                        return om.to_object(om.merge(schema, new_dict))
+                    except OmegaConfBaseException as e:
                         if prefix:
-                            msg = f"Failed to construct '{prefix}' in config: {e}"
+                            msg = f"Failed to construct '{prefix}' in config"
                         else:
-                            msg = f"Error building config: {e}"
+                            msg = "Error building config"
                         raise OLMoConfigurationError(msg) from e
                 return new_dict
             elif isinstance(d, (list, tuple, set)):
                 return d.__class__(
-                    (decode_data(x, f"{prefix}.{i}" if prefix else str(i)) for i, x in enumerate(d))
+                    (clean_data(x, f"{prefix}.{i}" if prefix else str(i)) for i, x in enumerate(d))
                 )
             else:
                 return d
 
-        if overrides:
-            for key, value in _clean_opts(overrides):
-                _set_nested(data, key, value)
+        data = clean_data(data, "")
 
-        decoded = decode_data(data, "")
-        if isinstance(decoded, cls):
-            return decoded
-        else:
-            return decode(cls, decoded)
-
-    @classmethod
-    def from_file(cls: Type[C], path: PathOrStr, overrides: Optional[List[str]] = None) -> C:
-        path_str = str(path)
-        if path_str.endswith((".yml", ".yaml")):
-            return cls.from_yaml(path, overrides=overrides)
-        elif path_str.endswith(".json"):
-            return cls.from_json(path, overrides=overrides)
-        else:
-            raise OLMoConfigurationError(f"Unsupported config file type: {path}")
-
-    @classmethod
-    def from_json(cls: Type[C], path: PathOrStr, overrides: Optional[List[str]] = None) -> C:
-        with cached_path(path).open() as f:
-            config_dict = json.load(f)
-        return cls.from_dict(config_dict, overrides=overrides)
-
-    @classmethod
-    def from_yaml(cls: Type[C], path: PathOrStr, overrides: Optional[List[str]] = None) -> C:
-        with cached_path(path).open() as f:
-            config_dict = yaml.safe_load(f)
-        return cls.from_dict(config_dict, overrides=overrides)
+        try:
+            schema = om.structured(cls)
+            conf = om.merge(schema, data)
+            if overrides:
+                conf = om.merge(conf, om.from_dotlist(_clean_opts(overrides)))
+            return cast(C, om.to_object(conf))
+        except OmegaConfBaseException as e:
+            raise OLMoConfigurationError(str(e))
 
 
-def _set_nested(data: Any, key: str, value: Any):
-    if "." in key:
-        key, child_keys = key.split(".", 1)
-        if isinstance(data, dict):
-            _set_nested(data[key], child_keys, value)
-        elif isinstance(data, list):
-            _set_nested(data[int(key)], child_keys, value)
-        else:
-            raise ValueError(data)
-    else:
-        if isinstance(data, dict):
-            data[key] = value
-        elif isinstance(data, list):
-            data[int(key)] = value
-        else:
-            raise ValueError(f"Can't set value '{value}' at key '{key}' for object {data}")
-
-
-def _clean_opts(opts: Sequence[str]) -> list[tuple[str, Any]]:
+def _clean_opts(opts: List[str]) -> List[str]:
     return [_clean_opt(s) for s in opts]
 
 
-def _clean_opt(arg: str) -> tuple[str, Any]:
+def _clean_opt(arg: str) -> str:
     if "=" not in arg:
-        name, val = arg, "true"
-    else:
-        name, val = arg.split("=", 1)
-    name = name.strip(" -").replace("-", "_")
-    if not val or val.isspace():
-        val = ""
-    else:
-        val = yaml.safe_load(val)
-    return (name, val)
+        arg = f"{arg}=True"
+    name, val = arg.split("=", 1)
+    name = name.strip("-").replace("-", "_")
+    return f"{name}={val}"
 
 
 class DType(StrEnum):
@@ -369,9 +277,6 @@ class DType(StrEnum):
 
     float32 = "float32"
     bfloat16 = "bfloat16"
-    float16 = "float16"
-    float8_e4m3fn = "float8_e4m3fn"  # note: other e4m3 variants are supported in torch
-    float8_e5m2 = "float8_e5m2"
 
     @classmethod
     def from_pt(cls, dtype: torch.dtype) -> "DType":
@@ -379,27 +284,8 @@ class DType(StrEnum):
             return DType.float32
         elif dtype == torch.bfloat16:
             return DType.bfloat16
-        elif dtype == torch.float16:
-            return DType.float16
-        elif dtype == torch.float8_e4m3fn:
-            return DType.float8_e4m3fn
-        elif dtype == torch.float8_e5m2:
-            return DType.float8_e5m2
         else:
             raise NotImplementedError(dtype)
 
     def as_pt(self) -> torch.dtype:
         return getattr(torch, self)
-
-
-class _Unset:
-    """
-    Sentinel value indicating that a value was not explicitly provided.
-    Used internally to detect when a value should be skipped.
-    """
-
-    def __repr__(self) -> str:
-        return "<UNSET>"
-
-
-UNSET: Any = _Unset()

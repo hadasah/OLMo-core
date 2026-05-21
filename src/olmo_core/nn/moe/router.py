@@ -12,11 +12,10 @@ from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 from torch.distributed.tensor.parallel import PrepareModuleInput, parallelize_module
 
 import olmo_core.ops.moe as ops
-from olmo_core.config import DType, StrEnum
+from olmo_core.config import Config, DType, StrEnum
 from olmo_core.distributed.utils import (
     _HiddenTensor,
     distribute_like,
-    get_full_tensor,
     get_local_tensor,
     hide_from_torch,
     is_distributed,
@@ -25,7 +24,6 @@ from olmo_core.distributed.utils import (
 from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.utils import get_default_device
 
-from ..config import ModuleConfig
 from .loss import MoELoadBalancingLossGranularity, load_balancing_loss, router_z_loss
 
 if TYPE_CHECKING:
@@ -78,7 +76,7 @@ class MoERouterGatingFunction(StrEnum):
 
 
 @dataclass
-class MoERouterConfig(ModuleConfig):
+class MoERouterConfig(Config):
     """
     A configuration class for easily building any of the different MoE router modules.
     """
@@ -216,8 +214,6 @@ class MoERouter(nn.Module):
         self._score_bias_batch_size_per_expert: Optional[_HiddenTensor] = None
         self._load_balancing_loss: Optional[_HiddenTensor] = None
         self._z_loss: Optional[_HiddenTensor] = None
-        self._routing_entropy: Optional[_HiddenTensor] = None
-        self._routing_entropy_count: int = 0
 
     def reset_parameters(self):
         self._batch_size_per_expert = hide_from_torch(
@@ -237,9 +233,6 @@ class MoERouter(nn.Module):
 
         if self.z_loss_weight is not None:
             self._z_loss = hide_from_torch(torch.zeros([], device=self.device))
-
-        self._routing_entropy = hide_from_torch(torch.zeros([], device=self.device))
-        self._routing_entropy_count = 0
 
     @property
     def device(self) -> torch.device:
@@ -361,6 +354,7 @@ class MoERouter(nn.Module):
         if self.uniform_expert_assignment:
             expert_indices = _uniform_expert_assignment(expert_indices, self.num_experts)
             expert_weights = scores.gather(-1, expert_indices)
+            expert_weights = torch.ones_like(expert_weights)
 
         return expert_weights, expert_indices
 
@@ -406,18 +400,6 @@ class MoERouter(nn.Module):
             out[f"{prefix}router Z loss"] = (self.z_loss_weight * self.z_loss, ReduceType.mean)
             out[f"{prefix}router Z loss unscaled"] = (self.z_loss.clone(), ReduceType.mean)
 
-        # Routing entropy (lower = more ossified/concentrated routing).
-        if self._routing_entropy is not None and self._routing_entropy_count > 0:
-            avg_entropy = unhide_from_torch(self._routing_entropy) / self._routing_entropy_count
-            out[f"{prefix}routing entropy"] = (avg_entropy, ReduceType.mean)
-
-        # Router weight magnitude (higher = more rigid/extreme weights).
-        if hasattr(self, "weight"):
-            weight = get_full_tensor(self.weight).view(self.num_experts, self.d_model).float()
-            weight_l2_per_expert = weight.norm(dim=-1)  # (num_experts,)
-            out[f"{prefix}router weight L2 mean"] = (weight_l2_per_expert.mean(), ReduceType.mean)
-            out[f"{prefix}router weight L2 max"] = (weight_l2_per_expert.max(), ReduceType.max)
-
         if reset:
             self.reset_metrics()
 
@@ -430,9 +412,6 @@ class MoERouter(nn.Module):
             lb_loss.zero_()
         if (z_loss := self.z_loss) is not None:
             z_loss.zero_()
-        if self._routing_entropy is not None:
-            unhide_from_torch(self._routing_entropy).zero_()
-        self._routing_entropy_count = 0
 
     def forward(
         self,
@@ -458,7 +437,7 @@ class MoERouter(nn.Module):
         if self.gating_function == MoERouterGatingFunction.softmax:
             scores = logits.softmax(dim=-1)
         elif self.gating_function == MoERouterGatingFunction.sigmoid:
-            scores = F.sigmoid(logits) + 1e-7
+            scores = F.sigmoid(logits)
         else:
             raise NotImplementedError(self.gating_function)
 
@@ -483,13 +462,6 @@ class MoERouter(nn.Module):
             batched_batch_size_per_expert = batched_batch_size_per_expert.sum(dim=1)
             # shape: (num_experts,)
             batch_size_per_expert = batched_batch_size_per_expert.sum(dim=0)
-
-            # Track routing entropy for analysis.
-            routing_probs = scores.detach()  # (batch_size, seq_len, num_experts)
-            # Clamp to avoid log(0)
-            log_probs = torch.log(routing_probs.clamp(min=1e-10))
-            token_entropy = -(routing_probs * log_probs).sum(dim=-1)  # (batch_size, seq_len)
-            mean_entropy = token_entropy.mean()
 
         # Maybe compute auxiliary losses and accumulate metrics.
         aux_loss: Optional[torch.Tensor] = None
@@ -536,20 +508,6 @@ class MoERouter(nn.Module):
             if self.bias_gamma is not None:
                 assert self.score_bias_batch_size_per_expert is not None
                 self.score_bias_batch_size_per_expert += batch_size_per_expert
-
-            # Initialize/resync the routing-entropy accumulator on the input device.
-            # `_routing_entropy` is a hidden tensor (not a registered buffer), so
-            # `.to(device)` on the module doesn't move it; if the module was built
-            # on CPU and then moved to MPS/CUDA, the accumulator stays on CPU and
-            # `.add_(mean_entropy)` would crash with a device mismatch.
-            if self._routing_entropy is None:
-                self._routing_entropy = hide_from_torch(torch.zeros([], device=mean_entropy.device))
-            elif unhide_from_torch(self._routing_entropy).device != mean_entropy.device:
-                self._routing_entropy = hide_from_torch(
-                    unhide_from_torch(self._routing_entropy).to(mean_entropy.device)
-                )
-            unhide_from_torch(self._routing_entropy).add_(mean_entropy)
-            self._routing_entropy_count += 1
 
         return expert_weights, expert_indices, batch_size_per_expert, aux_loss
 
@@ -603,9 +561,7 @@ class MoELinearRouter(MoERouter):
         return f"in_features={self.d_model}, num_experts={self.num_experts}"
 
     def get_expert_logits(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(
-            x.float(), get_local_tensor(self.weight).view(self.num_experts, self.d_model).float()
-        )
+        return F.linear(x, get_local_tensor(self.weight).view(self.num_experts, self.d_model))
 
     def apply_tp(self, tp_mesh: DeviceMesh, float8_enabled: bool = False):
         super().apply_tp(tp_mesh, float8_enabled=float8_enabled)

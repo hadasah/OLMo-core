@@ -24,14 +24,8 @@ from olmo_core.nn.moe import (
     MoERouterConfig,
     MoEType,
 )
-from olmo_core.testing import (
-    has_grouped_gemm,
-    requires_gpu,
-    requires_grouped_gemm,
-    requires_multi_gpu,
-    run_distributed_test,
-)
-from olmo_core.utils import get_default_device, record_flops, seed_all
+from olmo_core.testing import requires_gpu, requires_multi_gpu, run_distributed_test
+from olmo_core.utils import get_default_device, seed_all
 
 
 @requires_gpu
@@ -44,9 +38,9 @@ def test_moe(moe_type: MoEType, shared: bool, dtype: torch.dtype):
     d_model = 128
     config = MoEConfig(
         name=moe_type,
-        num_experts_list=[4],
-        hidden_sizes_list=[256],
-        routers_list=[MoERouterConfig(top_k=1)],
+        num_experts=4,
+        hidden_size=256,
+        router=MoERouterConfig(top_k=1),
         shared_mlp=None if not shared else FeedForwardConfig(hidden_size=256),
         z_loss_weight=0.1,
         dtype=DType.from_pt(dtype),
@@ -182,16 +176,14 @@ def test_moe_with_expert_parallelism(
     d_model = 8
     config = MoEConfig(
         name=moe_type,
-        num_experts_list=[4],
-        hidden_sizes_list=[256],
-        routers_list=[
-            MoERouterConfig(
-                top_k=1,
-                uniform_expert_assignment=moe_type
-                == MoEType.default,  # EP results may be different otherwise
-                dtype=DType.from_pt(dtype),
-            )
-        ],
+        num_experts=4,
+        hidden_size=256,
+        router=MoERouterConfig(
+            top_k=1,
+            uniform_expert_assignment=moe_type
+            == MoEType.default,  # EP results may be different otherwise
+            dtype=DType.from_pt(dtype),
+        ),
         lb_loss_granularity=lb_granularity,
         z_loss_weight=0.1,
         dtype=DType.from_pt(dtype),
@@ -235,46 +227,4 @@ def test_moe_with_expert_parallelism(
             lb_loss.detach().cpu(),
             z_loss.detach().cpu(),
         ),
-    )
-
-
-@requires_gpu
-@requires_grouped_gemm
-@pytest.mark.parametrize("shared", [False, True], ids=["no_shared_expert", "with_shared_expert"])
-def test_moe_num_flops_per_token(shared: bool):
-    if has_grouped_gemm:
-        pytest.skip("Pytorch flop recording is not supported for custom kernel grouped_gemm")
-
-    seed_all(0)
-
-    d_model = 128
-    hidden_size = 256
-    seq_len = 32
-    batch_size = 1
-
-    config = MoEConfig(
-        #  Idealized FLOPs differ too much from actual FLOPs for default MoE implementation
-        # (due to padding experts to a fixed capacity). So we use the dropless MoE implementation.
-        name=MoEType.dropless,
-        num_experts_list=[16],
-        hidden_sizes_list=[hidden_size],
-        routers_list=[MoERouterConfig(top_k=2)],
-        shared_mlp=None if not shared else FeedForwardConfig(hidden_size=hidden_size),
-    )
-    moe = config.build(d_model=d_model, init_device="cuda")
-
-    x = torch.randn(batch_size, seq_len, d_model, device="cuda", requires_grad=True)
-
-    actual_flops = record_flops(moe, x, with_backward=True)
-    actual_flops_per_token = actual_flops // seq_len
-
-    estimated_flops_per_token = moe.num_flops_per_token(seq_len)
-
-    tolerance = 0.02
-    relative_error = (
-        abs(estimated_flops_per_token - actual_flops_per_token) / actual_flops_per_token
-    )
-    assert relative_error < tolerance, (
-        f"Estimated FLOPs ({estimated_flops_per_token}) differs too much from actual ({actual_flops_per_token}), "
-        f"{relative_error=:.2%}, {tolerance=:.2%}"
     )

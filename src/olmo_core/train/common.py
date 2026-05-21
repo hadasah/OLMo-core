@@ -6,7 +6,7 @@ import torch
 
 from ..config import StrEnum
 from ..data.utils import get_labels
-from ..utils import format_float, format_int, format_timedelta
+from ..utils import format_timedelta
 
 TRAIN_CE_LOSS_METRIC = "train/CE loss"
 TRAIN_PPL_METRIC = "train/PPL"
@@ -63,32 +63,6 @@ class Duration:
         Define a duration from a number of tokens.
         """
         return cls(value=tokens, unit=DurationUnit.tokens)
-
-    @classmethod
-    def chinchilla_tokens(
-        cls, multiple: float, *, model_params: int, _tok_per_param: int = 20
-    ) -> "Duration":
-        """
-        Define a duration based on a multiple of the Chinchilla-optimal number of tokens.
-
-        The rule of thumb for Chinchilla compute optimality is 20 tokens-per-parameter
-        for decoder-only natural language models trained with AdamW on dataset mixtures
-        similar to the Pile.
-
-        Chinchilla optimality refers to training-time compute only, and does not account for
-        inference-time compute. In practice, models are often trained with more tokens than
-        the Chinchilla optimal value ("overtrained") to improve inference-time performance.
-
-        Chinchilla: https://arxiv.org/abs/2203.15556
-        Chinchilla replication: https://arxiv.org/abs/2404.10102
-
-        :param multiple: The Chinchilla multiplier. 1.0 is the Chinchilla optimal value.
-            Values less than 1.0 will undertrain relative to Chinchilla, and values greater
-            than 1.0 will overtrain relative to Chinchilla.
-        :param model_params: The number of *active, non-embedding* parameters in the target model.
-        """
-        tokens = int(_tok_per_param * model_params * multiple)
-        return Duration.tokens(tokens)
 
     def due(self, *, step: int, tokens: int, epoch: int) -> bool:
         """
@@ -219,11 +193,7 @@ class TrainingProgress:
     """
     The current training step.
     """
-    current_tokens: Optional[int] = None
-    """
-    The current number of tokens processed during training.
-    """
-    total_steps: Optional[int] = None
+    total_steps: int
     """
     The step that training will stop at.
     """
@@ -231,50 +201,12 @@ class TrainingProgress:
     """
     Estimated time remaining.
     """
-    bps: Optional[float] = None
-    """
-    The average training speed in batches per second.
-    """
-    tps: Optional[float] = None
-    """
-    The average training speed in tokens per second per device.
-    """
-    mfu: Optional[float] = None
-    """
-    The average model flops utilization (MFU) percentage.
-    """
 
     def __str__(self) -> str:
-        if self.total_steps is not None:
-            progress_perc = min(100, int(100 * self.current_step / self.total_steps))
-            progress_str = (
-                f"{progress_perc}% complete, step {self.current_step:,d}/{self.total_steps:,d}"
-            )
-        else:
-            progress_str = f"step {self.current_step:,d}/???"
-
-        if self.current_tokens is not None:
-            progress_str += f", {format_int(self.current_tokens)} tokens"
-
+        progress_perc = min(100, int(100 * self.current_step / self.total_steps))
+        progress_str = (
+            f"{progress_perc}% complete (step {self.current_step:,d}/{self.total_steps:,d})"
+        )
         if self.time_remaining is not None:
             progress_str += f", eta {format_timedelta(self.time_remaining)}"
-
-        if self.tps is not None:
-            progress_str += f", {format_float(self.tps)} TPS"
-        elif self.bps is not None:
-            progress_str += f", {format_float(self.bps)} BPS"
-
-        if self.mfu is not None:
-            progress_str += f", {format_float(self.mfu)}% MFU"
-
         return progress_str
-
-
-@dataclass
-class StepSkipRange:
-    """Defines a range of steps to skip during training."""
-
-    start: int
-    """The first step to skip (steps start at 1, not 0)."""
-    stop: int
-    """The endpoint of the range (exclusive)."""

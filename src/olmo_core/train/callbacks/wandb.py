@@ -1,7 +1,9 @@
 import logging
 import os
+import warnings
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from pathlib import Path
+from typing import ClassVar, TYPE_CHECKING, Any, Dict, List, Optional
 
 from olmo_core.distributed.utils import get_rank
 from olmo_core.exceptions import OLMoEnvironmentError
@@ -29,7 +31,7 @@ class WandBCallback(Callback):
         This callback logs metrics from every single step to W&B, regardless of the value
         of :data:`Trainer.metrics_collect_interval <olmo_core.train.Trainer.metrics_collect_interval>`.
     """
-
+    priority: ClassVar[int] = -3
     enabled: bool = True
     """
     Set to false to disable this callback.
@@ -95,7 +97,6 @@ class WandBCallback(Callback):
 
     _wandb = None
     _run_path = None
-    _finalized: bool = False
 
     @property
     def wandb(self):
@@ -113,26 +114,13 @@ class WandBCallback(Callback):
     def run_path(self):
         return self._run_path
 
-    @property
-    def finalized(self) -> bool:
-        return self._finalized
-
-    def finalize(self, exit_code: int = 0):
-        if not self.finalized:
-            if exit_code > 0:
-                log.warning("Finalizing failed W&B run...")
-            else:
-                log.info("Finalizing successful W&B run...")
-            self.wandb.finish(exit_code=exit_code, quiet=True)
-            self._finalized = True
-
     def pre_train(self):
         if self.enabled and get_rank() == 0:
+            self.wandb
             if WANDB_API_KEY_ENV_VAR not in os.environ:
                 raise OLMoEnvironmentError(f"missing env var '{WANDB_API_KEY_ENV_VAR}'")
 
-            self.wandb
-            wandb_dir = self.trainer.work_dir / "wandb"
+            wandb_dir = Path(self.trainer.save_folder) / "wandb"
             wandb_dir.mkdir(parents=True, exist_ok=True)
             self.wandb.init(
                 dir=wandb_dir,
@@ -147,28 +135,37 @@ class WandBCallback(Callback):
                 config=self.config,
             )
             self._run_path = self.run.path  # type: ignore
+            # if self.trainer.eval_on_finish:
+            #     self.trainer.wandb.define_metric("final_eval/*", step_metric="inference/inference_step")
+
 
     def log_metrics(self, step: int, metrics: Dict[str, float]):
         if self.enabled and get_rank() == 0:
+            # final_metrics = {k: metrics[k] for k in metrics if 'final_eval/' in k}
+            # metrics = {k: metrics[k] for k in metrics if 'final_eval/' not in k}
+            # self.wandb.log(metrics, step=step)
+            
+            if self.trainer.eval_only:
+                step += 2
             self.wandb.log(metrics, step=step)
+
+            # self.wandb.log(metrics, step=step)
 
     def post_step(self):
         cancel_check_interval = self.cancel_check_interval or self.trainer.cancel_check_interval
         if self.enabled and get_rank() == 0 and self.step % cancel_check_interval == 0:
-            self.trainer.run_bookkeeping_op(
-                self.check_if_canceled,
-                allow_multiple=False,
-                distributed=False,
-            )
+            self.trainer.thread_pool.submit(self.check_if_canceled)
+
+    def close(self):
+        if self.enabled and get_rank() == 0 and self.run is not None:
+            log.info("Finalizing successful W&B run...")
+            self.wandb.finish(exit_code=0, quiet=True)
 
     def on_error(self, exc: BaseException):
         del exc
         if self.enabled and get_rank() == 0 and self.run is not None:
-            self.finalize(exit_code=1)
-
-    def close(self):
-        if self.enabled and get_rank() == 0 and self.run is not None:
-            self.finalize()
+            log.warning("Finalizing failed W&B run...")
+            self.wandb.finish(exit_code=1, quiet=True)
 
     def check_if_canceled(self):
         if self.enabled and self.cancel_tags:
@@ -178,11 +175,11 @@ class WandBCallback(Callback):
             try:
                 # NOTE: need to re-initialize the API client every time, otherwise
                 # I guess it return cached run data.
-                api = self.wandb.Api(api_key=os.environ[WANDB_API_KEY_ENV_VAR], timeout=5)
+                api = self.wandb.Api(api_key=os.environ[WANDB_API_KEY_ENV_VAR])
                 run = api.run(self.run_path)  # type: ignore
                 for tag in run.tags or []:
                     if tag.lower() in self.cancel_tags:
                         self.trainer.cancel_run("canceled from W&B tag")
                         return
-            except (RequestException, CommError, TimeoutError):
+            except (RequestException, CommError):
                 log.warning("Failed to communicate with W&B API")

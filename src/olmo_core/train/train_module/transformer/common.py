@@ -36,8 +36,8 @@ def parallelize_model(
     *,
     world_mesh: Optional[DeviceMesh],
     device: torch.device,
-    max_sequence_length: Optional[int] = None,
-    rank_microbatch_size: Optional[int] = None,
+    max_sequence_length: int,
+    rank_microbatch_size: int,
     compile_model: bool = False,
     float8_config: Optional[Float8Config] = None,
     dp_config: Optional[TransformerDataParallelConfig] = None,
@@ -67,7 +67,7 @@ def parallelize_model(
         assert world_mesh is not None
         cp_mesh = get_cp_mesh(world_mesh)
         for m in model_parts:
-            m.apply_cp(cp_mesh, ring=cp_config.ring, uly=cp_config.uly)
+            m.apply_cp(cp_mesh, load_balancer=cp_config.load_balancer)
         log.info(f"Applied context parallelism to the model with {get_device_mesh_info(cp_mesh)}")
 
     # Maybe apply tensor.
@@ -98,7 +98,6 @@ def parallelize_model(
                 ac_config.mode,
                 block_interval=ac_config.block_interval,
                 modules=ac_config.modules,
-                activation_memory_budget=ac_config.activation_memory_budget,
             )
         log.info(f"Applied '{ac_config.mode}' activation checkpointing to the model")
 
@@ -115,8 +114,10 @@ def parallelize_model(
     if dp_config is not None:
         assert world_mesh is not None
         dp_mesh = get_dp_model_mesh(world_mesh)
-        param_dtype = dp_config.param_dtype.as_pt() if dp_config.param_dtype is not None else None
         if dp_config.name in (DataParallelType.fsdp, DataParallelType.hsdp):
+            param_dtype = (
+                dp_config.param_dtype.as_pt() if dp_config.param_dtype is not None else None
+            )
             for m in model_parts:
                 if m.is_moe:
                     cast(MoETransformer, m).prepare_experts_for_fsdp(
@@ -138,7 +139,7 @@ def parallelize_model(
             for m in model_parts:
                 if m.is_moe:
                     cast(MoETransformer, m).prepare_experts_for_ddp(world_mesh)
-                m.apply_ddp(dp_mesh=dp_mesh, compile_enabled=compile_model, param_dtype=param_dtype)
+                m.apply_ddp(dp_mesh=dp_mesh, compile_enabled=compile_model)
             log.info(f"Applied DDP to the model with {get_device_mesh_info(dp_mesh)}")
         else:
             raise NotImplementedError(dp_config.name)
@@ -150,7 +151,7 @@ def parallelize_model(
             max_seq_len=max_sequence_length,
             max_local_microbatch_size=rank_microbatch_size,
             device=device,
-            world_mesh=world_mesh,
+            pp_mesh=pp_mesh,
         )
 
     return model

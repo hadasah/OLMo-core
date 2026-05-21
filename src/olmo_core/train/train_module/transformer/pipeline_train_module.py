@@ -2,7 +2,7 @@ import contextlib
 import logging
 import math
 from dataclasses import replace
-from functools import cached_property, lru_cache, partial
+from functools import cached_property, partial
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union, cast
 
 import torch
@@ -41,13 +41,7 @@ from olmo_core.nn.lm_head import LMOutputWithLoss
 from olmo_core.nn.transformer import Transformer
 from olmo_core.optim import OptimConfig, SkipStepOptimizer
 from olmo_core.optim.scheduler import Scheduler
-from olmo_core.utils import (
-    gc_cuda,
-    get_default_device,
-    log_once,
-    move_to_device,
-    warn_once,
-)
+from olmo_core.utils import gc_cuda, get_default_device, log_once, move_to_device
 
 from ...common import MetricMergeStrategy, ReduceType
 from ..train_module import EvalBatchSizeUnit, EvalBatchSpec, TrainModule
@@ -247,7 +241,7 @@ class TransformerPipelineTrainModule(TrainModule):
         del labels
         return output
 
-    def pre_train(self):
+    def on_attach(self):
         # Validate batch size.
         dp_ws = get_world_size(self.trainer.dp_process_group)
         if self.trainer.global_batch_size % (self.rank_microbatch_size * dp_ws) != 0:
@@ -275,52 +269,40 @@ class TransformerPipelineTrainModule(TrainModule):
             num_microbatches=num_microbatches,
         )
 
-    def state_dict(self, *, optim: Optional[bool] = None) -> Dict[str, Any]:
-        if optim is None:
-            optim = True
+    def state_dict(self, *, optim: bool = True) -> Dict[str, Any]:
         return self._get_state_dict(self.state_dict_save_opts, optim=optim)
 
-    def state_dict_to_load(
-        self, metadata: Metadata, *, optim: Optional[bool] = None
-    ) -> Dict[str, Any]:
+    def state_dict_to_load(self, metadata: Metadata, *, optim: bool = True) -> Dict[str, Any]:
+        load_opts = self.state_dict_load_opts
+
+        if "optim.param_groups.0.params" in metadata.state_dict_metadata:
+            # unflattened optimizer state
+            if load_opts.flatten_optimizer_state_dict:
+                log.warning(
+                    "Loading checkpoint with an unflattened optimizer state even though "
+                    "'flatten_optimizer_state_dict=True' in train module's 'state_dict_load_opts', "
+                    "automatically switching to 'flatten_optimizer_state_dict=False'."
+                )
+                load_opts = replace(load_opts, flatten_optimizer_state_dict=False)
+        else:
+            # flattened optimizer state
+            if not load_opts.flatten_optimizer_state_dict:
+                log.warning(
+                    "Loading checkpoint with a flattened optimizer state even though "
+                    "'flatten_optimizer_state_dict=False' in train module's 'state_dict_load_opts', "
+                    "automatically switching to 'flatten_optimizer_state_dict=True'."
+                )
+                load_opts = replace(load_opts, flatten_optimizer_state_dict=True)
+
         has_optim_state: bool = False
         for key in metadata.state_dict_metadata.keys():
             if key.startswith("optim."):
                 has_optim_state = True
                 break
 
-        if optim is None:
-            if not has_optim_state:
-                log.warning("No optimizer state found in checkpoint")
-                optim = False
-            else:
-                optim = True
-
-        load_opts = self.state_dict_load_opts
-        if optim:
-            if not has_optim_state:
-                raise RuntimeError(
-                    "Checkpoint does not contain optimizer state, but 'optim=True' was requested"
-                )
-
-            if "optim.param_groups.0.params" in metadata.state_dict_metadata:
-                # unflattened optimizer state
-                if load_opts.flatten_optimizer_state_dict:
-                    log.warning(
-                        "Loading checkpoint with an unflattened optimizer state even though "
-                        "'flatten_optimizer_state_dict=True' in train module's 'state_dict_load_opts', "
-                        "automatically switching to 'flatten_optimizer_state_dict=False'."
-                    )
-                    load_opts = replace(load_opts, flatten_optimizer_state_dict=False)
-            else:
-                # flattened optimizer state
-                if not load_opts.flatten_optimizer_state_dict:
-                    log.warning(
-                        "Loading checkpoint with a flattened optimizer state even though "
-                        "'flatten_optimizer_state_dict=False' in train module's 'state_dict_load_opts', "
-                        "automatically switching to 'flatten_optimizer_state_dict=True'."
-                    )
-                    load_opts = replace(load_opts, flatten_optimizer_state_dict=True)
+        if optim and not has_optim_state:
+            log.warning("No optimizer state found in checkpoint")
+            optim = False
 
         state_dict = self._get_state_dict(load_opts, optim=optim)
         if self.load_key_mapping is not None:
@@ -334,9 +316,7 @@ class TransformerPipelineTrainModule(TrainModule):
 
         return state_dict
 
-    def state_dict_to_save(self, *, optim: Optional[bool] = None) -> Dict[str, Any]:
-        if optim is None:
-            optim = True
+    def state_dict_to_save(self, *, optim: bool = True) -> Dict[str, Any]:
         return self._get_state_dict(self.state_dict_save_opts, optim=optim)
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
@@ -602,20 +582,8 @@ class TransformerPipelineTrainModule(TrainModule):
 
         return ce_batch_loss, z_batch_loss
 
-    @lru_cache
-    def num_flops_per_token(self, seq_len: int) -> Optional[int]:
-        warn_once(
-            f"`{self.__class__.__name__}.num_flops_per_token()` is not implemented. "
-            "Extra work is needed to support PP-aware FLOPs/token calculation."
-        )
-        return None
-
-    def global_num_flops_in_batch(self, batch: Dict[str, Any]) -> Optional[int]:
-        global_num_tokens = self.trainer.data_loader.global_num_tokens_in_batch(batch)
-        if global_num_tokens is None:
-            return None
-        flops_per_token = self.num_flops_per_token(seq_len=batch["input_ids"].shape[1])
-        return flops_per_token * global_num_tokens if flops_per_token is not None else None
+    def num_flops_per_token(self, seq_len: int) -> int:
+        return self.model_parts[0].num_flops_per_token(seq_len)
 
     @contextlib.contextmanager
     def _model_forward_context(self) -> Generator[None, None, None]:

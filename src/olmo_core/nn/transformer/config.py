@@ -1,26 +1,16 @@
 import logging
-import math
-from collections.abc import Callable
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import TYPE_CHECKING, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Dict, List, Optional
 
-from olmo_core.config import UNSET, DType, StrEnum
+from olmo_core.config import Config, DType, StrEnum
 from olmo_core.doc_utils import beta_feature
 from olmo_core.exceptions import OLMoConfigurationError
-from olmo_core.nn.attention.base import SequenceMixerConfig
 from olmo_core.utils import ensure_multiple_of
 
-from ..attention import (
-    AttentionBackendName,
-    AttentionConfig,
-    AttentionType,
-    GateConfig,
-    SlidingWindowAttentionConfig,
-)
+from ..attention import AttentionConfig, AttentionType
 from ..buffer_cache import BufferCache
-from ..config import ModelConfig, ModuleConfig
-from ..feed_forward import ActivationFunction, FeedForwardConfig, FeedForwardType
+from ..feed_forward import FeedForwardConfig, FeedForwardType
 from ..layer_norm import LayerNormConfig, LayerNormType
 from ..lm_head import LMHeadConfig, LMHeadType
 from ..moe import MoEConfig, MoERouterConfig, MoEType
@@ -69,8 +59,6 @@ class TransformerActivationCheckpointingMode(StrEnum):
     """Checkpoint only selected modules."""
     selected_ops = "selected_ops"
     """Checkpoint only a specific set of operations."""
-    budget = "budget"
-    """Checkpoint based on a budget."""
 
 
 class TransformerType(StrEnum):
@@ -104,19 +92,9 @@ class TransformerBlockType(StrEnum):
     ➡️ :class:`TransformerBlock`
     """
 
-    default_scaled = "default_scaled"
-    """
-    ➡️ :class:`LayerNormScaledTransformerBlock` (applies LayerNorm Scaling)
-    """
-
     reordered_norm = "reordered_norm"
     """
     ➡️ :class:`ReorderedNormTransformerBlock`
-    """
-
-    peri_norm = "peri_norm"
-    """
-    ➡️ :class:`PeriNormTransformerBlock`
     """
 
     normalized = "normalized"
@@ -146,20 +124,14 @@ class TransformerBlockType(StrEnum):
 
 
 @dataclass
-class TransformerBlockConfig(ModuleConfig):
+class TransformerBlockConfig(Config):
     """
     A configuration class for easily building transformer blocks.
     """
 
-    sequence_mixer: SequenceMixerConfig = field(default=UNSET)
+    attention: AttentionConfig
     """
-    The sequence mixer config (e.g. attention, recurrent, convolution, etc.).
-    """
-    attention: InitVar[Optional[AttentionConfig]] = None
-    """
-    .. deprecated::
-        Use :data:`sequence_mixer` instead. This field is only kept for backwards compatibility
-        with old configs that used ``attention: AttentionConfig``.
+    The attention config.
     """
     layer_norm: Optional[LayerNormConfig] = None
     """
@@ -181,28 +153,6 @@ class TransformerBlockConfig(ModuleConfig):
     """
     Dropout probability.
     """
-    attention_residual_alpha: Optional[float] = None
-    """
-    A scaling factor applied to the attention/recurrent output before adding it to the residual stream.
-    """
-    feed_forward_residual_alpha: Optional[float] = None
-    """
-    A scaling factor applied to the feed-forward (MLP) output before adding it to the residual stream.
-    """
-
-    def __post_init__(self, attention: Optional[AttentionConfig] = None):
-        # Handle backwards compatibility: old configs used `attention` instead of `sequence_mixer`.
-        if attention is not None:
-            if self.sequence_mixer is not UNSET:
-                raise OLMoConfigurationError(
-                    "Cannot specify both 'attention' and 'sequence_mixer' in TransformerBlockConfig. "
-                    "Use 'sequence_mixer' only (the 'attention' field is deprecated)."
-                )
-            self.sequence_mixer = attention
-        if self.sequence_mixer is UNSET:
-            raise OLMoConfigurationError(
-                "TransformerBlockConfig requires 'sequence_mixer' to be set."
-            )
 
     def build(
         self,
@@ -214,13 +164,11 @@ class TransformerBlockConfig(ModuleConfig):
         cache: Optional[BufferCache] = None,
     ) -> "TransformerBlockBase":
         from .block import (
-            LayerNormScaledTransformerBlock,
             MoEHybridReorderedNormTransformerBlock,
             MoEHybridTransformerBlock,
             MoEReorderedNormTransformerBlock,
             MoETransformerBlock,
             NormalizedTransformerBlock,
-            PeriNormTransformerBlock,
             ReorderedNormTransformerBlock,
             TransformerBlock,
         )
@@ -238,12 +186,8 @@ class TransformerBlockConfig(ModuleConfig):
         try:
             if self.name == TransformerBlockType.default:
                 return TransformerBlock(**kwargs)
-            elif self.name == TransformerBlockType.default_scaled:
-                return LayerNormScaledTransformerBlock(**kwargs)
             elif self.name == TransformerBlockType.reordered_norm:
                 return ReorderedNormTransformerBlock(**kwargs)
-            elif self.name == TransformerBlockType.peri_norm:
-                return PeriNormTransformerBlock(**kwargs)
             elif self.name == TransformerBlockType.normalized:
                 return NormalizedTransformerBlock(**kwargs)
             elif self.name == TransformerBlockType.moe:
@@ -269,7 +213,7 @@ class TransformerBlockConfig(ModuleConfig):
             block_params += 2 * d_model
 
         # Block attention params.
-        block_params += self.sequence_mixer.num_params(d_model)
+        block_params += self.attention.num_params(d_model)
         if self.layer_norm is not None:
             block_params += self.layer_norm.num_params(d_model)
 
@@ -282,11 +226,6 @@ class TransformerBlockConfig(ModuleConfig):
             block_params += self.feed_forward_moe.num_params(d_model)
             if self.layer_norm is not None:
                 block_params += self.layer_norm.num_params(d_model)
-
-        # Two extra norms for Peri-LN block type.
-        if self.name == TransformerBlockType.peri_norm:
-            assert self.layer_norm is not None
-            block_params += 2 * self.layer_norm.num_params(d_model)
 
         return block_params
 
@@ -302,7 +241,7 @@ class TransformerBlockConfig(ModuleConfig):
 
 
 @dataclass
-class TransformerConfig(ModelConfig):
+class TransformerConfig(Config):
     """
     A config for easily building transformer models.
 
@@ -316,16 +255,13 @@ class TransformerConfig(ModelConfig):
     n_layers: int
     block: TransformerBlockConfig
     lm_head: LMHeadConfig
-    embedding_norm: Optional[LayerNormConfig] = None
     name: TransformerType = TransformerType.default
     dtype: DType = DType.float32
     init_method: InitMethod = InitMethod.normal
     init_seed: int = 0
     init_std: float = 0.02
-    embedding_init_std: Optional[float] = None
     freeze_params: Optional[List[str]] = None
     block_overrides: Optional[Dict[int, TransformerBlockConfig]] = None
-    embed_scale: Optional[float] = None
 
     def build(
         self,
@@ -351,19 +287,15 @@ class TransformerConfig(ModelConfig):
                 vocab_size=self.vocab_size,
                 n_layers=self.n_layers,
                 block=self.block,
-                embedding_norm=self.embedding_norm,
                 lm_head=self.lm_head,
                 dtype=self.dtype.as_pt(),
                 init_method=self.init_method,
                 init_device=init_device,
                 init_seed=self.init_seed,
                 init_std=self.init_std,
-                embedding_init_std=self.embedding_init_std,
                 block_overrides=self.block_overrides,
-                embed_scale=self.embed_scale,
             )
         elif self.name == TransformerType.normalized:
-            assert self.embedding_norm is None
             model = NormalizedTransformer(
                 d_model=self.d_model,
                 vocab_size=self.vocab_size,
@@ -375,7 +307,6 @@ class TransformerConfig(ModelConfig):
                 init_device=init_device,
                 init_seed=self.init_seed,
                 init_std=self.init_std,
-                embedding_init_std=self.embedding_init_std,
                 block_overrides=self.block_overrides,
             )
         elif self.name == TransformerType.moe:
@@ -384,14 +315,12 @@ class TransformerConfig(ModelConfig):
                 vocab_size=self.vocab_size,
                 n_layers=self.n_layers,
                 block=self.block,
-                embedding_norm=self.embedding_norm,
                 lm_head=self.lm_head,
                 dtype=self.dtype.as_pt(),
                 init_method=self.init_method,
                 init_device=init_device,
                 init_seed=self.init_seed,
                 init_std=self.init_std,
-                embedding_init_std=self.embedding_init_std,
                 block_overrides=self.block_overrides,
             )
         else:
@@ -426,8 +355,6 @@ class TransformerConfig(ModelConfig):
 
         # Embedding params.
         num_params += self.d_model * self.vocab_size
-        if self.embedding_norm is not None:
-            num_params += self.embedding_norm.num_params(self.d_model)
 
         # All block params.
         num_block_params = self.block.num_params(self.d_model)
@@ -454,8 +381,6 @@ class TransformerConfig(ModelConfig):
 
         # Embedding params.
         num_active_params += self.d_model * self.vocab_size
-        if self.embedding_norm is not None:
-            num_active_params += self.embedding_norm.num_params(self.d_model)
 
         # All block active params.
         num_active_block_params = self.block.num_active_params(self.d_model)
@@ -487,94 +412,37 @@ class TransformerConfig(ModelConfig):
         """
         return self.num_active_params - self.d_model * self.vocab_size
 
-    @classmethod
-    def olmo2_1M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        return cls.llama_like(
-            d_model=12,
-            hidden_size_multiplier=1.0,
-            n_layers=kwargs.pop("n_layers", 4),
-            n_heads=kwargs.pop("n_heads", 4),
-            head_dim=kwargs.pop("head_dim", 4),
-            vocab_size=vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
-            layer_norm_eps=1e-6,
-            **kwargs,
-        )
-
-    @classmethod
-    def olmo2_14M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        return cls.llama_like(
-            d_model=128,
-            n_layers=kwargs.pop("n_layers", 4),
-            n_heads=kwargs.pop("n_heads", 8),
-            vocab_size=vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
-            layer_norm_eps=1e-6,
-            **kwargs,
-        )
-
-    @classmethod
-    def olmo2_30M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        return cls.llama_like(
-            d_model=256,
-            n_layers=kwargs.pop("n_layers", 4),
-            n_heads=kwargs.pop("n_heads", 8),
-            vocab_size=vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
-            layer_norm_eps=1e-6,
-            **kwargs,
-        )
-
-    @classmethod
-    def olmo2_60M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        return cls.llama_like(
-            d_model=384,
-            hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 8),
-            n_heads=kwargs.pop("n_heads", 8),
-            vocab_size=vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
-            layer_norm_eps=1e-6,
-            **kwargs,
-        )
-
-    @classmethod
-    def olmo2_100M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+    def num_flops_per_token(self, seq_len: int) -> int:
         """
-        A 100M OLMo2 model config.
+        Get the approximate number of flops per token.
         """
-        return cls.llama_like(
-            d_model=512,
-            hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 12),
-            n_heads=kwargs.pop("n_heads", 8),
-            vocab_size=vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
-            layer_norm_eps=1e-6,
-            **kwargs,
+        n, h, q, t = (
+            self.n_layers,
+            self.block.attention.n_heads,
+            self.d_model // self.block.attention.n_heads,
+            seq_len,
         )
+        # Reasoning behind the factor of 12 for the self-attention part of the formula:
+        # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
+        # 2. the flash attention does 1 more matmul recomputation in the backward
+        #    but recomputation should not be counted in calculating MFU           (+0)
+        # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
+        # 4. we follow the convention and do not account for sparsity in causal attention
+        flop_per_token = 6 * self.num_non_embedding_params + 12 * n * h * q * t
+
+        return flop_per_token
 
     @classmethod
     def olmo2_190M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
         return cls.llama_like(
             d_model=768,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 12),
-            n_heads=kwargs.pop("n_heads", 12),
+            n_layers=kwargs.get("n_layers", 12),
+            n_heads=kwargs.get("n_heads", 12),
             vocab_size=vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            block_name=kwargs.get("block_name", TransformerBlockType.reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             **kwargs,
         )
@@ -584,12 +452,12 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=1024,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 16),
-            n_heads=kwargs.pop("n_heads", 16),
+            n_layers=kwargs.get("n_layers", 16),
+            n_heads=kwargs.get("n_heads", 16),
             vocab_size=vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            block_name=kwargs.get("block_name", TransformerBlockType.reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             **kwargs,
         )
@@ -597,14 +465,14 @@ class TransformerConfig(ModelConfig):
     @classmethod
     def olmo2_600M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
         return cls.llama_like(
-            d_model=kwargs.pop("d_model", 1344),
+            d_model=1344,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 16),
-            n_heads=kwargs.pop("n_heads", 16),
+            n_layers=kwargs.get("n_layers", 16),
+            n_heads=kwargs.get("n_heads", 16),
             vocab_size=vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            block_name=kwargs.get("block_name", TransformerBlockType.reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             **kwargs,
         )
@@ -614,12 +482,12 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=1536,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 16),
-            n_heads=kwargs.pop("n_heads", 16),
+            n_layers=kwargs.get("n_layers", 16),
+            n_heads=kwargs.get("n_heads", 16),
             vocab_size=vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            block_name=kwargs.get("block_name", TransformerBlockType.reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             **kwargs,
         )
@@ -627,15 +495,15 @@ class TransformerConfig(ModelConfig):
     @classmethod
     def olmo2_1B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
         """
-        A 1B OLMo2 model config.
+        A 1B OLMo model config.
 
         This is different from the OLMo 1B from the old OLMo trainer.
         """
         return cls.llama2_1B(
             vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            block_name=kwargs.get("block_name", TransformerBlockType.reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             hidden_size_multiplier=1.5,
             **kwargs,
@@ -644,35 +512,32 @@ class TransformerConfig(ModelConfig):
     @classmethod
     def olmo2_1B_v2(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
         """
-        A 1B OLMo2 model config.
+        A 1B OLMo model config.
 
         This matches the OLMo 1B from the old OLMo trainer.
         """
         return cls.llama2_1B(
             vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            block_name=kwargs.get("block_name", TransformerBlockType.reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
-            n_layers=kwargs.pop("n_layers", 16),
-            hidden_size_multiplier=kwargs.pop("hidden_size_multiplier", 1.5),
+            n_layers=kwargs.get("n_layers", 16),
+            hidden_size_multiplier=kwargs.get("hidden_size_multiplier", 1.5),
             **kwargs,
         )
 
     @classmethod
     def olmo2_3B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 3B OLMo2 model config.
-        """
         return cls.llama_like(
             d_model=3328,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 16),
-            n_heads=kwargs.pop("n_heads", 16),
+            n_layers=kwargs.get("n_layers", 16),
+            n_heads=kwargs.get("n_heads", 16),
             vocab_size=vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            block_name=kwargs.get("block_name", TransformerBlockType.reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             **kwargs,
         )
@@ -680,13 +545,13 @@ class TransformerConfig(ModelConfig):
     @classmethod
     def olmo2_7B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
         """
-        A 7B OLMo2 model config.
+        A 7B OLMo model config.
         """
         return cls.llama2_7B(
             vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            block_name=kwargs.get("block_name", TransformerBlockType.reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             **kwargs,
         )
@@ -694,13 +559,13 @@ class TransformerConfig(ModelConfig):
     @classmethod
     def olmo2_13B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
         """
-        A 13B OLMo2 model config.
+        A 13B OLMo model config.
         """
         return cls.llama2_13B(
             vocab_size,
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            block_name=kwargs.get("block_name", TransformerBlockType.reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             **kwargs,
         )
@@ -708,381 +573,98 @@ class TransformerConfig(ModelConfig):
     @classmethod
     def olmo2_32B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
         """
-        A 32B OLMo2 model config.
+        A 32B OLMo model config.
         """
         d_model = 5120
         return cls.llama_like(
             vocab_size=vocab_size,
             d_model=d_model,
-            n_layers=kwargs.pop("n_layers", 64),
-            n_heads=kwargs.pop("n_heads", 40),
+            n_layers=kwargs.get("n_layers", 64),
+            n_heads=kwargs.get("n_heads", 40),
             n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            block_name=kwargs.pop("block_name", TransformerBlockType.reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
-            hidden_size_multiple_of=kwargs.pop("hidden_size_multiple_of", 512),
-            hidden_size_multiplier=kwargs.pop("hidden_size_multiplier", 27648 / (8 * d_model / 3)),
+            block_name=kwargs.get("block_name", TransformerBlockType.reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
+            hidden_size_multiple_of=kwargs.get("hidden_size_multiple_of", 512),
+            hidden_size_multiplier=kwargs.get("hidden_size_multiplier", 27648 / (8 * d_model / 3)),
             layer_norm_eps=1e-6,
             **kwargs,
         )
 
-    @classmethod
-    def olmo3_1M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        config = cls.olmo2_1M(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
+    # @classmethod
+    # def smallmoe(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+    #     d_model = kwargs.get("d_model", 768)
+    #     return cls.llama_like(
+    #         d_model=d_model,
+    #         vocab_size=vocab_size,
+    #         n_layers=kwargs.get("n_layers", 12),
+    #         n_heads=kwargs.get("n_heads", 12),
+    #         name=kwargs.get("name", TransformerType.moe),
+    #         block_name=kwargs.get("block_name", TransformerBlockType.moe_reordered_norm),
+    #         qk_norm=kwargs.get("qk_norm", True),
+    #         rope_theta=kwargs.get("rope_theta", 500_000),
+    #         layer_norm_eps=1e-6,
+    #         feed_forward_moe=MoEConfig(
+    #             name=MoEType.default,
+    #             num_experts=32,
+    #             hidden_size=int(0.5 * d_model),
+    #             router=MoERouterConfig(top_k=4),
+    #             shared_mlp=FeedForwardConfig(hidden_size=d_model * 2),
+    #             lb_loss_weight=0.01,
+    #             z_loss_weight=0.001,
+    #         ),
+    #     )
+
+    # @classmethod
+    # def small_hybrid_moe(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+    #     d_model = kwargs.get("d_model", 768)
+    #     return cls.llama_like(
+    #         d_model=d_model,
+    #         vocab_size=vocab_size,
+    #         n_layers=kwargs.get("n_layers", 12),
+    #         n_heads=kwargs.get("n_heads", 12),
+    #         name=kwargs.get("name", TransformerType.moe),
+    #         block_name=kwargs.get("block_name", TransformerBlockType.moe_hybrid_reordered_norm),
+    #         qk_norm=kwargs.get("qk_norm", True),
+    #         rope_theta=kwargs.get("rope_theta", 500_000),
+    #         layer_norm_eps=1e-6,
+    #         feed_forward=FeedForwardConfig(hidden_size=d_model * 2, bias=False),
+    #         feed_forward_moe=MoEConfig(
+    #             name=MoEType.default,
+    #             num_experts=32,
+    #             hidden_size=int(0.5 * d_model),
+    #             router=MoERouterConfig(top_k=4),
+    #             lb_loss_weight=0.01,
+    #             z_loss_weight=0.001,
+    #         ),
+    #     )
+
 
     @classmethod
-    def olmo3_14M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        config = cls.olmo2_14M(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_30M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        config = cls.olmo2_30M(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_60M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        config = cls.olmo2_60M(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_100M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 100M OLMo3 model config.
-        """
-        config = cls.olmo2_100M(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_190M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 190M OLMo3 model config.
-        """
-        config = cls.olmo2_190M(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_370M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 370M OLMo3 model config.
-        """
-        config = cls.olmo2_370M(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_600M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 600M OLMo3 model config.
-        """
-        config = cls.olmo2_600M(
-            vocab_size=vocab_size,
-            d_model=kwargs.pop("d_model", 1280),
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_760M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 760M OLMo3 model config.
-        """
-        config = cls.olmo2_760M(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_1B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 1B OLMo3 model config.
-        """
-        config = cls.olmo2_1B_v2(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_3B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 3B OLMo3 model config.
-        """
-        config = cls.olmo2_3B(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_7B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 7B OLMo3 model config.
-        """
-        config = cls.olmo2_7B(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_13B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 13B OLMo3 model config.
-        """
-        config = cls.olmo2_13B(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def olmo3_32B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        """
-        A 32B OLMo3 model config.
-        """
-        config = cls.olmo2_32B(
-            vocab_size=vocab_size,
-            sliding_window=kwargs.pop(
-                "sliding_window",
-                SlidingWindowAttentionConfig(
-                    force_full_attention_on_first_layer=False,
-                    force_full_attention_on_last_layer=True,
-                    pattern=[4096, 4096, 4096, -1],
-                ),
-            ),
-            attn_backend=kwargs.pop("attn_backend", AttentionBackendName.flash_2),
-            **kwargs,
-        )
-        return config
-
-    @classmethod
-    def smallmoe(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        d_model = kwargs.pop("d_model", 768)
-        return cls.llama_like(
-            d_model=d_model,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 12),
-            n_heads=kwargs.pop("n_heads", 12),
-            name=kwargs.pop("name", TransformerType.moe),
-            block_name=kwargs.pop("block_name", TransformerBlockType.moe_reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
-            layer_norm_eps=1e-6,
-            feed_forward_moe=MoEConfig(
-                name=MoEType.default,
-                num_experts=32,
-                hidden_size=int(0.5 * d_model),
-                router=MoERouterConfig(top_k=4),
-                shared_mlp=FeedForwardConfig(hidden_size=d_model * 2),
-                lb_loss_weight=0.01,
-                z_loss_weight=0.001,
-            ),
-        )
-
-    @classmethod
-    def small_hybrid_moe(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        d_model = kwargs.pop("d_model", 768)
-        return cls.llama_like(
-            d_model=d_model,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 12),
-            n_heads=kwargs.pop("n_heads", 12),
-            name=kwargs.pop("name", TransformerType.moe),
-            block_name=kwargs.pop("block_name", TransformerBlockType.moe_hybrid_reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
-            layer_norm_eps=1e-6,
-            feed_forward=FeedForwardConfig(hidden_size=d_model * 2, bias=False),
-            feed_forward_moe=MoEConfig(
-                name=MoEType.default,
-                num_experts=32,
-                hidden_size=int(0.5 * d_model),
-                router=MoERouterConfig(top_k=4),
-                lb_loss_weight=0.01,
-                z_loss_weight=0.001,
-            ),
-        )
-
-    @classmethod
-    def olmo2_ml_10M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        # expected # parameters: ~9.73M
-        d_model = kwargs.pop("d_model", 48)
-        use_moe = kwargs.pop("use_moe", False)
+    def olmo2b_10M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 48)
+        use_moe = kwargs.get("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = (
-            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        )
-        feed_forward_config = (
-            FeedForwardConfig(
-                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-            )
-            if generalist_hidden_multiplier > 0
-            else None
-        )
-        feed_forward_moe_config = (
-            MoEConfig(
-                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                num_experts_list=kwargs.pop("num_experts_list", []),
-                hidden_sizes_list=[
-                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
-                ],
-                routers_list=[
-                    MoERouterConfig(
-                        top_k=top_k,
-                        bias_gamma=kwargs.pop("bias_gamma", None),
-                        uniform_expert_assignment=kwargs.pop("uniform_expert_assignment", False),
-                    )
-                    for top_k in kwargs.pop("router_top_ks_list", [4])
-                ],
-                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-            )
-            if use_moe
-            else None
-        )
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe:
+        if not use_moe: 
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1091,53 +673,42 @@ class TransformerConfig(ModelConfig):
             d_model=d_model,
             vocab_size=vocab_size,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 3),
-            n_heads=kwargs.pop("n_heads", 3),
-            name=kwargs.pop("name", model_name),
-            block_name=kwargs.pop("block_name", default_block_name),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            n_layers=kwargs.get("n_layers", 3),
+            n_heads=kwargs.get("n_heads", 3),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             feed_forward=feed_forward_config,
             feed_forward_moe=feed_forward_moe_config,
         )
 
     @classmethod
-    def olmo2_ml_20M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        # expected # parameters: ~19.85M
-        d_model = kwargs.pop("d_model", 96)
-        use_moe = kwargs.pop("use_moe", False)
+    def olmo2b_20M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 96)
+        use_moe = kwargs.get("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = (
-            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        )
-        feed_forward_config = (
-            FeedForwardConfig(
-                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-            )
-            if generalist_hidden_multiplier > 0
-            else None
-        )
-        feed_forward_moe_config = (
-            MoEConfig(
-                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                num_experts_list=kwargs.pop("num_experts_list", []),
-                hidden_sizes_list=[
-                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
-                ],
-                routers_list=[
-                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
-                    for top_k in kwargs.pop("router_top_ks_list", [4])
-                ],
-                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-            )
-            if use_moe
-            else None
-        )
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe:
+        if not use_moe: 
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1146,53 +717,131 @@ class TransformerConfig(ModelConfig):
             d_model=d_model,
             vocab_size=vocab_size,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 4),
-            n_heads=kwargs.pop("n_heads", 4),
-            name=kwargs.pop("name", model_name),
-            block_name=kwargs.pop("block_name", default_block_name),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            n_layers=kwargs.get("n_layers", 4),
+            n_heads=kwargs.get("n_heads", 4),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
+            layer_norm_eps=1e-6,
+            feed_forward=feed_forward_config,
+            feed_forward_moe=feed_forward_moe_config,
+        )
+
+
+    @classmethod
+    def olmo2b_50M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 240)
+        use_moe = kwargs.get("use_moe", False)
+        model_name = TransformerType.moe if use_moe else TransformerType.default
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
+
+        default_block_name = TransformerBlockType.moe_reordered_norm
+        if not use_moe: 
+            default_block_name = TransformerBlockType.reordered_norm
+        elif generalist_hidden_multiplier > 0:
+            default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
+
+        return cls.llama_like(
+            d_model=d_model,
+            vocab_size=vocab_size,
+            hidden_size_multiplier=1.5,
+            n_layers=kwargs.get("n_layers", 5),
+            n_heads=kwargs.get("n_heads", 6),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
+            layer_norm_eps=1e-6,
+            feed_forward=feed_forward_config,
+            feed_forward_moe=feed_forward_moe_config,
+        )
+    
+    @classmethod
+    def olmo2b_500M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 4480)
+        use_moe = kwargs.get("use_moe", False)
+        model_name = TransformerType.moe if use_moe else TransformerType.default
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
+
+        default_block_name = TransformerBlockType.moe_reordered_norm
+        if not use_moe: 
+            default_block_name = TransformerBlockType.reordered_norm
+        elif generalist_hidden_multiplier > 0:
+            default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
+
+        return cls.llama_like(
+            d_model=d_model,
+            vocab_size=vocab_size,
+            hidden_size_multiplier=1.5,
+            n_layers=kwargs.get("n_layers", 14),
+            n_heads=kwargs.get("n_heads", 14),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             feed_forward=feed_forward_config,
             feed_forward_moe=feed_forward_moe_config,
         )
 
     @classmethod
-    def olmo2_ml_50M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        # expected # parameters: ~52.74M
-        d_model = kwargs.pop("d_model", 240)
-        use_moe = kwargs.pop("use_moe", False)
+    def olmo2_5M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 200)
+        use_moe = kwargs.get("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = (
-            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        )
-        feed_forward_config = (
-            FeedForwardConfig(
-                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-            )
-            if generalist_hidden_multiplier > 0
-            else None
-        )
-        feed_forward_moe_config = (
-            MoEConfig(
-                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                num_experts_list=kwargs.pop("num_experts_list", []),
-                hidden_sizes_list=[
-                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
-                ],
-                routers_list=[
-                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
-                    for top_k in kwargs.pop("router_top_ks_list", [4])
-                ],
-                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-            )
-            if use_moe
-            else None
-        )
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe:
+        if not use_moe: 
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1201,53 +850,219 @@ class TransformerConfig(ModelConfig):
             d_model=d_model,
             vocab_size=vocab_size,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 5),
-            n_heads=kwargs.pop("n_heads", 6),
-            name=kwargs.pop("name", model_name),
-            block_name=kwargs.pop("block_name", default_block_name),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            n_layers=kwargs.get("n_layers", 7),
+            n_heads=kwargs.get("n_heads", 5),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
+            layer_norm_eps=1e-6,
+            feed_forward=feed_forward_config,
+            feed_forward_moe=feed_forward_moe_config,
+        )
+    
+    
+    @classmethod
+    def olmo2_10M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 336)
+        use_moe = kwargs.get("use_moe", False)
+        model_name = TransformerType.moe if use_moe else TransformerType.default
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
+
+        default_block_name = TransformerBlockType.moe_reordered_norm
+        if not use_moe: 
+            default_block_name = TransformerBlockType.reordered_norm
+        elif generalist_hidden_multiplier > 0:
+            default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
+
+        return cls.llama_like(
+            d_model=d_model,
+            vocab_size=vocab_size,
+            hidden_size_multiplier=1.5,
+            n_layers=kwargs.get("n_layers", 8),
+            n_heads=kwargs.get("n_heads", 7),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
+            layer_norm_eps=1e-6,
+            feed_forward=feed_forward_config,
+            feed_forward_moe=feed_forward_moe_config,
+        )
+    
+    @classmethod
+    def olmo2_10M_fm1(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 350)
+        use_moe = kwargs.get("use_moe", False)
+        model_name = TransformerType.moe if use_moe else TransformerType.default
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
+
+        default_block_name = TransformerBlockType.moe_reordered_norm
+        if not use_moe: 
+            default_block_name = TransformerBlockType.reordered_norm
+        elif generalist_hidden_multiplier > 0:
+            default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
+
+        return cls.llama_like(
+            d_model=d_model,
+            vocab_size=vocab_size,
+            hidden_size_multiplier=1,
+            n_layers=kwargs.get("n_layers", 8),
+            n_heads=kwargs.get("n_heads", 7),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
+            layer_norm_eps=1e-6,
+            feed_forward=feed_forward_config,
+            feed_forward_moe=feed_forward_moe_config,
+        )
+    
+    @classmethod
+    def olmo2_20M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 432)
+        use_moe = kwargs.get("use_moe", False)
+        model_name = TransformerType.moe if use_moe else TransformerType.default
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
+
+        default_block_name = TransformerBlockType.moe_reordered_norm
+        if not use_moe: 
+            default_block_name = TransformerBlockType.reordered_norm
+        elif generalist_hidden_multiplier > 0:
+            default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
+
+        return cls.llama_like(
+            d_model=d_model,
+            vocab_size=vocab_size,
+            hidden_size_multiplier=1.5,
+            n_layers=kwargs.get("n_layers", 9),
+            n_heads=kwargs.get("n_heads", 9),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
+            layer_norm_eps=1e-6,
+            feed_forward=feed_forward_config,
+            feed_forward_moe=feed_forward_moe_config,
+        )
+        
+    @classmethod
+    def olmo2_20M_fm1(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 450)
+        use_moe = kwargs.get("use_moe", False)
+        model_name = TransformerType.moe if use_moe else TransformerType.default
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
+
+        default_block_name = TransformerBlockType.moe_reordered_norm
+        if not use_moe: 
+            default_block_name = TransformerBlockType.reordered_norm
+        elif generalist_hidden_multiplier > 0:
+            default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
+
+        return cls.llama_like(
+            d_model=d_model,
+            vocab_size=vocab_size,
+            hidden_size_multiplier=1,
+            n_layers=kwargs.get("n_layers", 9),
+            n_heads=kwargs.get("n_heads", 9),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             feed_forward=feed_forward_config,
             feed_forward_moe=feed_forward_moe_config,
         )
 
     @classmethod
-    def olmo2_ml_80M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        # expected # parameters: ~81.84M
-        d_model = kwargs.pop("d_model", 336)
-        use_moe = kwargs.pop("use_moe", False)
+    def olmo2_50M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 640)
+        use_moe = kwargs.get("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = (
-            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        )
-        feed_forward_config = (
-            FeedForwardConfig(
-                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-            )
-            if generalist_hidden_multiplier > 0
-            else None
-        )
-        feed_forward_moe_config = (
-            MoEConfig(
-                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                num_experts_list=kwargs.pop("num_experts_list", []),
-                hidden_sizes_list=[
-                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
-                ],
-                routers_list=[
-                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
-                    for top_k in kwargs.pop("router_top_ks_list", [4])
-                ],
-                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-            )
-            if use_moe
-            else None
-        )
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe:
+        if not use_moe: 
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1256,53 +1071,42 @@ class TransformerConfig(ModelConfig):
             d_model=d_model,
             vocab_size=vocab_size,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 8),
-            n_heads=kwargs.pop("n_heads", 7),
-            name=kwargs.pop("name", model_name),
-            block_name=kwargs.pop("block_name", default_block_name),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            n_layers=kwargs.get("n_layers", 10),
+            n_heads=kwargs.get("n_heads", 10),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             feed_forward=feed_forward_config,
             feed_forward_moe=feed_forward_moe_config,
         )
 
     @classmethod
-    def olmo2_ml_100M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        # expected # parameters: ~98.3M
-        d_model = kwargs.pop("d_model", 384)
-        use_moe = kwargs.pop("use_moe", False)
+    def olmo2_100M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 832)
+        use_moe = kwargs.get("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = (
-            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        )
-        feed_forward_config = (
-            FeedForwardConfig(
-                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-            )
-            if generalist_hidden_multiplier > 0
-            else None
-        )
-        feed_forward_moe_config = (
-            MoEConfig(
-                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                num_experts_list=kwargs.pop("num_experts_list", []),
-                hidden_sizes_list=[
-                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
-                ],
-                routers_list=[
-                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
-                    for top_k in kwargs.pop("router_top_ks_list", [4])
-                ],
-                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-            )
-            if use_moe
-            else None
-        )
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe:
+        if not use_moe: 
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1311,53 +1115,42 @@ class TransformerConfig(ModelConfig):
             d_model=d_model,
             vocab_size=vocab_size,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 9),
-            n_heads=kwargs.pop("n_heads", 8),
-            name=kwargs.pop("name", model_name),
-            block_name=kwargs.pop("block_name", default_block_name),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            n_layers=kwargs.get("n_layers", 12),
+            n_heads=kwargs.get("n_heads", 13),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             feed_forward=feed_forward_config,
             feed_forward_moe=feed_forward_moe_config,
         )
 
     @classmethod
-    def olmo2_ml_110M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        # expected # parameters: ~113.5M
-        d_model = kwargs.pop("d_model", 432)
-        use_moe = kwargs.pop("use_moe", False)
+    def olmo2_200M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 1120)
+        use_moe = kwargs.get("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = (
-            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        )
-        feed_forward_config = (
-            FeedForwardConfig(
-                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-            )
-            if generalist_hidden_multiplier > 0
-            else None
-        )
-        feed_forward_moe_config = (
-            MoEConfig(
-                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                num_experts_list=kwargs.pop("num_experts_list", []),
-                hidden_sizes_list=[
-                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
-                ],
-                routers_list=[
-                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
-                    for top_k in kwargs.pop("router_top_ks_list", [4])
-                ],
-                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-            )
-            if use_moe
-            else None
-        )
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe:
+        if not use_moe: 
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1366,53 +1159,42 @@ class TransformerConfig(ModelConfig):
             d_model=d_model,
             vocab_size=vocab_size,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 9),
-            n_heads=kwargs.pop("n_heads", 9),
-            name=kwargs.pop("name", model_name),
-            block_name=kwargs.pop("block_name", default_block_name),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            n_layers=kwargs.get("n_layers", 13),
+            n_heads=kwargs.get("n_heads", 14),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             feed_forward=feed_forward_config,
             feed_forward_moe=feed_forward_moe_config,
         )
 
     @classmethod
-    def olmo2_ml_200M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        # expected # parameters: ~193.9M
-        d_model = kwargs.pop("d_model", 640)
-        use_moe = kwargs.pop("use_moe", False)
+    def olmo2_400M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 1440)
+        use_moe = kwargs.get("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = (
-            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        )
-        feed_forward_config = (
-            FeedForwardConfig(
-                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-            )
-            if generalist_hidden_multiplier > 0
-            else None
-        )
-        feed_forward_moe_config = (
-            MoEConfig(
-                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                num_experts_list=kwargs.pop("num_experts_list", []),
-                hidden_sizes_list=[
-                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
-                ],
-                routers_list=[
-                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
-                    for top_k in kwargs.pop("router_top_ks_list", [4])
-                ],
-                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-            )
-            if use_moe
-            else None
-        )
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
 
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe:
+        if not use_moe: 
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1421,53 +1203,42 @@ class TransformerConfig(ModelConfig):
             d_model=d_model,
             vocab_size=vocab_size,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 10),
-            n_heads=kwargs.pop("n_heads", 10),
-            name=kwargs.pop("name", model_name),
-            block_name=kwargs.pop("block_name", default_block_name),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            n_layers=kwargs.get("n_layers", 16),
+            n_heads=kwargs.get("n_heads", 15),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             feed_forward=feed_forward_config,
             feed_forward_moe=feed_forward_moe_config,
         )
-
+    
     @classmethod
-    def olmo2_ml_300M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        # expected # parameters: ~299.8M
-        d_model = kwargs.pop("d_model", 832)
-        use_moe = kwargs.pop("use_moe", False)
+    def olmo2_1_0B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
+        d_model = kwargs.get("d_model", 2048)
+        use_moe = kwargs.get("use_moe", False)
         model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = (
-            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        )
-        feed_forward_config = (
-            FeedForwardConfig(
-                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-            )
-            if generalist_hidden_multiplier > 0
-            else None
-        )
-        feed_forward_moe_config = (
-            MoEConfig(
-                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                num_experts_list=kwargs.pop("num_experts_list", []),
-                hidden_sizes_list=[
-                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
-                ],
-                routers_list=[
-                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
-                    for top_k in kwargs.pop("router_top_ks_list", [4])
-                ],
-                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-            )
-            if use_moe
-            else None
-        )
-
+        generalist_hidden_multiplier = kwargs.get("moe_generalist_hidden_multiplier", 1) if use_moe else 1
+        feed_forward_config = FeedForwardConfig(
+                                    hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
+                                ) if generalist_hidden_multiplier > 0 else None
+        feed_forward_moe_config = MoEConfig(
+                                    name=MoEType.dropless if kwargs.get("dropless_moe", False) else MoEType.default,
+                                    num_experts_list=kwargs.get("num_experts_list", []),
+                                    hidden_sizes_list=[int(mult * d_model * 4) for mult in kwargs.get("hidden_multipliers_list", [1])],
+                                    routers_list=[
+                                        MoERouterConfig(
+                                            top_k=top_k, 
+                                            bias_gamma=kwargs.get("bias_gamma", None), 
+                                            uniform_expert_assignment=kwargs.get("uniform_expert_assignment", False)
+                                        ) for top_k in kwargs.get("router_top_ks_list", [4])],
+                                    lb_loss_weight=kwargs.get("lb_loss_weight", 0.01),
+                                    z_loss_weight=kwargs.get("z_loss_weight", 0.001),
+                                ) if use_moe else None
+        
         default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe:
+        if not use_moe: 
             default_block_name = TransformerBlockType.reordered_norm
         elif generalist_hidden_multiplier > 0:
             default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
@@ -1476,67 +1247,12 @@ class TransformerConfig(ModelConfig):
             d_model=d_model,
             vocab_size=vocab_size,
             hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 12),
-            n_heads=kwargs.pop("n_heads", 13),
-            name=kwargs.pop("name", model_name),
-            block_name=kwargs.pop("block_name", default_block_name),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
-            layer_norm_eps=1e-6,
-            feed_forward=feed_forward_config,
-            feed_forward_moe=feed_forward_moe_config,
-        )
-
-    @classmethod
-    def olmo2_ml_500M(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        # expected # parameters: ~505.6M
-        d_model = kwargs.pop("d_model", 1120)
-        use_moe = kwargs.pop("use_moe", False)
-        model_name = TransformerType.moe if use_moe else TransformerType.default
-        generalist_hidden_multiplier = (
-            kwargs.pop("moe_generalist_hidden_multiplier", 1) if use_moe else 1
-        )
-        feed_forward_config = (
-            FeedForwardConfig(
-                hidden_size=int(generalist_hidden_multiplier * d_model * 4), bias=False
-            )
-            if generalist_hidden_multiplier > 0
-            else None
-        )
-        feed_forward_moe_config = (
-            MoEConfig(
-                name=MoEType.dropless if kwargs.pop("dropless_moe", False) else MoEType.default,
-                num_experts_list=kwargs.pop("num_experts_list", []),
-                hidden_sizes_list=[
-                    int(mult * d_model * 4) for mult in kwargs.pop("hidden_multipliers_list", [1])
-                ],
-                routers_list=[
-                    MoERouterConfig(top_k=top_k, bias_gamma=kwargs.pop("bias_gamma", None))
-                    for top_k in kwargs.pop("router_top_ks_list", [4])
-                ],
-                lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
-                z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
-            )
-            if use_moe
-            else None
-        )
-
-        default_block_name = TransformerBlockType.moe_reordered_norm
-        if not use_moe:
-            default_block_name = TransformerBlockType.reordered_norm
-        elif generalist_hidden_multiplier > 0:
-            default_block_name = TransformerBlockType.moe_hybrid_reordered_norm
-
-        return cls.llama_like(
-            d_model=d_model,
-            vocab_size=vocab_size,
-            hidden_size_multiplier=1.5,
-            n_layers=kwargs.pop("n_layers", 14),
-            n_heads=kwargs.pop("n_heads", 14),
-            name=kwargs.pop("name", model_name),
-            block_name=kwargs.pop("block_name", default_block_name),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            n_layers=kwargs.get("n_layers", 20),
+            n_heads=kwargs.get("n_heads", 16),
+            name=kwargs.get("name", model_name),
+            block_name=kwargs.get("block_name", default_block_name),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             feed_forward=feed_forward_config,
             feed_forward_moe=feed_forward_moe_config,
@@ -1544,22 +1260,22 @@ class TransformerConfig(ModelConfig):
 
     @classmethod
     def olmoe_1B_7B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        d_model = kwargs.pop("d_model", 2048)
+        d_model = kwargs.get("d_model", 2048)
         return cls.llama_like(
             d_model=d_model,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 16),
-            n_heads=kwargs.pop("n_heads", 16),
-            name=kwargs.pop("name", TransformerType.moe),
-            block_name=kwargs.pop("block_name", TransformerBlockType.moe_reordered_norm),
-            qk_norm=kwargs.pop("qk_norm", True),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            n_layers=kwargs.get("n_layers", 16),
+            n_heads=kwargs.get("n_heads", 16),
+            name=kwargs.get("name", TransformerType.moe),
+            block_name=kwargs.get("block_name", TransformerBlockType.moe_reordered_norm),
+            qk_norm=kwargs.get("qk_norm", True),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             layer_norm_eps=1e-6,
             feed_forward_moe=MoEConfig(
                 name=MoEType.dropless,
-                num_experts_list=[64],
-                hidden_sizes_list=[int(0.5 * d_model)],
-                routers_list=[MoERouterConfig(top_k=8)],
+                num_experts=64,
+                hidden_size=int(0.5 * d_model),
+                router=MoERouterConfig(top_k=8),
                 lb_loss_weight=0.01,
                 z_loss_weight=0.001,
             ),
@@ -1573,8 +1289,8 @@ class TransformerConfig(ModelConfig):
         return cls.ngpt_like(
             d_model=1024,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 16),
-            n_heads=kwargs.pop("n_heads", 16),
+            n_layers=kwargs.get("n_layers", 16),
+            n_heads=kwargs.get("n_heads", 16),
             **kwargs,
         )
 
@@ -1586,8 +1302,8 @@ class TransformerConfig(ModelConfig):
         return cls.ngpt_like(
             d_model=2048,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 18),
-            n_heads=kwargs.pop("n_heads", 16),
+            n_layers=kwargs.get("n_layers", 18),
+            n_heads=kwargs.get("n_heads", 16),
             **kwargs,
         )
 
@@ -1599,9 +1315,9 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=1024,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 16),
-            n_heads=kwargs.pop("n_heads", 8),
-            rope_theta=kwargs.pop("rope_theta", 10_000),
+            n_layers=kwargs.get("n_layers", 16),
+            n_heads=kwargs.get("n_heads", 8),
+            rope_theta=kwargs.get("rope_theta", 10_000),
             **kwargs,
         )
 
@@ -1615,9 +1331,9 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=2048,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 18),
-            n_heads=kwargs.pop("n_heads", 16),
-            rope_theta=kwargs.pop("rope_theta", 10_000),
+            n_layers=kwargs.get("n_layers", 18),
+            n_heads=kwargs.get("n_heads", 16),
+            rope_theta=kwargs.get("rope_theta", 10_000),
             **kwargs,
         )
 
@@ -1629,9 +1345,9 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=4096,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 32),
-            n_heads=kwargs.pop("n_heads", 32),
-            rope_theta=kwargs.pop("rope_theta", 10_000),
+            n_layers=kwargs.get("n_layers", 32),
+            n_heads=kwargs.get("n_heads", 32),
+            rope_theta=kwargs.get("rope_theta", 10_000),
             **kwargs,
         )
 
@@ -1643,9 +1359,9 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=5120,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 40),
-            n_heads=kwargs.pop("n_heads", 40),
-            rope_theta=kwargs.pop("rope_theta", 10_000),
+            n_layers=kwargs.get("n_layers", 40),
+            n_heads=kwargs.get("n_heads", 40),
+            rope_theta=kwargs.get("rope_theta", 10_000),
             **kwargs,
         )
 
@@ -1657,9 +1373,9 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=5120,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 80),
-            n_heads=kwargs.pop("n_heads", 40),
-            rope_theta=kwargs.pop("rope_theta", 10_000),
+            n_layers=kwargs.get("n_layers", 80),
+            n_heads=kwargs.get("n_heads", 40),
+            rope_theta=kwargs.get("rope_theta", 10_000),
             **kwargs,
         )
 
@@ -1671,10 +1387,10 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=8192,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 80),
-            n_heads=kwargs.pop("n_heads", 64),
+            n_layers=kwargs.get("n_layers", 80),
+            n_heads=kwargs.get("n_heads", 64),
             n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            rope_theta=kwargs.pop("rope_theta", 10_000),
+            rope_theta=kwargs.get("rope_theta", 10_000),
             hidden_size_multiplier=1.3,
             hidden_size_multiple_of=4096,
             **kwargs,
@@ -1688,10 +1404,10 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=2048,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 16),
-            n_heads=kwargs.pop("n_heads", 32),
+            n_layers=kwargs.get("n_layers", 16),
+            n_heads=kwargs.get("n_heads", 32),
             n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             hidden_size_multiplier=1.5,
             **kwargs,
         )
@@ -1704,10 +1420,10 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=4096,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 32),
-            n_heads=kwargs.pop("n_heads", 32),
+            n_layers=kwargs.get("n_layers", 32),
+            n_heads=kwargs.get("n_heads", 32),
             n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             hidden_size_multiplier=1.3,
             hidden_size_multiple_of=1024,
             **kwargs,
@@ -1721,10 +1437,10 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=8196,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 80),
-            n_heads=kwargs.pop("n_heads", 64),
+            n_layers=kwargs.get("n_layers", 80),
+            n_heads=kwargs.get("n_heads", 64),
             n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             hidden_size_multiplier=1.3,
             hidden_size_multiple_of=4096,
             **kwargs,
@@ -1742,186 +1458,12 @@ class TransformerConfig(ModelConfig):
         return cls.llama_like(
             d_model=16384,
             vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 126),
-            n_heads=kwargs.pop("n_heads", 128),
+            n_layers=kwargs.get("n_layers", 126),
+            n_heads=kwargs.get("n_heads", 128),
             n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            rope_theta=kwargs.pop("rope_theta", 500_000),
+            rope_theta=kwargs.get("rope_theta", 500_000),
             hidden_size_multiplier=1.2,
             hidden_size_multiple_of=4096,
-            **kwargs,
-        )
-
-    @classmethod
-    def gemma3_1B(cls, vocab_size: int = 262208, **kwargs) -> "TransformerConfig":
-        """
-        Gemma 3 1B model config.
-        """
-        return cls.gemma3_like(
-            d_model=2304,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 26),
-            n_heads=kwargs.pop("n_heads", 8),
-            n_kv_heads=kwargs.pop("n_kv_heads", 4),
-            hidden_size=kwargs.pop("hidden_size", 9216),
-            **kwargs,
-        )
-
-    @classmethod
-    def qwen3_0_6B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        return cls.llama_like(
-            d_model=1024,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 28),
-            n_heads=kwargs.pop("n_heads", 16),
-            n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            head_dim=kwargs.pop("head_dim", 128),
-            rope_theta=kwargs.pop("rope_theta", 1_000_000),
-            layer_norm_eps=1e-6,
-            qk_norm=kwargs.pop("qk_norm", True),
-            use_head_qk_norm=kwargs.pop("use_head_qk_norm", True),
-            feed_forward=FeedForwardConfig(
-                hidden_size=3072, bias=False, dtype=kwargs.get("dtype", DType.float32)
-            ),
-            **kwargs,
-        )
-
-    @classmethod
-    def gemma3_4B(cls, vocab_size: int = 262208, **kwargs) -> "TransformerConfig":
-        """
-        Gemma 3 4B model config.
-        """
-        return cls.gemma3_like(
-            d_model=2560,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 34),
-            n_heads=kwargs.pop("n_heads", 16),
-            n_kv_heads=kwargs.pop("n_kv_heads", 4),
-            hidden_size=kwargs.pop("hidden_size", 10240),
-            **kwargs,
-        )
-
-    @classmethod
-    def qwen3_1_7B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        return cls.llama_like(
-            d_model=2048,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 28),
-            n_heads=kwargs.pop("n_heads", 16),
-            n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            head_dim=kwargs.pop("head_dim", 128),
-            rope_theta=kwargs.pop("rope_theta", 1_000_000),
-            layer_norm_eps=1e-6,
-            qk_norm=kwargs.pop("qk_norm", True),
-            use_head_qk_norm=kwargs.pop("use_head_qk_norm", True),
-            feed_forward=FeedForwardConfig(
-                hidden_size=6144, bias=False, dtype=kwargs.get("dtype", DType.float32)
-            ),
-            **kwargs,
-        )
-
-    @classmethod
-    def gemma3_12B(cls, vocab_size: int = 262208, **kwargs) -> "TransformerConfig":
-        """
-        Gemma 3 12B model config.
-        """
-        return cls.gemma3_like(
-            d_model=3840,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 48),
-            n_heads=kwargs.pop("n_heads", 24),
-            n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            hidden_size=kwargs.pop("hidden_size", 15360),
-            **kwargs,
-        )
-
-    @classmethod
-    def qwen3_4B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        return cls.llama_like(
-            d_model=2560,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 36),
-            n_heads=kwargs.pop("n_heads", 32),
-            n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            head_dim=kwargs.pop("head_dim", 128),
-            rope_theta=kwargs.pop("rope_theta", 1_000_000),
-            layer_norm_eps=1e-6,
-            qk_norm=kwargs.pop("qk_norm", True),
-            use_head_qk_norm=kwargs.pop("use_head_qk_norm", True),
-            feed_forward=FeedForwardConfig(
-                hidden_size=9728, bias=False, dtype=kwargs.get("dtype", DType.float32)
-            ),
-            **kwargs,
-        )
-
-    @classmethod
-    def gemma3_27B(cls, vocab_size: int = 262208, **kwargs) -> "TransformerConfig":
-        """
-        Gemma 3 27B model config.
-        """
-        return cls.gemma3_like(
-            d_model=5376,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 62),
-            n_heads=kwargs.pop("n_heads", 32),
-            n_kv_heads=kwargs.pop("n_kv_heads", 16),
-            hidden_size=kwargs.pop("hidden_size", 21504),
-            **kwargs,
-        )
-
-    @classmethod
-    def qwen3_8B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        return cls.llama_like(
-            d_model=4096,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 36),
-            n_heads=kwargs.pop("n_heads", 32),
-            n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            head_dim=kwargs.pop("head_dim", 128),
-            rope_theta=kwargs.pop("rope_theta", 1_000_000),
-            layer_norm_eps=1e-6,
-            qk_norm=kwargs.pop("qk_norm", True),
-            use_head_qk_norm=kwargs.pop("use_head_qk_norm", True),
-            feed_forward=FeedForwardConfig(
-                hidden_size=12288, bias=False, dtype=kwargs.get("dtype", DType.float32)
-            ),
-            **kwargs,
-        )
-
-    @classmethod
-    def qwen3_14B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        return cls.llama_like(
-            d_model=5120,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 48),
-            n_heads=kwargs.pop("n_heads", 40),
-            n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            head_dim=kwargs.pop("head_dim", 128),
-            rope_theta=kwargs.pop("rope_theta", 1_000_000),
-            layer_norm_eps=1e-6,
-            qk_norm=kwargs.pop("qk_norm", True),
-            use_head_qk_norm=kwargs.pop("use_head_qk_norm", True),
-            feed_forward=FeedForwardConfig(
-                hidden_size=17408, bias=False, dtype=kwargs.get("dtype", DType.float32)
-            ),
-            **kwargs,
-        )
-
-    @classmethod
-    def qwen3_32B(cls, vocab_size: int, **kwargs) -> "TransformerConfig":
-        return cls.llama_like(
-            d_model=5120,
-            vocab_size=vocab_size,
-            n_layers=kwargs.pop("n_layers", 64),
-            n_heads=kwargs.pop("n_heads", 40),
-            n_kv_heads=kwargs.pop("n_kv_heads", 8),
-            head_dim=kwargs.pop("head_dim", 128),
-            rope_theta=kwargs.pop("rope_theta", 1_000_000),
-            layer_norm_eps=1e-6,
-            qk_norm=kwargs.pop("qk_norm", True),
-            use_head_qk_norm=kwargs.pop("use_head_qk_norm", True),
-            feed_forward=FeedForwardConfig(
-                hidden_size=25600, bias=False, dtype=kwargs.get("dtype", DType.float32)
-            ),
             **kwargs,
         )
 
@@ -1934,24 +1476,15 @@ class TransformerConfig(ModelConfig):
         n_layers: int,
         n_heads: int,
         n_kv_heads: Optional[int] = None,
-        head_dim: Optional[int] = None,
-        gate: Optional[GateConfig] = None,
         qk_norm: bool = False,
-        use_head_qk_norm: bool = False,
         layer_norm_eps: float = 1e-5,
         rope_theta: int = 500_000,
         rope_type: Optional[RoPEType] = None,
-        no_global_rope: bool = False,
         hidden_size_multiple_of: int = 256,
         hidden_size_multiplier: Optional[float] = None,
         fused_ops: bool = False,
-        use_flash: Optional[bool] = None,
-        attn_backend: Optional[AttentionBackendName] = None,
-        sliding_window: Optional[SlidingWindowAttentionConfig] = None,
+        use_flash: bool = False,
         block_name: TransformerBlockType = TransformerBlockType.default,
-        block_mods: Optional[
-            Dict[int, Callable[[TransformerBlockConfig], TransformerBlockConfig]]
-        ] = None,
         dtype: DType = DType.float32,
         rope_scaling: Optional[RoPEScalingConfig] = None,
         feed_forward: Optional[FeedForwardConfig] = None,
@@ -1964,7 +1497,7 @@ class TransformerConfig(ModelConfig):
         :param hidden_size_multiple_of: Ensure the FFN hidden size is a multiple of this value.
         :param hidden_size_multiplier: Custom multiplier for the FFN hidden size.
         :param fused_ops: Use fused operations where possible.
-        :param block_mods: A dictionary of block indices to functions that take the base block config and return a modified block config.
+        :param use_flash: Use flash-attn.
         :param dtype: The default data type to use for all parameters.
         """
         # Resolve hidden size of FFN in blocks.
@@ -1996,40 +1529,20 @@ class TransformerConfig(ModelConfig):
         # Configure blocks.
         block = TransformerBlockConfig(
             name=block_name,
-            sequence_mixer=AttentionConfig(
+            attention=AttentionConfig(
                 name=att_type,
                 n_heads=n_heads,
                 n_kv_heads=n_kv_heads,
-                head_dim=head_dim,
                 bias=False,
-                rope=RoPEConfig(
-                    name=rope_type,
-                    theta=rope_theta,
-                    no_global_rope=no_global_rope,
-                    scaling=rope_scaling,
-                ),
-                gate=gate,
+                rope=RoPEConfig(name=rope_type, theta=rope_theta, scaling=rope_scaling),
                 qk_norm=layer_norm if qk_norm else None,
-                use_head_qk_norm=use_head_qk_norm if qk_norm else None,
                 use_flash=use_flash,
-                backend=attn_backend,
-                sliding_window=sliding_window,
                 dtype=dtype,
             ),
             feed_forward=feed_forward,
             feed_forward_moe=feed_forward_moe,
             layer_norm=layer_norm,
         )
-
-        if block_mods and kwargs.get("block_overrides"):
-            raise OLMoConfigurationError(
-                "`block_mods` and `block_overrides` cannot be used together."
-            )
-        block_overrides = None
-        if block_mods:
-            block_overrides = {i: block_mods[i](block.copy()) for i in block_mods}
-        elif kwargs.get("block_overrides"):
-            block_overrides = kwargs.get("block_overrides")
 
         return cls(
             d_model=d_model,
@@ -2038,7 +1551,6 @@ class TransformerConfig(ModelConfig):
             block=block,
             lm_head=LMHeadConfig(layer_norm=layer_norm, bias=False, dtype=dtype),
             dtype=dtype,
-            block_overrides=block_overrides,
             **kwargs,
         )
 
@@ -2078,13 +1590,13 @@ class TransformerConfig(ModelConfig):
             n_heads=n_heads,
             name=TransformerType.moe,
             block_name=block_name,
-            qk_norm=kwargs.pop("qk_norm", reordered_norm),
+            qk_norm=kwargs.get("qk_norm", reordered_norm),
             feed_forward_moe=MoEConfig(
                 name=MoEType.default if not dropless else MoEType.dropless,
-                num_experts_list=[num_experts],
-                hidden_sizes_list=[expert_hidden_size],
+                num_experts=num_experts,
+                hidden_size=expert_hidden_size,
                 capacity_factor=capacity_factor,
-                routers_list=[MoERouterConfig(top_k=top_k)],
+                router=MoERouterConfig(top_k=top_k),
                 shared_mlp=None
                 if shared_expert_hidden_size is None
                 else FeedForwardConfig(hidden_size=shared_expert_hidden_size, bias=False),
@@ -2123,7 +1635,7 @@ class TransformerConfig(ModelConfig):
         # Configure blocks.
         block = TransformerBlockConfig(
             name=TransformerBlockType.normalized,
-            sequence_mixer=AttentionConfig(
+            attention=AttentionConfig(
                 name=AttentionType.normalized,
                 n_heads=n_heads,
                 n_kv_heads=n_kv_heads,
@@ -2148,142 +1660,3 @@ class TransformerConfig(ModelConfig):
             init_method=InitMethod.normalized,
             **kwargs,
         )
-
-    @classmethod
-    def gemma3_like(
-        cls,
-        *,
-        d_model: int,
-        vocab_size: int,
-        n_layers: int,
-        n_heads: int,
-        n_kv_heads: int,
-        hidden_size: int,
-        head_dim: Optional[int] = None,
-        local_window_size: int = 1024,
-        local_rope_theta: int = 10_000,
-        global_rope_theta: int = 1_000_000,
-        global_layer_interval: int = 6,
-        layer_norm_eps: float = 1e-6,
-        fused_ops: bool = False,
-        use_flash: Optional[bool] = None,
-        attn_backend: Optional[AttentionBackendName] = None,
-        dtype: DType = DType.float32,
-        **kwargs,
-    ) -> "TransformerConfig":
-        """
-        Create a Gemma 3-like model configuration.
-
-        Gemma 3 features:
-        - Hybrid local/global attention: 5 local layers with sliding window, then 1 global layer
-        - Dual RoPE frequencies: local layers use 10K, global layers use 1M
-        - QK-norm for attention score stabilization
-        - GeGLU activation (GELU with tanh approximation)
-
-        :param local_window_size: Sliding window size for local attention layers.
-        :param local_rope_theta: RoPE base frequency for local attention layers.
-        :param global_rope_theta: RoPE base frequency for global attention layers.
-        :param global_layer_interval: Number of layers per pattern cycle (default 6 = 5 local + 1 global).
-        """
-        layer_norm = LayerNormConfig(
-            name=LayerNormType.fused_rms if fused_ops else LayerNormType.rms,
-            eps=layer_norm_eps,
-            bias=False,
-            dtype=dtype,
-        )
-
-        pattern = [local_window_size] * (global_layer_interval - 1) + [-1]
-        sliding_window = SlidingWindowAttentionConfig(
-            pattern=pattern,
-            force_full_attention_on_first_layer=False,
-            force_full_attention_on_last_layer=False,
-        )
-
-        block = TransformerBlockConfig(
-            name=TransformerBlockType.peri_norm,
-            sequence_mixer=AttentionConfig(
-                name=AttentionType.default,
-                n_heads=n_heads,
-                n_kv_heads=n_kv_heads,
-                head_dim=head_dim,
-                bias=False,
-                rope=RoPEConfig(name=RoPEType.default, theta=local_rope_theta),
-                qk_norm=layer_norm,
-                use_head_qk_norm=True,
-                use_flash=use_flash,
-                backend=attn_backend,
-                sliding_window=sliding_window,
-                dtype=dtype,
-            ),
-            feed_forward=FeedForwardConfig(
-                hidden_size=hidden_size,
-                bias=False,
-                dtype=dtype,
-                activation=ActivationFunction.gelu_tanh,
-            ),
-            layer_norm=layer_norm,
-        )
-
-        block_overrides: Dict[int, TransformerBlockConfig] = {}
-        for layer_idx in range(n_layers):
-            if not sliding_window.should_use_swa(layer_idx, n_layers):
-                global_block = block.copy()
-                sequence_mixer = cast(AttentionConfig, block.sequence_mixer.copy())
-                sequence_mixer.rope = RoPEConfig(name=RoPEType.default, theta=global_rope_theta)
-                sequence_mixer.sliding_window = None
-                global_block.sequence_mixer = sequence_mixer
-                block_overrides[layer_idx] = global_block
-
-        return cls(
-            d_model=d_model,
-            vocab_size=vocab_size,
-            n_layers=n_layers,
-            block=block,
-            lm_head=LMHeadConfig(layer_norm=layer_norm, bias=False, dtype=dtype),
-            dtype=dtype,
-            block_overrides=block_overrides if block_overrides else None,
-            embed_scale=math.sqrt(d_model),
-            **kwargs,
-        )
-
-    def with_rope_scaling(
-        self, rope_scaling: RoPEScalingConfig, full_attn_layers_only: bool = True
-    ) -> "TransformerConfig":
-        """
-        Return a copy of this config with the given RoPE scaling scheme applied.
-        """
-        new_config = self.copy()
-        assert isinstance(
-            new_config.block.sequence_mixer, AttentionConfig
-        ), "Sequence mixer must be an attention config for RoPE scaling"
-        if new_config.block.sequence_mixer.rope is None:
-            raise ValueError("Cannot apply RoPE scaling to a model without RoPE.")
-        if new_config.block_overrides:
-            raise ValueError("Cannot apply RoPE scaling when block_overrides are already set.")
-
-        def apply_scaling(block_config: TransformerBlockConfig) -> None:
-            assert isinstance(block_config.sequence_mixer, AttentionConfig)
-            rope_config = block_config.sequence_mixer.rope
-            if rope_config is None:
-                raise ValueError("Cannot apply RoPE scaling to a layer without RoPE.")
-            rope_config = rope_config.copy()
-            rope_config.scaling = rope_scaling
-            block_config.sequence_mixer.rope = rope_config
-
-        if not full_attn_layers_only:
-            apply_scaling(new_config.block)
-            return new_config
-
-        # Add rope scaling only to layers that do not use sliding window attention
-        # We supply "block_overrides" for the layers we want to scale.
-        overrides: Dict[int, TransformerBlockConfig] = {}
-        for i in range(new_config.n_layers):
-            sliding_window_cfg = new_config.block.sequence_mixer.sliding_window
-            if sliding_window_cfg and sliding_window_cfg.should_use_swa(i, new_config.n_layers):
-                continue
-            block_copy = new_config.block.copy()
-            apply_scaling(block_copy)
-            overrides[i] = block_copy
-
-        new_config.block_overrides = overrides or None
-        return new_config

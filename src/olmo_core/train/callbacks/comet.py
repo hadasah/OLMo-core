@@ -200,11 +200,7 @@ class CometCallback(Callback):
     def post_step(self):
         cancel_check_interval = self.cancel_check_interval or self.trainer.cancel_check_interval
         if self.enabled and get_rank() == 0 and self.step % cancel_check_interval == 0:
-            self.trainer.run_bookkeeping_op(
-                self.check_if_canceled,
-                allow_multiple=False,
-                distributed=False,
-            )
+            self.trainer.thread_pool.submit(self.check_if_canceled)
 
     def post_train(self):
         if self.enabled and get_rank() == 0:
@@ -217,6 +213,7 @@ class CometCallback(Callback):
                     f"Experiment {self.exp.get_name()} ({self.exp.get_key()})",
                     status="completed successfully",
                 )
+            self.finalize()
 
     def on_error(self, exc: BaseException):
         del exc
@@ -232,9 +229,6 @@ class CometCallback(Callback):
                     f"Experiment {self.exp.get_name()} ({self.exp.get_key()})",
                     status="failed",
                 )
-
-    def close(self):
-        if self.enabled and get_rank() == 0:
             self.finalize()
 
     def check_if_canceled(self):

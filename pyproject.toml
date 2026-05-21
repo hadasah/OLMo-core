@@ -8,24 +8,21 @@ dynamic = ["version"]
 readme = "README.md"
 description = "Core training module for the Open Language Model (OLMo)"
 authors = [
-    { name = "Allen Institute for Artificial Intelligence", email = "olmo@allenai.org" },
+    { name = "Allen Institute for Artificial Intelligence", email = "olmo@allenai.org" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = { file = "LICENSE" }
 dependencies = [
-    "numpy",
+    "numpy<2.0",
     "torch>=2.6.0",
     "cached-path>=1.7.2",
-    "filelock>=3.4,<4.0",
     "requests",
     "packaging",
-    "dataclass-extensions>=0.2.8,<0.3.0",
-    "pyyaml",
     "rich",
+    "omegaconf",
     "safetensors",
     "importlib_resources",
-    "bettermap",
-    "pandas",
+    "ai2-olmo-eval==0.7.1",
 ]
 
 [project.urls]
@@ -35,38 +32,44 @@ Changelog = "https://github.com/allenai/OLMo-core/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
-    "black>=23.1,<24.0",
-    "boto3",
-    "build",
-    "furo==2024.8.6",
-    "google-cloud-storage",
-    "isort>=5.12,<5.14",
-    "matplotlib",
+    "ruff",
     "mypy>=1.0,<1.4",
-    "myst-parser>=1.0,<3.0",
+    "black>=23.1,<24.0",
+    "isort>=5.12,<5.14",
     "pytest",
     "pytest-memray",
     "pytest-sphinx",
     "pytest-xdist",
-    "ruff",
+    "twine>=1.11.0",
     "setuptools",
-    "Sphinx>=6.0,<=8.1.3",
+    "wheel",
+    "build",
+    "boto3",
+    "google-cloud-storage",
+    "Sphinx>=6.0,<9.0",
+    "furo==2024.8.6",
+    "myst-parser>=1.0",
+    "sphinx-copybutton",
     "sphinx-autobuild",
     "sphinx-autodoc-typehints==1.23.3",
-    "sphinx-copybutton",
     "sphinx-inline-tabs",
-    "twine>=1.11.0",
-    "wheel",
 ]
-beaker = ["beaker-py>=2.5.4,<3.0", "beaker-gantry>=3.4.3,<4.0", "GitPython>=3.0,<4.0", "google-cloud-compute"]
-comet = ["comet_ml"]
-dion = ["dion @ git+https://github.com/microsoft/dion.git@7452a5823cf9655b93c3f1d8020b4ebb2535239b ; sys_platform == 'linux'"]
-eval = ["ai2-olmo-eval==0.8.7"]
-fla = ["flash-linear-attention>=0.4.1"]
-torchao = ["torchao==0.15.0"]
-transformers = ["transformers<5.0"]
-wandb = ["wandb"]
-all = ["ai2-olmo-core[dev,beaker,comet,dion,eval,fla,torchao,transformers,wandb]"]
+beaker = [
+    "beaker-py>=1.36.0,<2.0",
+    "GitPython>=3.0,<4.0",
+]
+wandb = [
+    "wandb",
+]
+comet = [
+    "comet_ml",
+]
+transformers = [
+    "transformers",
+]
+all = [
+    "ai2-olmo-core[dev,beaker,wandb,comet,transformers]",
+]
 
 [tool.setuptools]
 include-package-data = true
@@ -102,11 +105,9 @@ exclude = '''
 [tool.isort]
 profile = "black"
 multi_line_output = 3
-known_first_party = ["olmo_core"]
-known_local_folder = ["constants", "routing_analysis", "single_train_launch", "slurm_job", "train_sweep", "utils"]
 
 [tool.ruff]
-line-length = 100
+line-length = 115
 
 [tool.ruff.lint]
 ignore = ["F403", "F405", "E501"]
@@ -142,22 +143,11 @@ exclude = [
 [tool.pyright]
 reportPrivateImportUsage = false
 
-[tool.ty.rules]
-possibly-missing-attribute = "ignore"
-possibly-missing-import = "ignore"
-unresolved-attribute = "warn"
-
-[[tool.ty.overrides]]
-include = ["src/olmo_core/nn/**"]
-
-[tool.ty.overrides.rules]
-unresolved-attribute = "ignore"
-
 [tool.mypy]
 ignore_missing_imports = true
 no_site_packages = true
 check_untyped_defs = true
-namespace_packages = false
+no_namespace_packages = true
 disable_error_code = "has-type"
 
 [[tool.mypy.overrides]]
@@ -166,17 +156,21 @@ strict_optional = false
 
 [tool.pytest.ini_options]
 testpaths = "src/test/"
-python_classes = ["Test*", "*Test"]
+python_classes = [
+  "Test*",
+  "*Test",
+]
 log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
 log_level = "DEBUG"
 log_cli = false
 log_cli_level = "DEBUG"
-markers = ["gpu"]
+markers = [
+    "gpu",
+]
 filterwarnings = [
     'ignore::FutureWarning:huggingface_hub\.file_download',
     'ignore::DeprecationWarning:pkg_resources',
     'ignore::DeprecationWarning:google\.rpc',
-    'ignore::DeprecationWarning:torchao\.dtypes.*',
     'ignore::FutureWarning:torch\.distributed\.checkpoint\.default_planner',
     'ignore::UserWarning:torch\.distributed\.checkpoint\.state_dict_saver',
     'ignore::UserWarning:torch\.distributed\.checkpoint\.state_dict_loader',

@@ -2,7 +2,6 @@
 Trainer :class:`Callback` implementations.
 """
 
-from .batch_size_scheduler import BatchSizeSchedulerCallback
 from .beaker import BeakerCallback
 from .callback import Callback, CallbackConfig
 from .checkpointer import CheckpointerCallback, CheckpointRemovalStrategy
@@ -14,12 +13,8 @@ from .evaluator_callback import (
     EvaluatorCallback,
     LMEvaluatorCallbackConfig,
 )
-from .gap_monitor import GAPMonitorCallback
 from .garbage_collector import GarbageCollectorCallback
 from .gpu_memory_monitor import GPUMemoryMonitorCallback
-from .list_checkpointer import ListCheckpointerCallback
-from .metric_saver import MetricSaverCallback
-from .monkey_patcher import MonkeyPatcherCallback
 from .profiler import ProfilerCallback
 from .sequence_length_scheduler import SequenceLengthSchedulerCallback
 from .slack_notifier import SlackNotificationSetting, SlackNotifierCallback
@@ -38,7 +33,6 @@ __all__ = [
     "EvaluatorCallback",
     "LMEvaluatorCallbackConfig",
     "DownstreamEvaluatorCallbackConfig",
-    "GAPMonitorCallback",
     "GarbageCollectorCallback",
     "GPUMemoryMonitorCallback",
     "ProfilerCallback",
@@ -48,10 +42,6 @@ __all__ = [
     "SpeedMonitorCallback",
     "WandBCallback",
     "BeakerCallback",
-    "BatchSizeSchedulerCallback",
-    "MonkeyPatcherCallback",
-    "MetricSaverCallback",
-    "ListCheckpointerCallback",
 ]
 
 __doc__ += "\n"

@@ -1,8 +1,8 @@
 import contextlib
 import logging
 from dataclasses import replace
-from functools import cached_property, lru_cache
-from typing import Any, Dict, Generator, Literal, Optional, Tuple, Union
+from functools import cached_property
+from typing import Any, Dict, Generator, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -37,16 +37,9 @@ from olmo_core.exceptions import OLMoConfigurationError
 from olmo_core.float8 import Float8Config
 from olmo_core.nn.lm_head import LMOutputWithLoss
 from olmo_core.nn.transformer import Transformer
-from olmo_core.nn.transformer.config import TransformerActivationCheckpointingMode
 from olmo_core.optim import OptimConfig, SkipStepOptimizer
 from olmo_core.optim.scheduler import Scheduler
-from olmo_core.utils import (
-    gc_cuda,
-    get_default_device,
-    log_once,
-    move_to_device,
-    warn_once,
-)
+from olmo_core.utils import gc_cuda, get_default_device, log_once, move_to_device
 
 from ...common import ReduceType
 from ..train_module import EvalBatchSpec, TrainModule
@@ -149,15 +142,6 @@ class TransformerTrainModule(TrainModule):
                 "Training parallelism configs are only valid for distributed training"
             )
 
-        if (
-            ac_config is not None
-            and ac_config.mode == TransformerActivationCheckpointingMode.budget
-            and not compile_model
-        ):
-            raise OLMoConfigurationError(
-                "Activation checkpointing with 'budget' mode requires compilation to be enabled"
-            )
-
         # Parallelize model.
         self.model = parallelize_model(
             model,
@@ -173,7 +157,6 @@ class TransformerTrainModule(TrainModule):
             ep_config=ep_config,
             ac_config=ac_config,
         )
-        self._model_mode: Optional[Literal["train", "eval"]] = None
 
         self._dp_config = dp_config
         self._cp_config = cp_config
@@ -234,10 +217,8 @@ class TransformerTrainModule(TrainModule):
     def _reduce_divide_factor(self) -> float:
         return get_reduce_divide_factor(self.world_size)
 
-    def pre_train(self):
+    def on_attach(self):
         # Validate batch size.
-        # NOTE: we run this in `pre_train()` instead of, say, `on_attach()` because callbacks
-        # like `BatchSizeScheduler` may change the global batch size after the module is attached.
         dp_ws = get_world_size(self.trainer.dp_process_group)
         if self.trainer.global_batch_size % (self.rank_microbatch_size * dp_ws) != 0:
             raise OLMoConfigurationError(
@@ -245,52 +226,40 @@ class TransformerTrainModule(TrainModule):
                 f"micro-batch size ({self.rank_microbatch_size:,d}) x DP world size ({dp_ws})"
             )
 
-    def state_dict(self, *, optim: Optional[bool] = None) -> Dict[str, Any]:
-        if optim is None:
-            optim = True
+    def state_dict(self, *, optim: bool = True) -> Dict[str, Any]:
         return self._get_state_dict(self.state_dict_save_opts, optim=optim)
 
-    def state_dict_to_load(
-        self, metadata: Metadata, *, optim: Optional[bool] = None
-    ) -> Dict[str, Any]:
+    def state_dict_to_load(self, metadata: Metadata, *, optim: bool = True) -> Dict[str, Any]:
+        load_opts = self.state_dict_load_opts
+
+        if "optim.param_groups.0.params" in metadata.state_dict_metadata:
+            # unflattened optimizer state
+            if load_opts.flatten_optimizer_state_dict:
+                log.warning(
+                    "Loading checkpoint with an unflattened optimizer state even though "
+                    "'flatten_optimizer_state_dict=True' in train module's 'state_dict_load_opts', "
+                    "automatically switching to 'flatten_optimizer_state_dict=False'."
+                )
+                load_opts = replace(load_opts, flatten_optimizer_state_dict=False)
+        else:
+            # flattened optimizer state
+            if not load_opts.flatten_optimizer_state_dict:
+                log.warning(
+                    "Loading checkpoint with a flattened optimizer state even though "
+                    "'flatten_optimizer_state_dict=False' in train module's 'state_dict_load_opts', "
+                    "automatically switching to 'flatten_optimizer_state_dict=True'."
+                )
+                load_opts = replace(load_opts, flatten_optimizer_state_dict=True)
+
         has_optim_state: bool = False
         for key in metadata.state_dict_metadata.keys():
             if key.startswith("optim."):
                 has_optim_state = True
                 break
 
-        if optim is None:
-            if not has_optim_state:
-                log.warning("No optimizer state found in checkpoint")
-                optim = False
-            else:
-                optim = True
-
-        load_opts = self.state_dict_load_opts
-        if optim:
-            if not has_optim_state:
-                raise RuntimeError(
-                    "Checkpoint does not contain optimizer state, but 'optim=True' was requested"
-                )
-
-            if "optim.param_groups.0.params" in metadata.state_dict_metadata:
-                # unflattened optimizer state
-                if load_opts.flatten_optimizer_state_dict:
-                    log.warning(
-                        "Loading checkpoint with an unflattened optimizer state even though "
-                        "'flatten_optimizer_state_dict=True' in train module's 'state_dict_load_opts', "
-                        "automatically switching to 'flatten_optimizer_state_dict=False'."
-                    )
-                    load_opts = replace(load_opts, flatten_optimizer_state_dict=False)
-            else:
-                # flattened optimizer state
-                if not load_opts.flatten_optimizer_state_dict:
-                    log.warning(
-                        "Loading checkpoint with a flattened optimizer state even though "
-                        "'flatten_optimizer_state_dict=False' in train module's 'state_dict_load_opts', "
-                        "automatically switching to 'flatten_optimizer_state_dict=True'."
-                    )
-                    load_opts = replace(load_opts, flatten_optimizer_state_dict=True)
+        if optim and not has_optim_state:
+            log.warning("No optimizer state found in checkpoint")
+            optim = False
 
         state_dict = self._get_state_dict(load_opts, optim=optim)
         if self.load_key_mapping is not None:
@@ -304,9 +273,7 @@ class TransformerTrainModule(TrainModule):
 
         return state_dict
 
-    def state_dict_to_save(self, *, optim: Optional[bool] = None) -> Dict[str, Any]:
-        if optim is None:
-            optim = True
+    def state_dict_to_save(self, *, optim: bool = True) -> Dict[str, Any]:
         return self._get_state_dict(self.state_dict_save_opts, optim=optim)
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
@@ -344,40 +311,22 @@ class TransformerTrainModule(TrainModule):
 
     def train_batch(self, batch: Dict[str, Any], dry_run: bool = False):
         # Set model to train mode if it isn't already.
-        self._set_model_mode("train")
+        self.model.train()
 
         # Generate labels.
         if "labels" not in batch:
             batch["labels"] = get_labels(batch, label_ignore_index=self.label_ignore_index)
 
-        # Calculate how many tokens will be used in the loss.
-        batch_num_tokens = batch["labels"].numel()
-        batch_num_tokens_per_instance = batch["labels"].shape[1]
+        # Record how many instances are going to be skipped (masked out).
+        if (instance_mask := batch.get("instance_mask")) is not None and not dry_run:
+            self.record_metric(
+                "train/masked instances (%)", (~instance_mask).float().mean(), ReduceType.mean
+            )
+
+        # Calculate how many tokens are going to be used in the loss.
         batch_num_tokens_for_loss = move_to_device(
             (batch["labels"] != self.label_ignore_index).sum(), self.device
         )
-
-        # Record percentage of masked labels.
-        self.record_metric(
-            "train/masked labels (%)",  # just a proportion, not a percentage
-            (batch_num_tokens - batch_num_tokens_for_loss) / batch_num_tokens,
-            ReduceType.mean,
-        )
-
-        # Record percentage of masked instances.
-        if (instance_mask := batch.get("instance_mask")) is not None:
-            self.record_metric(
-                "train/masked instances (%)",  # just a proportion, not a percentage
-                (~instance_mask).float().mean(),
-                ReduceType.mean,
-            )
-
-            # WARN: When we mask out instances with the instance filter, we count those tokens
-            # for the loss anyways. They will count as tokens with a zero loss. This means we
-            # get an artificially *low* loss for these batches. But it is really hard (and slow)
-            # to do this properly in a distributed setup. We add back in the full number of tokens
-            # for the loss so that each rank contributes to the loss calculation fairly.
-            batch_num_tokens_for_loss += (~instance_mask).sum() * batch_num_tokens_per_instance
 
         # Batch losses to record.
         ce_batch_loss = move_to_device(torch.tensor(0.0), self.device)
@@ -487,7 +436,7 @@ class TransformerTrainModule(TrainModule):
 
         input_ids, labels, model_kwargs = self._prepare_batch(batch, labels)
 
-        self._set_model_mode("eval")
+        self.model.eval()
 
         with self._eval_batch_context():
             return self.model_forward(
@@ -534,20 +483,8 @@ class TransformerTrainModule(TrainModule):
         with self._model_forward_context():
             return self.model(input_ids, labels=labels, **kwargs)
 
-    @lru_cache
-    def num_flops_per_token(self, seq_len: int) -> Optional[int]:
-        try:
-            return self.model.num_flops_per_token(seq_len)
-        except NotImplementedError as ex:
-            warn_once(f"Unable to estimate num flops per token: {ex}")
-            return None
-
-    def global_num_flops_in_batch(self, batch: Dict[str, Any]) -> Optional[int]:
-        global_num_tokens = self.trainer.data_loader.global_num_tokens_in_batch(batch)
-        if global_num_tokens is None:
-            return None
-        flops_per_token = self.num_flops_per_token(seq_len=batch["input_ids"].shape[1])
-        return flops_per_token * global_num_tokens if flops_per_token is not None else None
+    def num_flops_per_token(self, seq_len: int) -> int:
+        return self.model.num_flops_per_token(seq_len)
 
     @contextlib.contextmanager
     def _train_microbatch_context(
@@ -632,13 +569,3 @@ class TransformerTrainModule(TrainModule):
         if "doc_lens" in batch and "max_doc_lens" in batch:
             log_once(log, "intra-document masking enabled")
         return input_ids, labels, batch
-
-    def _set_model_mode(self, mode: Literal["train", "eval"]):
-        if self._model_mode != mode:
-            if mode == "train":
-                self.model.train()
-            elif mode == "eval":
-                self.model.eval()
-            else:
-                raise ValueError(f"Invalid model mode: {mode}")
-            self._model_mode = mode

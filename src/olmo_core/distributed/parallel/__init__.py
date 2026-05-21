@@ -43,6 +43,7 @@ __all__ = [
     "PipelineScheduleType",
     "PipelineSplitStyle",
     "PipelineSchedule",
+    "ContextParallelConfig",
 ]
 
 log = logging.getLogger(__name__)
@@ -254,11 +255,6 @@ def build_world_mesh(
 
 
 def get_device_mesh_info(device_mesh: DeviceMesh) -> str:
-    """
-    Get a human-readable string representation of a ``DeviceMesh``.
-
-    :param device_mesh: The device mesh to get info for.
-    """
     shape: str
     if device_mesh.mesh_dim_names is not None:
         shape = ", ".join(
@@ -313,30 +309,18 @@ def _get_model_mesh(device_mesh: DeviceMesh) -> Tuple[DeviceMesh, Tuple[str, ...
             MeshDimName.dp,
             MeshDimName.ep,
             name=MeshDimName.dp_ep,
-            dim_names=dim_names,
         )
     elif MeshDimName.ep_replicate in dim_names and MeshDimName.ep_shard in dim_names:
         device_mesh, dim_names = _flatten_dims(
-            device_mesh,
-            MeshDimName.ep_replicate,
-            MeshDimName.ep_shard,
-            name=MeshDimName.dp,
-            dim_names=dim_names,
+            device_mesh, MeshDimName.ep_replicate, MeshDimName.ep_shard, name=MeshDimName.dp
         )
 
     # Context parallel dimension gets flattened into the adjacent DP dimension.
-    # NOTE: We do this because for param-synchronization purposes a CP group behaves like an extra
-    # DP replica set. CP splits the context across ranks but every CP rank still holds a copy of
-    # the model parameters. Gradients need to be reduced across the union of DP ranks and CP ranks.
     if MeshDimName.cp in dim_names:
         last_dp_dim = dim_names[dim_names.index(MeshDimName.cp) - 1]
         assert last_dp_dim.startswith("dp")
         device_mesh, dim_names = _flatten_dims(
-            device_mesh,
-            last_dp_dim,
-            MeshDimName.cp,
-            name=MeshDimName.dp_cp,
-            dim_names=dim_names,
+            device_mesh, last_dp_dim, MeshDimName.cp, name=MeshDimName.dp_cp
         )
 
     return device_mesh, dim_names
@@ -345,7 +329,7 @@ def _get_model_mesh(device_mesh: DeviceMesh) -> Tuple[DeviceMesh, Tuple[str, ...
 def get_dp_model_mesh(device_mesh: DeviceMesh) -> DeviceMesh:
     """
     Get the right sub-mesh for a data parallel model wrapper like FSDP or DDP from a ``DeviceMesh``
-    created by :func:`build_world_mesh()`.
+    created by :func:`build_worald_mesh()`.
 
     .. important::
         You should use :func:`get_dp_mesh()` instead for getting the sub-mesh to assign ranks
@@ -380,7 +364,6 @@ def get_dp_mesh(device_mesh: DeviceMesh) -> DeviceMesh:
             MeshDimName.dp,
             MeshDimName.ep,
             name=MeshDimName.dp_ep,
-            dim_names=dim_names,
         )
     elif MeshDimName.ep_replicate in dim_names and MeshDimName.ep_shard in dim_names:
         device_mesh, dim_names = _flatten_dims(
@@ -388,7 +371,6 @@ def get_dp_mesh(device_mesh: DeviceMesh) -> DeviceMesh:
             MeshDimName.ep_replicate,
             MeshDimName.ep_shard,
             name=MeshDimName.dp,
-            dim_names=dim_names,
         )
 
     # Flattened context parallel dimensions should not be in this mesh since ranks within the
@@ -415,36 +397,6 @@ def get_dp_process_group(device_mesh: DeviceMesh) -> ProcessGroup:
         return dp_mesh._flatten(mesh_dim_name=MeshDimName.dp).get_group()
     else:
         return dp_mesh.get_group()
-
-
-def get_dp_shard_mesh(device_mesh: DeviceMesh) -> DeviceMesh:
-    """
-    Get the data parallel shard sub-mesh associated with a ``DeviceMesh``
-    created from :func:`build_world_mesh()`.
-    :param device_mesh: The world mesh created by :func:`build_world_mesh()`.
-    """
-    device_mesh, dim_names = _get_model_mesh(device_mesh)
-    if MeshDimName.dp_shard in dim_names:
-        return device_mesh[MeshDimName.dp_shard]
-    else:
-        raise RuntimeError(
-            f"could not determine data parallel shard sub-mesh from mesh with dimensions {dim_names}"
-        )
-
-
-def get_dp_replicate_mesh(device_mesh: DeviceMesh) -> DeviceMesh:
-    """
-    Get the data parallel replicate sub-mesh associated with a ``DeviceMesh``
-    created from :func:`build_world_mesh()`.
-    :param device_mesh: The world mesh created by :func:`build_world_mesh()`.
-    """
-    device_mesh, dim_names = _get_model_mesh(device_mesh)
-    if MeshDimName.dp_replicate in dim_names:
-        return device_mesh[MeshDimName.dp_replicate]
-    else:
-        raise RuntimeError(
-            f"could not determine data parallel replicate sub-mesh from mesh with dimensions {dim_names}"
-        )
 
 
 def get_ep_mesh(device_mesh: DeviceMesh) -> DeviceMesh:
@@ -524,11 +476,7 @@ def get_pp_mesh(device_mesh: DeviceMesh) -> DeviceMesh:
 
 def get_pp_stage_mesh(device_mesh: DeviceMesh, pp_mesh: Optional[DeviceMesh] = None) -> DeviceMesh:
     """
-    Get the sub-mesh for a single pipeline stage.
-
-    :param device_mesh: The world mesh created by :func:`build_world_mesh()`.
-    :param pp_mesh: Optional pipeline parallel mesh. If not provided, it will be
-        extracted from the device_mesh using :func:`get_pp_mesh()`.
+    Get the sub-mesh for a pipeline stage.
     """
     if pp_mesh is None:
         pp_mesh = get_pp_mesh(device_mesh)
@@ -543,67 +491,23 @@ def get_pp_stage_mesh(device_mesh: DeviceMesh, pp_mesh: Optional[DeviceMesh] = N
 
 
 def _flatten_dims(
-    device_mesh: DeviceMesh,
-    *dims: str,
-    name: Optional[str] = None,
-    dim_names: Optional[Tuple[str, ...]] = None,
+    device_mesh: DeviceMesh, *dims: str, name: Optional[str] = None
 ) -> Tuple[DeviceMesh, Tuple[str, ...]]:
-    """
-    Flatten *dims* into a single dimension called *name*.
-
-    :param device_mesh: The world-mesh object. Only views of *device_mesh* are actually mutated.
-    :param dims: The existing dimension names to merge.
-    :param name: New dimension name. If ``None`` we join *dims* with "_".
-    :param dim_names: Optional cached list of current dimension names. Supplying this avoids
-        relying on ``device_mesh.mesh_dim_names`` (which is stale after a prior
-        flatten) and therefore allows chaining multiple flatten operations.
-
-    :returns: The root mesh (now indexable by the new dimension names
-        as well as the original names) and the new dimension names.
-    """
     if name is None:
         name = "_".join(dims)
-
-    curr_names = list(dim_names or device_mesh.mesh_dim_names or [])
-    if not curr_names:
-        raise RuntimeError("Could not determine current dimension names for flattening")
-
     log.info(f"Flattening mesh dimensions {dims} into {name}")
-
-    out_names: list[str] = []
-    for n in curr_names:
+    assert (names := device_mesh.mesh_dim_names) is not None
+    out_names = []
+    for n in names:
         if n in dims:
             if name not in out_names:
                 out_names.append(name)
         else:
             out_names.append(n)
-
-    flatten_mesh(device_mesh[dims], name)  # in-place flatten on sub-mesh
+    device_mesh[dims]._flatten(mesh_dim_name=name)
     new_names = tuple(out_names)
-
-    # NOTE: device_mesh.mesh_dim_names is not updated based on the flatten operation.
-    # We need to check that the root mesh is indexable by the new dimension names.
-    # Check each dimension individually since PyTorch requires ascending order for multi-dim indexing.
-    for dim_name in new_names:
-        try:
-            _ = device_mesh[dim_name]
-        except KeyError as exc:
-            raise RuntimeError(
-                f"Flattening failed: root device mesh does not recognize dimension "
-                f"'{dim_name}'. New dims: {new_names}, original dims: {dims}."
-            ) from exc
-
-    return device_mesh, new_names
+    return device_mesh[new_names], new_names
 
 
-def flatten_mesh(device_mesh: DeviceMesh, name: Optional[str] = None) -> DeviceMesh:
-    """
-    Flatten a multi-dimensional ``DeviceMesh`` into a 1D ``DeviceMesh``.
-
-    :param device_mesh: The multi-dimensional ``DeviceMesh`` to flatten.
-    :param name: Optional name for the flattened dimension.
-
-    .. important::
-        The ``device_mesh`` is modified in-place.
-    """
+def flatten_mesh(device_mesh: DeviceMesh, name: Optional[str] = None):
     return device_mesh._flatten(mesh_dim_name=name)
