@@ -1,166 +1,199 @@
-<div align="center">
-  <!-- <img src="https://github.com/allenai/OLMo/assets/8812459/774ac485-a535-4768-8f7c-db7be20f5cc3" width="300"/> -->
-  <img src="https://huggingface.co/datasets/allenai/blog-images/resolve/main/olmo2/olmo.png" alt="OLMo Logo" width="280" style="margin-left:'auto' margin-right:'auto' display:'block'"/>
-  <br>
-  <h1>OLMo-core</h1>
-  <h4>Building blocks for OLMo modeling and training</h4>
-</div>
-<p align="center">
-  <a href="https://olmo-core.readthedocs.io/en/latest/">
-    <img alt="Docs" src="https://img.shields.io/badge/API-docs-red">
-  </a>
-  <a href="https://github.com/allenai/OLMo-core/tree/main/src/examples">
-    <img alt="Examples" src="https://img.shields.io/badge/API-examples-994B00">
-  </a>
-  <a href="https://github.com/allenai/OLMo-core/releases/tag/v1.9.0">
-    <img alt="Pypi" src="https://img.shields.io/pypi/v/ai2-olmo-core.svg">
-  </a>
-  <a href="https://github.com/allenai/OLMo-core/blob/main/LICENSE">
-    <img alt="GitHub License" src="https://img.shields.io/github/license/allenai/OLMo">
-  </a>
-  <a href="https://arxiv.org/pdf/2501.00656.pdf">
-    <img alt="Paper URL" src="https://img.shields.io/badge/arxiv-2402.00838-orange">
-  </a>
-  <a href="https://playground.allenai.org">
-    <img alt="Playground" src="https://img.shields.io/badge/Ai2-Playground-F0529C">
-  </a>
-  <a href="https://discord.gg/sZq3jTNVNG">
-    <img alt="Discord" src="https://img.shields.io/badge/Discord%20-%20blue?style=flat&logo=discord&label=Ai2&color=%235B65E9">
-  </a>
-</p>
+# Slicing and Dicing — Training & Eval Scripts
 
-## Installation
+This directory contains the code for the *Slicing and Dicing: Configuring Optimal Mixture-of-Experts Models* paper. The training/eval stack is a hard fork of [OLMo-core](https://github.com/allenai/OLMo-core). See `README_olmo_core.md` for those docs, which we have not edited.
 
-First install [PyTorch](https://pytorch.org) according to the instructions specific to your operating system and hardware.
+Script used to launch our trianing and eval runs live in the `scripts` folder:
+- `single_train_launch.py` — pretraining entry point
+- `single_eval_launch.py` — eval-only entry point that loads a checkpoint and runs the same LM + downstream evaluators that fire during training.
+- `data/` — shell helpers for downloading and preprocessing the OLMoE data mixes. **Provided as-is**: they contain cluster-specific paths and will need to be edited to your environment before they run.
 
-For development, we recommend installing from source:
+---
+
+## Setup
 
 ```bash
-git clone https://github.com/allenai/OLMo-core.git
-cd OLMo-core
+ENV_NAME=sandd_olmo_core
+SANDD_PATH=$YOUR_DIR/slicing_and_dicing
+
+mamba create -n $ENV_NAME python=3.11
+mamba activate $ENV_NAME
+
+git clone https://github.com/hadasah/slicing_and_dicing.git $SANDD_PATH
+cd $SANDD_PATH
 pip install -e .[all]
-```
-For dropless MoEs, use https://github.com/sneha-rk/grouped_gemm to use most GPUs. Simply pip install . from source
-```
-git clone https://github.com/sneha-rk/grouped_gemm.git
-pip install .
-```
 
-Or you can install from PyPI with:
+# Optional but recommended for fast MoE kernels.
+git clone --recursive https://github.com/sneha-rk/grouped_gemm
+cd grouped_gemm
+GROUPED_GEMM_CUTLASS=1 pip install .
+```
+We use cuda 12.6.3.
+
+### Environment variables / accounts
+
+| Service | Variable / setting | Notes |
+|---|---|---|
+| Weights & Biases | `WANDB_API_KEY`; `--wandb_entity` / `--wandb_project` (or edit `USER_PROJECT_SPECS` in the launch script) | Enabled by default in `single_train_launch.py`. |
+| Comet | `COMET_API_KEY` | Disabled by default. Set `enabled=True` on the `CometCallback` in the launch script to use. |
+| HuggingFace | `HF_TOKEN` | Only required if a data mix or tokenizer download needs it. |
+
+### `USER_PROJECT_SPECS`
+
+Each launch script has a `USER_PROJECT_SPECS` dict near the top. Fill these in once before your first run so you don't have to pass them on every command line:
+
+| Key | Meaning |
+|---|---|
+| `DEFAULT_SAVE_PATH` | Parent directory under which `{run_name}/` checkpoints and configs are written. Defaults to `<repo>/models`. |
+| `DATAROOT` | Root URL or directory containing the **training** data mix shards. |
+| `VALID_DATA_DIR` | Root URL or directory containing the **validation** mix shards. |
+| `DATA_WORK_DIR` | Local scratch directory used to materialize/cached the data mix. |
+| `WANDB_ENTITY` / `WANDB_PROJECT` | W&B entity and project for logging. |
+| `PROJECT_DIR` | Repo root, auto-derived from the script's path. |
+
+CLI flags (e.g. `--data_root`) override the matching entry at run time.
+
+---
+
+## Data
+
+We use the pretraining data mix from OLMoE. Follow the [instructions](https://github.com/allenai/OLMoE/blob/main/README.md#pretraining) in their repo to download and preprocess the data, or adapt the shell scripts in `scripts/data/` (`get_0824_preprocessed_mix.sh`, `get_1124_preprocessed_mix.sh`, `preprocess_data.sh`, …) to your storage layout. The shell scripts assume `wget` (and, for the AWS variant, the `aws` CLI with credentials). `preprocess_data.sh` calls the `dolma` CLI.
+
+---
+
+## Running a single training job
 
 ```bash
-pip install ai2-olmo-core
+torchrun --nproc-per-node=1 scripts/single_train_launch.py run_name \
+    --model_name=olmo2_ml_80M \
+    --moe_num_experts_list=32 \
+    --moe_hidden_multipliers_list=0.25 \
+    --moe_router_top_ks_list=4 \
+    --moe_generalist_hidden_multiplier=0 \
+    --moe_type=dropless \
+    --train_datamix_name=OLMoE_mix_0824 \
+    --train_module.optim.lr=4e-4
 ```
 
-There are a number of optional dependencies that must be installed to use certain functionality as well, including:
-- [flash-attn](https://github.com/Dao-AILab/flash-attention) and [ring-flash-attn](https://github.com/zhuzilin/ring-flash-attention) for intra-document masking and context parallelism.
-- [Liger-Kernel](https://github.com/linkedin/Liger-Kernel) for a low-memory "fused-linear" loss implementation.
-- [torchao](https://github.com/pytorch/ao) for float8 training.
-- [grouped_gemm](https://github.com/tgale96/grouped_gemm) for dropless mixture-of-experts (MoE) models. You may need to compile from source until [PR #21](https://github.com/tgale96/grouped_gemm/pull/21) is released (post v0.1.6).
+The positional `run_name` argument becomes the WandB run name. Checkpoints and logs are saved in a subdirectory under `save_root` (i.e. at `{save_root}/{run_name}`).
 
-The published [Docker images](https://github.com/orgs/allenai/packages?repo_name=OLMo-core) contain all core and optional dependencies, and are regularly tested on our in-house H100 clusters.
-But there are several things to keep in mind if you intend to use these images:
-- They do not come with the OLMo-core package installed, only its dependencies, to accommodate for regular code changes.
-- They may not work on your own cluster if you have different hardware or driver/CUDA versions.
+---
 
-If the published images do not work for your use-case for any of the above reasons, you could adapt our [Dockerfile](https://github.com/allenai/OLMo-core/blob/main/src/Dockerfile) to build your own images.
-
-## Official training scripts
-
-Official training scripts for released models can be found in [`src/scripts/official/`](https://github.com/allenai/OLMo-core/tree/main/src/scripts/official).
-These scripts are meant to be launched with ``torchrun``. For example:
+## Running a single eval-only job
 
 ```bash
-torchrun --nproc-per-node=8 ./src/scripts/official/OLMo-2-0325-32B-train.py run01
+torchrun --nproc-per-node=1 scripts/single_eval_launch.py run_name \
+    --model_name=olmo2_ml_80M \
+    --moe_num_experts_list=32 \
+    --moe_hidden_multipliers_list=0.25 \
+    --moe_router_top_ks_list=4 \
+    --moe_generalist_hidden_multiplier=0 \
+    --moe_type=dropless \
+    --train_datamix_name=OLMoE_mix_0824 \
+    --train_module.optim.lr=4e-4
 ```
 
-You can override most configuration options from the command-line. For example, to override the learning rate you could launch the script like this:
+This script looks for the checkpoint under `{save_root}/{run_name}`, so make sure the `run_name` and `save_root` match what was passed to `single_train_launch.py`. 
+
+---
+
+## MoE configuration
+
+A variety of our MoE architecture configuration choices may be specified through the command line. Length of the three `*_list` arguments must match — heterogeneous MoE just means each entry describes one expert group within a layer.
+
+| Flag                                  | Type           | Default     | Meaning                                                                       |
+|---------------------------------------|----------------|-------------|-------------------------------------------------------------------------------|
+| `--moe_num_experts_list`              | str            | `32,64`     | Experts per MoE layer. `1` means dense. Multiple values, comma-separated = heterogeneous MoE (different expert counts per group within one layer). |
+| `--moe_hidden_multipliers_list`       | str            | `0.25,0.125` | Expert hidden-size multiplier(s), multiplied by `d_model` to get expert FFN intermediate dimension. Length must match `--moe_num_experts_list`.  |
+| `--moe_router_top_ks_list`            | str            | `2,4`       | Top-k value(s) per router. Length must match `--moe_num_experts_list`.                 |
+| `--moe_generalist_hidden_multiplier`  | float          | `1`         | Generalist / shared expert hidden-size multipliers. A `0` value indicates no generalist.         |
+| `--moe_type`                          | `default` / `dropless` | `default` | `dropless` uses uncapped routing (no token drops); `default` uses a capacity factor. |
+| `--moe_bias_gamma`                    | float or None  | None        | DeepSeek-v3-style loss-free load balancing bias γ                                 |
+| `--moe_z_loss_weight`                 | float          | `0.001`     | Router z-loss weight                                |
+| `--moe_lb_loss_weight`                | float          | `0.01`      | Load-balancing loss weight. A `0` value indicates no load balancing loss                              |
+| `--expert_assignment`                 | `learned` / `uniform` | `learned` | `uniform` bypasses the router and weights all expert outputs equally. _Only_ used for ablations. |
+
+Other hyperparameters and settings (e.g., learning rate, weight decay, etc.) can also be set with the [override mechanism](#overriding-arbitrary-config-fields) below.
+
+### Examples
+
+**Dense baseline** (no MoE):
 
 ```bash
-torchrun --nproc-per-node=8 ./src/scripts/train/OLMo-2-0325-32B-train.py run01 --train_module.optim.lr=6e-3
+--moe_num_experts_list=1
 ```
-To continue annealing from a checkpoint, we use a separate script which can be launched like this:
+
+**Homogeneous MoE** — 32 experts, top-4, dropless:
 
 ```bash
-torchrun --nproc-per-node=8 ./src/scripts/train/OLMo-2-0325-32B-anneal.py anneal_run01 https://olmo-checkpoints.org/ai2-llm/peteish32/step721901/
+--moe_num_experts_list=32 --moe_hidden_multipliers_list=0.25 \
+--moe_router_top_ks_list=4 --moe_generalist_hidden_multiplier=0 \
+--moe_type=dropless
 ```
 
-## OLMo-2 Model Training
+**MoE w/ Generalist** — 32 experts + a dense FFN with multiplier 0.5:
 
-OLMo-2 32B pretraining follows a two-stage training procedure.
-In the first stage, we train on large amounts of mostly web-based data: [OLMo-mix-1124](https://huggingface.co/datasets/allenai/olmo-mix-1124).
-In the second stage, we train on a smaller amount of high-quality, targeted data: Dolmino-mix-0324 (releasing soon).
-
-| Stage | Model Size | Training | Checkpoint | Monitoring |
-|------------|----------|------------|------------|------------|
-| stage 1 | **32B** | 6T tokens | [stage1-step721901-tokens6056B](https://huggingface.co/allenai/OLMo-2-0325-32B/tree/stage1-step721901-tokens6056B) | [comet.ml/OLMo2-32B](https://www.comet.com/ai2/olmo-2-0325-32b/reports/olmo-2-0325-32b?shareable=WhT37Wy7jqttDoy6ysDBumQzf) |
-| stage 2 | **32B** | random seed 1110, 100B tokens | [stage2-ingredient1-step11921-tokens101B](https://huggingface.co/allenai/OLMo-2-0325-32B/tree/stage2-ingredient1-step11921-tokens101B) | [comet.ml/OLMo2-32B](https://www.comet.com/ai2/olmo-2-0325-32b/reports/olmo-2-0325-32b-anneal?shareable=WhT37Wy7jqttDoy6ysDBumQzf) |
-| |  | random seed 2662, 100B tokens | [stage2-ingredient2-step11921-tokens101B](https://huggingface.co/allenai/OLMo-2-0325-32B/tree/stage2-ingredient2-step11921-tokens101B) | [comet.ml/OLMo2-32B](https://www.comet.com/ai2/olmo-2-0325-32b/reports/olmo-2-0325-32b-anneal?shareable=WhT37Wy7jqttDoy6ysDBumQzf) |
-|  |  | random seed 2662, 300B tokens | [stage2-ingredient3-step35763-tokens301B](https://huggingface.co/allenai/OLMo-2-0325-32B/tree/stage2-ingredient3-step35763-tokens301B) | [comet.ml/OLMo2-32B](https://www.comet.com/ai2/olmo-2-0325-32b/reports/olmo-2-0325-32b-anneal?shareable=WhT37Wy7jqttDoy6ysDBumQzf) |
-|  |  | **Final Souped Model** | [main](https://huggingface.co/allenai/OLMo-2-0325-32B/tree/main) | No config, weights averaged in Python | - |
-
-The table below lists the checkpoints for Stage 1 and Stage 2 of OLMo-2, along with their corresponding Hugging Face format.
-
-| Variant         | OLMo Format (Stage 1)                                                                                         | OLMo Format (Stage 2) | Hugging Face Format                                                               |
-|----------------|-----------------------------------------------------------------------------------------------------|--------|----------------------------------------------------------------------------------|
-| **OLMo-2 32B**  | [OLMo-2 32B](https://github.com/allenai/OLMo-core/blob/main/src/scripts/official/OLMo-2-0325-32B.csv)     | [OLMo-2 32B](https://github.com/allenai/OLMo-core/blob/main/src/scripts/official/OLMo-2-0325-32B-stage2.csv)      | [Hugging Face for the 32B variant](https://huggingface.co/allenai/OLMo-2-0325-32B)  |
-
-
-> Note: OLMo-2 7B and 13B models were trained using [the old OLMo trainer](https://github.com/allenai/OLMo). All related checkpoints, configs, and scripts for these models can be found there. While you can train 7B and 13B models with this trainer, please note that the configs and script in the old training codebase are not compatible with this repo.
-
-## Inference
-
-You can use our Hugging Face integration to run inference on the OLMo transformers checkpoints:
-
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-olmo = AutoModelForCausalLM.from_pretrained("allenai/OLMo-2-0325-32B")
-tokenizer = AutoTokenizer.from_pretrained("allenai/OLMo-2-0325-32B")
-message = ["Language modeling is "]
-inputs = tokenizer(message, return_tensors='pt', return_token_type_ids=False)
-# inputs = {k: v.to('cuda') for k,v in inputs.items()} # optional verifying cuda
-# olmo = olmo.to('cuda')
-response = olmo.generate(**inputs, max_new_tokens=100, do_sample=True, top_k=50, top_p=0.95)
-print(tokenizer.batch_decode(response, skip_special_tokens=True)[0])
+```bash
+--moe_num_experts_list=32 --moe_hidden_multipliers_list=0.5 \
+--moe_router_top_ks_list=2 --moe_generalist_hidden_multiplier=0.5
 ```
 
-Alternatively, with the Hugging Face pipeline abstraction:
+**Heterogeneous MoE** — two groups per layer, 8 wider experts + 32 narrower experts:
 
-```python
-from transformers import pipeline
-olmo_pipe = pipeline("text-generation", model="allenai/OLMo-2-0325-32B")
-print(olmo_pipe("Language modeling is"))
-```
-### Quantization
-
-```python
-olmo = AutoModelForCausalLM.from_pretrained("allenai/OLMo-2-0325-32B", torch_dtype=torch.float16, load_in_8bit=True)  # requires bitsandbytes
+```bash
+--moe_num_experts_list=8,32 --moe_hidden_multipliers_list=0.25,0.125 \
+--moe_router_top_ks_list=2,4 --moe_generalist_hidden_multiplier=0
 ```
 
-## Evaluation
+### Available model sizes
 
-Additional tools for evaluating OLMo models are available at the [OLMo Eval](https://github.com/allenai/OLMo-eval) and [olmes](https://github.com/allenai/olmes) repositories.
+`olmo2_ml_10M`, `olmo2_ml_20M`, `olmo2_ml_50M`, `olmo2_ml_80M`, `olmo2_ml_100M`, `olmo2_ml_110M`, `olmo2_ml_200M`, `olmo2_ml_300M`, `olmo2_ml_500M` (see `MODEL_CONFIG_LOOKUP` in `single_train_launch.py`). Paper does not show results for `olmo2_ml_500M`, since our resource constraints resulted in a limited number of completed runs at that model parameter scale.
 
-## Development
+---
 
-The Python library source code is located in `src/olmo_core`. The corresponding tests are located in `src/test`. The library docs are located in `docs`. You can build the docs locally with `make docs`.
+## Data, model, and runtime flags
 
-Code checks:
-- We use `pytest` to run tests. You can run all tests with `pytest -v src/test`. You can also point `pytest` at a specific test file to run it individually.
-- We use `isort` and `black` for code formatting. Ideally you should integrate these into your editor, but you can also run them manually or configure them with a pre-commit hook. To validate that all files are formatted correctly, run `make style-check`.
-- We use `ruff` as our primary linter. You can run it with `make lint-check`.
-- We use `mypy` as our type checker. You can run it with `make type-check`.
+| Flag                       | Type    | Default          | Meaning                                                                |
+|----------------------------|---------|------------------|------------------------------------------------------------------------|
+| `--tokenizer_name`         | str     | `dolma2`         | Tokenizer to use. We only use `dolma2`, but additional tokenizers may be added to `TOKENIZER_LOOKUP` and used |
+| `--train_datamix_name`     | str     | `OLMoE_mix_0824` | Training data mix                       |
+| `--valid_datamix_name`     | str     | `v3_small_ppl_validation` | Validation data                                              |
+| `--data_root`              | str     | `USER_PROJECT_SPECS["DATAROOT"]` | Root URL/dir for training data                       |
+| `--valid_data_dir`         | str     | `USER_PROJECT_SPECS["VALID_DATA_DIR"]` | Root URL/dir for validation data               |
+| `--data_work_dir`          | str     | `USER_PROJECT_SPECS["DATA_WORK_DIR"]` | Local scratch directory for mix materialization           |
+| `--save_root`              | str     | `USER_PROJECT_SPECS["DEFAULT_SAVE_PATH"]` | Parent directory for saving checkpoints, configs, and logs        |
+| `--sequence_length`        | int     | `2048`           | Sequence length                                                 |
+| `--global_batch_size`      | int     | `512`            | Number of sequences per batch                                             |
+| `--per_gpu_batch_size`     | int     | `16`             | Number of sequences per GPU. (Per-call programmatic default in `build_config` is `4` — the argparse default is what you get from the CLI.) |
+| `--scheduler`              | `cosine` / `wsd` | `cosine` | LR schedule. We use `cosine` in all main experiments.                                                      |
 
-## Citing
+---
 
+## Overriding other config fields
+
+Any field of `ExperimentConfig` can be overridden from the CLI with dotted-path flags. The launch script captures unknown args with `parse_known_args()` and applies them via `ExperimentConfig.merge(overrides)`:
+
+```bash
+--train_module.optim.lr=4e-4
+--train_module.optim.weight_decay=0.1
+--train_module.scheduler.warmup_steps=2000
+--trainer.max_duration.value=1600000000   # tokens
+--trainer.save_interval=200
+```
+
+---
+
+## Citation
 ```bibtex
-@misc{olmo20242olmo2furious,
-      title={{2 OLMo 2 Furious}},
-      author={{Team OLMo} and Pete Walsh and Luca Soldaini and Dirk Groeneveld and Kyle Lo and Shane Arora and Akshita Bhagia and Yuling Gu and Shengyi Huang and Matt Jordan and Nathan Lambert and Dustin Schwenk and Oyvind Tafjord and Taira Anderson and David Atkinson and Faeze Brahman and Christopher Clark and Pradeep Dasigi and Nouha Dziri and Michal Guerquin and Hamish Ivison and Pang Wei Koh and Jiacheng Liu and Saumya Malik and William Merrill and Lester James V. Miranda and Jacob Morrison and Tyler Murray and Crystal Nam and Valentina Pyatkin and Aman Rangapur and Michael Schmitz and Sam Skjonsberg and David Wadden and Christopher Wilhelm and Michael Wilson and Luke Zettlemoyer and Ali Farhadi and Noah A. Smith and Hannaneh Hajishirzi},
-      year={2024},
-      eprint={2501.00656},
+@misc{slicinganddicing,
+      title={Slicing and Dicing: Configuring Optimal Mixtures of Experts}, 
+      author={Margaret Li and Sneha Kudugunta and Danielle Rothermel and Luke Zettlemoyer},
+      year={2026},
+      eprint={2605.11689},
       archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2501.00656},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2605.11689}, 
 }
 ```
+
+Citation for OLMo-core can be found in `README_olmo_core.md`.
+The original OLMo-core repo is licensed with Apache 2.0. See `LICENSE`.

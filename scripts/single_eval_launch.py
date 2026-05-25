@@ -80,7 +80,6 @@ USER_PROJECT_SPECS = {
     "WANDB_ENTITY": "",
     "PROJECT_DIR": DEFAULT_DIR_PATH,
     "DATAROOT": "",
-    "NAME_KEYS": [],
 }
 
 DATA_SEED = 34521
@@ -138,8 +137,8 @@ def build_config(
     adam_betas: tuple[float, float] = (0.9, 0.95),
     z_loss_multiplier: float = 1e-5,
     moe_num_experts_list: List[int] = [32, 64],
-    moe_hidden_multipliers_list: List[int] = [1024, 2048],
-    moe_router_top_ks_list: List[int] = [4, 8],
+    moe_hidden_multipliers_list: List[float] = [0.25, 0.125],
+    moe_router_top_ks_list: List[int] = [2, 4],
     moe_generalist_hidden_multiplier: int = 1,
     moe_type: str = "default",  # "default" or "dropless"
     moe_bias_gamma: Optional[float] = None,
@@ -388,8 +387,8 @@ if __name__ == "__main__":
     parser.add_argument("--scheduler", type=str, default="cosine", choices=["wsd", "cosine"], help="Scheduler type to use")
     parser.add_argument("--per_gpu_batch_size", type=int, default=16, help="Batch size per GPU")
     parser.add_argument("--moe_num_experts_list", type=str, default="32,64", help="List of number of experts for MoE")
-    parser.add_argument("--moe_hidden_multipliers_list", type=str, default="1024,2048", help="List of hidden sizes multiplers for MoE")
-    parser.add_argument("--moe_router_top_ks_list", type=str, default="4,8", help="List of router top-k values for MoE")
+    parser.add_argument("--moe_hidden_multipliers_list", type=str, default="0.25,0.125", help="List of hidden sizes multiplers for MoE")
+    parser.add_argument("--moe_router_top_ks_list", type=str, default="2,4", help="List of router top-k values for MoE")
     parser.add_argument("--moe_generalist_hidden_multiplier", type=float, default=1, help="Hidden size multiplier for the generalist expert in MoE")
     parser.add_argument("--moe_type", type=str, help="type of MoE", default="default", choices=["default", "dropless"])
     parser.add_argument("--moe_bias_gamma", type=float, default=None, help="Gamma value for MoE bias")

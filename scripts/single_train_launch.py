@@ -86,7 +86,6 @@ USER_PROJECT_SPECS = {
     "WANDB_ENTITY": "",
     "PROJECT_DIR": DEFAULT_DIR_PATH,
     "DATAROOT": "",
-    "NAME_KEYS": [],
 }
 
 DATA_SEED = 34521
@@ -128,8 +127,8 @@ def build_config(
     valid_data_dir: str = USER_PROJECT_SPECS["VALID_DATA_DIR"],
     data_work_dir: str = USER_PROJECT_SPECS["DATA_WORK_DIR"],
     sequence_length: int = 2048,
-    global_batch_size: int = 512,  # 512 sequences total
-    per_gpu_batch_size: int = 4,  # 4 sequences per GPU
+    global_batch_size: int = 512,
+    per_gpu_batch_size: int = 16,
     num_data_workers: int = 2,
     train_tokens: int = 200_000_000,
     save_interval: int = 200,
@@ -139,16 +138,16 @@ def build_config(
     lr: float = 4e-4,
     warmup_steps: int = 50,
     decay_steps: int = 50,
-    scheduler: str = "cosine",  # 'wsd' or 'cosine'
+    scheduler: str = "cosine",
     embedding_weight_decay: float = 0.1,
     weight_decay: float = 0.0,
     adam_betas: tuple[float, float] = (0.9, 0.95),
     z_loss_multiplier: float = 1e-5,
     moe_num_experts_list: List[int] = [32, 64],
-    moe_hidden_multipliers_list: List[float] = [1024.0, 2048.0],
-    moe_router_top_ks_list: List[int] = [4, 8],
+    moe_hidden_multipliers_list: List[float] = [0.25, 0.125],
+    moe_router_top_ks_list: List[int] = [2, 4],
     moe_generalist_hidden_multiplier: int = 1,
-    moe_type: str = "default",  # "default" or "dropless"
+    moe_type: str = "default",
     moe_bias_gamma: Optional[float] = None,
     max_grad_norm: float = 1.0,
     moe_z_loss_weight: float = 0.001,
@@ -212,7 +211,7 @@ def build_config(
             name=DataParallelType.fsdp,
             param_dtype=DType.bfloat16,
             reduce_dtype=DType.float32,
-            wrapping_strategy=TransformerDataParallelWrappingStrategy.full,  # Added from small-moe.py
+            wrapping_strategy=TransformerDataParallelWrappingStrategy.full,
         ),
         z_loss_multiplier=z_loss_multiplier,
         max_grad_norm=max_grad_norm,
@@ -223,7 +222,7 @@ def build_config(
             save_folder=f"{save_root}/{run_name}",
             save_overwrite=True,
             metrics_collect_interval=metrics_collect_interval,
-            cancel_check_interval=1,  # Updated from small-moe.py
+            cancel_check_interval=1,
             max_duration=Duration.tokens(train_tokens),
         )
         .with_callback("gpu_monitor", GPUMemoryMonitorCallback())
@@ -257,7 +256,7 @@ def build_config(
                     moe_generalist_hidden_multiplier,
                     moe_type,
                 ),
-                enabled=True,  # NOTE: change to true to enable
+                enabled=True,
             ),
         )
         .with_callback("config_saver", ConfigSaverCallback())
@@ -366,13 +365,12 @@ def main(args: argparse.Namespace, overrides: List[str]) -> None:
         trainer = config.trainer.build(train_module, data_loader)
         logger.info("All components built successfully")
 
-        # Save config to W&B and each checkpoint dir.
+        # Save config to WandB and each checkpoint dir.
         config_dict = config.as_config_dict()
         cast(CometCallback, trainer.callbacks["comet"]).config = config_dict
         cast(WandBCallback, trainer.callbacks["wandb"]).config = config_dict
         cast(ConfigSaverCallback, trainer.callbacks["config_saver"]).config = config_dict
 
-        # Train.
         logger.info("Starting training...")
         trainer.fit()
 
@@ -454,13 +452,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--moe_hidden_multipliers_list",
         type=str,
-        default="1024,2048",
+        default="0.25,0.125",
         help="List of hidden sizes multiplers for MoE",
     )
     parser.add_argument(
         "--moe_router_top_ks_list",
         type=str,
-        default="4,8",
+        default="2,4",
         help="List of router top-k values for MoE",
     )
     parser.add_argument(
@@ -477,20 +475,20 @@ if __name__ == "__main__":
         choices=["default", "dropless"],
     )
     parser.add_argument(
-        "--moe_bias_gamma", type=float, default=None, help="Gamma value for MoE bias"
+        "--moe_bias_gamma", type=float, default=None, help="MoE bias gamma value for loss-free LB"
     )
     parser.add_argument(
         "--moe_z_loss_weight", type=float, default=0.001, help="Weight for the z-loss in MoE"
     )
     parser.add_argument(
-        "--moe_lb_loss_weight", type=float, default=0.01, help="Weight for the LB loss in MoE"
+        "--moe_lb_loss_weight", type=float, default=0.01, help="Weight for the MoE LB loss"
     )
     parser.add_argument(
         "--expert_assignment",
         type=str,
         default="learned",
         choices=["learned", "uniform"],
-        help="Expert assignment strategy ('learned' uses the router; 'uniform' bypasses it)",
+        help="Expert assignment strategy ('learned' uses the router, 'uniform' bypasses it)",
     )
     args, overrides = parser.parse_known_args()
 
