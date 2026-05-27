@@ -138,7 +138,9 @@ def analyze_ossification(
     results = {"steps": [], "stability_rates": {}}
     prev_decisions = None
 
-    for ckpt_dir in sorted(checkpoint_dirs):
+    # checkpoint_dirs is already sorted by step from find_checkpoints; do NOT re-sort here
+    # with default (lexicographic) ordering, which would put step1000 before step200.
+    for ckpt_dir in sorted(checkpoint_dirs, key=_extract_step):
         step = _extract_step(ckpt_dir)
         log.info(f"  Loading checkpoint at step {step}...")
 
