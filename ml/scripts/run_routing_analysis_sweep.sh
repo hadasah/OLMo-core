@@ -19,10 +19,12 @@ set -euo pipefail
 # --- Sweep dirs to analyze ------------------------------------------------
 PES2O_SWEEP=/gscratch/zlab/atindra/models/2026_05_08-06_46_47_data_rep_AC_pes2o_olmo2_ml_80M
 STARCODER_SWEEP=/gscratch/zlab/atindra/models/2026_05_08-06_42_40_data_rep_AC_starcoder_olmo2_ml_80M
+WIKI_SWEEP=/gscratch/zlab/atindra/models/2026_05_13-12_10_31_data_rep_AC_wiki_v2_olmo2_ml_80M
 
 # --- Validation files (used as routing-analysis input tokens) -------------
 PES2O_VAL=/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed/eval-data/perplexity/v3_small_dolma2-tokenizer/dolma_pes2o/val/part-0-00000.npy
 STACK_VAL=/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed/eval-data/perplexity/v3_small_dolma2-tokenizer/dolma_stack/val/part-0-00000.npy
+WIKI_VAL=/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed/eval-data/perplexity/v3_small_dolma2-tokenizer/dolma_wiki/val/part-0-00000.npy
 
 RESULTS_ROOT=/gscratch/zlab/atindra/analysis_results
 LOG_ROOT=$RESULTS_ROOT/logs
@@ -87,6 +89,14 @@ echo "STARCODER MoE jobs"
 echo "============================="
 for job in "$STARCODER_SWEEP"/*moe*/; do
     run_one "${job%/}" "$STACK_VAL" starcoder
+done
+
+echo
+echo "============================="
+echo "WIKI MoE jobs"
+echo "============================="
+for job in "$WIKI_SWEEP"/*moe*/; do
+    run_one "${job%/}" "$WIKI_VAL" wiki
 done
 
 echo
