@@ -345,8 +345,13 @@ def analyze_co_activation(
 
 def _extract_step(checkpoint_dir: str) -> int:
     """Extract the training step number from a checkpoint directory name."""
+    import re
     basename = os.path.basename(checkpoint_dir.rstrip('/'))
-    # Common patterns: "step-1000", "step_1000", "1000"
+    # OLMo-core default pattern: "step1000", "step1526", etc. (no separator)
+    m = re.match(r"step(\d+)$", basename)
+    if m:
+        return int(m.group(1))
+    # Fallbacks: "step-1000", "step_1000", or just "1000"
     for part in basename.split('-'):
         try:
             return int(part)

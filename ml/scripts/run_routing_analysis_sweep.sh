@@ -43,19 +43,25 @@ run_one() {
     out_dir="$RESULTS_ROOT/$sweep/$name"
     log_file="$LOG_ROOT/${sweep}__${name}.log"
 
-    if [[ -f "$out_dir/knockout.json" && -f "$out_dir/co_activation.json" ]]; then
-        echo "[$label] SKIP (already done): $name"
+    # Determine which analyses are missing (smart resume).
+    local missing=()
+    [[ ! -f "$out_dir/knockout.json"      ]] && missing+=("knockout")
+    [[ ! -f "$out_dir/co_activation.json" ]] && missing+=("co_activation")
+    [[ ! -f "$out_dir/ossification.json"  ]] && missing+=("ossification")
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        echo "[$label] SKIP (all done): $name"
         N_SKIP=$((N_SKIP + 1))
         return
     fi
 
     mkdir -p "$out_dir"
-    echo "[$label] START: $name"
+    echo "[$label] START (analyses: ${missing[*]}): $name"
     local t0=$SECONDS
     if python ml/scripts/routing_analysis.py \
             --checkpoint_dir "$job" \
             --data_path "$data" \
-            --analysis knockout co_activation \
+            --analysis "${missing[@]}" \
             --device cuda \
             --output_dir "$out_dir" \
             > "$log_file" 2>&1; then
