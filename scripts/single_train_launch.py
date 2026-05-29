@@ -61,7 +61,6 @@ MODEL_CONFIG_LOOKUP = {
     "olmo2_ml_20M": TransformerConfig.olmo2_ml_20M,
     "olmo2_ml_50M": TransformerConfig.olmo2_ml_50M,
     "olmo2_ml_80M": TransformerConfig.olmo2_ml_80M,
-    "olmo2_ml_100M": TransformerConfig.olmo2_ml_100M,
     "olmo2_ml_110M": TransformerConfig.olmo2_ml_110M,
     "olmo2_ml_200M": TransformerConfig.olmo2_ml_200M,
     "olmo2_ml_300M": TransformerConfig.olmo2_ml_300M,
@@ -75,17 +74,18 @@ TOKENIZER_LOOKUP = {
 
 DATAMIX_LOOKUP = {
     "OLMoE_mix_1124": DataMix.OLMoE_mix_1124,
+    # "OLMoE_mix_0924": DataMix.OLMoE_mix_0924,
     "OLMoE_mix_0824": DataMix.OLMoE_mix_0824,
 }
 
 USER_PROJECT_SPECS = {
-    "DEFAULT_SAVE_PATH": os.path.join(DEFAULT_DIR_PATH, "models"),
+    "SAVE_ROOT": os.path.join(DEFAULT_DIR_PATH, "models"),
     "DATA_WORK_DIR": "",
     "VALID_DATA_DIR": "",
     "WANDB_PROJECT": "",
     "WANDB_ENTITY": "",
     "PROJECT_DIR": DEFAULT_DIR_PATH,
-    "DATAROOT": "",
+    "DATA_ROOT": "",
 }
 
 DATA_SEED = 34521
@@ -119,11 +119,11 @@ class ExperimentConfig(Config):
 def build_config(
     run_name: str,
     tokenizer_name: str = "dolma2",
-    model_name: str = "olmo2_ml_100M",
+    model_name: str = "olmo2_ml_110M",
     train_datamix_name: str = "OLMoE_mix_0824",
     valid_datamix_name: str = "v3_small_ppl_validation",
-    data_root: str = USER_PROJECT_SPECS["DATAROOT"],
-    save_root: str = USER_PROJECT_SPECS["DEFAULT_SAVE_PATH"],
+    data_root: str = USER_PROJECT_SPECS["DATA_ROOT"],
+    save_root: str = USER_PROJECT_SPECS["SAVE_ROOT"],
     valid_data_dir: str = USER_PROJECT_SPECS["VALID_DATA_DIR"],
     data_work_dir: str = USER_PROJECT_SPECS["DATA_WORK_DIR"],
     sequence_length: int = 2048,
@@ -391,7 +391,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         type=str,
-        default="olmo2_ml_100M",
+        default="olmo2_ml_110M",
         choices=sorted(MODEL_CONFIG_LOOKUP.keys()),
         help="Name of the model configuration to use",
     )
@@ -410,13 +410,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_root",
         type=str,
-        default=USER_PROJECT_SPECS["DATAROOT"],
+        default=USER_PROJECT_SPECS["DATA_ROOT"],
         help="Root URL or directory for the training data mix",
     )
     parser.add_argument(
         "--save_root",
         type=str,
-        default=USER_PROJECT_SPECS["DEFAULT_SAVE_PATH"],
+        default=USER_PROJECT_SPECS["SAVE_ROOT"],
         help="Parent directory for saving the model",
     )
     parser.add_argument(

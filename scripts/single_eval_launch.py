@@ -55,7 +55,6 @@ MODEL_CONFIG_LOOKUP = {
     "olmo2_ml_20M": TransformerConfig.olmo2_ml_20M,
     "olmo2_ml_50M": TransformerConfig.olmo2_ml_50M,
     "olmo2_ml_80M": TransformerConfig.olmo2_ml_80M,
-    "olmo2_ml_100M": TransformerConfig.olmo2_ml_100M,
     "olmo2_ml_110M": TransformerConfig.olmo2_ml_110M,
     "olmo2_ml_200M": TransformerConfig.olmo2_ml_200M,
     "olmo2_ml_300M": TransformerConfig.olmo2_ml_300M,
@@ -112,7 +111,7 @@ class ExperimentConfig(Config):
 def build_config(
     run_name: str, 
     tokenizer_name: str = "dolma2", 
-    model_name: str = "olmo2_ml_100M",
+    model_name: str = "olmo2_ml_110M",
     train_datamix_name: str = "OLMoE_mix_0824",
     valid_datamix_name: str = "v3_small_ppl_validation",
     data_root: str = USER_PROJECT_SPECS['DATAROOT'],
@@ -375,7 +374,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("run_name", type=str, help="Name of the run")
     parser.add_argument("--tokenizer_name", type=str, default="dolma2", help="Name of the tokenizer to use")
-    parser.add_argument("--model_name", type=str, default="olmo2_ml_100M", choices=sorted(MODEL_CONFIG_LOOKUP.keys()), help="Name of the model configuration to use")
+    parser.add_argument("--model_name", type=str, default="olmo2_ml_110M", choices=sorted(MODEL_CONFIG_LOOKUP.keys()), help="Name of the model configuration to use")
     parser.add_argument("--train_datamix_name", type=str, default="OLMoE_mix_0824", help="Name of the training data mix")
     parser.add_argument("--valid_datamix_name", type=str, default="v3_small_ppl_validation", help="Name of the validation data mix")
     parser.add_argument("--data_root", type=str, default=USER_PROJECT_SPECS['DATAROOT'], help="Root URL for the data")

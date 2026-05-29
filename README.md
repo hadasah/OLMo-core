@@ -1,11 +1,12 @@
 # Slicing and Dicing — Training & Eval Scripts
 
-This directory contains the code for the *Slicing and Dicing: Configuring Optimal Mixture-of-Experts Models* paper. The training/eval stack is a hard fork of [OLMo-core](https://github.com/allenai/OLMo-core). See `README_olmo_core.md` for those docs, which we have not edited.
+This directory contains the code for the [*Slicing and Dicing: Configuring Optimal Mixture-of-Experts Models*](https://arxiv.org/pdf/2605.11689) paper. The training and eval stack is built by modifying and adding to a hard fork of [OLMo-core](https://github.com/allenai/OLMo-core). See `README_olmo_core.md` for those docs, which we have not edited.
 
-Script used to launch our trianing and eval runs live in the `scripts` folder:
-- `single_train_launch.py` — pretraining entry point
-- `single_eval_launch.py` — eval-only entry point that loads a checkpoint and runs the same LM + downstream evaluators that fire during training.
-- `data/` — shell helpers for downloading and preprocessing the OLMoE data mixes. **Provided as-is**: they contain cluster-specific paths and will need to be edited to your environment before they run.
+Scripts used to launch our training and eval runs live in the `scripts` folder:
+- `single_train_launch.py` — pretraining 
+- `single_eval_launch.py` — eval-only. Loads a checkpoint and runs the same LM + downstream evaluators as used during training
+
+The data obtained during training and evaluation of models, along with code for analysis and plot generation, are planned for release Soon^TM. 
 
 ---
 
@@ -22,7 +23,7 @@ git clone https://github.com/hadasah/slicing_and_dicing.git $SANDD_PATH
 cd $SANDD_PATH
 pip install -e .[all]
 
-# Optional but recommended for fast MoE kernels.
+# Optional but recommended for faster MoE kernels
 git clone --recursive https://github.com/sneha-rk/grouped_gemm
 cd grouped_gemm
 GROUPED_GEMM_CUTLASS=1 pip install .
@@ -33,13 +34,13 @@ We use cuda 12.6.3.
 
 | Service | Variable / setting | Notes |
 |---|---|---|
-| Weights & Biases | `WANDB_API_KEY`; `--wandb_entity` / `--wandb_project` (or edit `USER_PROJECT_SPECS` in the launch script) | Enabled by default in `single_train_launch.py`. |
-| Comet | `COMET_API_KEY` | Disabled by default. Set `enabled=True` on the `CometCallback` in the launch script to use. |
-| HuggingFace | `HF_TOKEN` | Only required if a data mix or tokenizer download needs it. |
+| Weights & Biases | `WANDB_API_KEY`; `--wandb_entity` / `--wandb_project` (or edit `USER_PROJECT_SPECS` in the launch script) | Enabled by default in `single_train_launch.py` |
+| Comet | `COMET_API_KEY` | Disabled by default. Set `enabled=True` on the `CometCallback` in the launch script to use |
+| HuggingFace | `HF_TOKEN` | Only if required byy an HF dataset or tokenizer |
 
 ### `USER_PROJECT_SPECS`
 
-Each launch script has a `USER_PROJECT_SPECS` dict near the top. Fill these in once before your first run so you don't have to pass them on every command line:
+Both `scripts/single_train_launch.py` and `scripts/single_eval_launch.py` have a `USER_PROJECT_SPECS` dict near the top. This defines defaults for some arguments so you don't have to pass them in the command every time.
 
 | Key | Meaning |
 |---|---|
@@ -50,13 +51,13 @@ Each launch script has a `USER_PROJECT_SPECS` dict near the top. Fill these in o
 | `WANDB_ENTITY` / `WANDB_PROJECT` | W&B entity and project for logging. |
 | `PROJECT_DIR` | Repo root, auto-derived from the script's path. |
 
-CLI flags (e.g. `--data_root`) override the matching entry at run time.
+You can use CLI flags (e.g. `--data_root`) to override the matching entry at run time.
 
 ---
 
 ## Data
 
-We use the pretraining data mix from OLMoE. Follow the [instructions](https://github.com/allenai/OLMoE/blob/main/README.md#pretraining) in their repo to download and preprocess the data, or adapt the shell scripts in `scripts/data/` (`get_0824_preprocessed_mix.sh`, `get_1124_preprocessed_mix.sh`, `preprocess_data.sh`, …) to your storage layout. The shell scripts assume `wget` (and, for the AWS variant, the `aws` CLI with credentials). `preprocess_data.sh` calls the `dolma` CLI.
+We use the pretraining data mix from OLMoE. Follow the [instructions](https://github.com/allenai/OLMoE/blob/main/README.md#pretraining) in their repo to download and preprocess the data. Their instructions utilize the `dolma` [toolkit](https://github.com/allenai/dolma/tree/main/docs), which needs to be installed first.
 
 ---
 
@@ -64,7 +65,7 @@ We use the pretraining data mix from OLMoE. Follow the [instructions](https://gi
 
 ```bash
 torchrun --nproc-per-node=1 scripts/single_train_launch.py run_name \
-    --model_name=olmo2_ml_80M \
+    --model_name=olmo2_ml_110M \
     --moe_num_experts_list=32 \
     --moe_hidden_multipliers_list=0.25 \
     --moe_router_top_ks_list=4 \
@@ -82,7 +83,7 @@ The positional `run_name` argument becomes the WandB run name. Checkpoints and l
 
 ```bash
 torchrun --nproc-per-node=1 scripts/single_eval_launch.py run_name \
-    --model_name=olmo2_ml_80M \
+    --model_name=olmo2_ml_110M \
     --moe_num_experts_list=32 \
     --moe_hidden_multipliers_list=0.25 \
     --moe_router_top_ks_list=4 \
@@ -98,19 +99,21 @@ This script looks for the checkpoint under `{save_root}/{run_name}`, so make sur
 
 ## MoE configuration
 
-A variety of our MoE architecture configuration choices may be specified through the command line. Length of the three `*_list` arguments must match — heterogeneous MoE just means each entry describes one expert group within a layer.
+A variety of our MoE architecture configuration choices may be specified through the command line. When configuring heterogeneous MoEs, make sure the length of the three `*_list` arguments match. The i-th item in each `*_list` argument, together, define the configuration for the i-th heterogeneous expert group in each layer.
 
 | Flag                                  | Type           | Default     | Meaning                                                                       |
 |---------------------------------------|----------------|-------------|-------------------------------------------------------------------------------|
-| `--moe_num_experts_list`              | str            | `32,64`     | Experts per MoE layer. `1` means dense. Multiple values, comma-separated = heterogeneous MoE (different expert counts per group within one layer). |
-| `--moe_hidden_multipliers_list`       | str            | `0.25,0.125` | Expert hidden-size multiplier(s), multiplied by `d_model` to get expert FFN intermediate dimension. Length must match `--moe_num_experts_list`.  |
+| `--moe_num_experts_list`              | str            | `32,64`     | Experts per MoE layer. `1` means dense. Multiple values, comma-separated = heterogeneous MoE |
+| `--moe_hidden_multipliers_list`       | str            | `0.25,0.125` | Expert hidden-size multiplier(s), or granularity values, multiplied by `d_model` to get expert FFN intermediate dimension. Length must match `--moe_num_experts_list`  |
 | `--moe_router_top_ks_list`            | str            | `2,4`       | Top-k value(s) per router. Length must match `--moe_num_experts_list`.                 |
 | `--moe_generalist_hidden_multiplier`  | float          | `1`         | Generalist / shared expert hidden-size multipliers. A `0` value indicates no generalist.         |
 | `--moe_type`                          | `default` / `dropless` | `default` | `dropless` uses uncapped routing (no token drops); `default` uses a capacity factor. |
 | `--moe_bias_gamma`                    | float or None  | None        | DeepSeek-v3-style loss-free load balancing bias γ                                 |
 | `--moe_z_loss_weight`                 | float          | `0.001`     | Router z-loss weight                                |
 | `--moe_lb_loss_weight`                | float          | `0.01`      | Load-balancing loss weight. A `0` value indicates no load balancing loss                              |
-| `--expert_assignment`                 | `learned` / `uniform` | `learned` | `uniform` bypasses the router and weights all expert outputs equally. _Only_ used for ablations. |
+| `--expert_assignment`                 | `learned` / `uniform` | `learned` | `uniform` bypasses the router and weights all expert outputs equally. _Only_ used for ablations |
+
+Although our main paper experiments tie router top-k activation `--moe_router_top_ks_list` with expert granularity (hidden-size multipler) `--moe_hidden_multipliers_list`, they are decoupled here to allow for flexible exploration. 
 
 Other hyperparameters and settings (e.g., learning rate, weight decay, etc.) can also be set with the [override mechanism](#overriding-arbitrary-config-fields) below.
 
@@ -122,7 +125,7 @@ Other hyperparameters and settings (e.g., learning rate, weight decay, etc.) can
 --moe_num_experts_list=1
 ```
 
-**Homogeneous MoE** — 32 experts, top-4, dropless:
+**Homogeneous MoE** w/ 32 experts, top-4, dropless:
 
 ```bash
 --moe_num_experts_list=32 --moe_hidden_multipliers_list=0.25 \
@@ -130,23 +133,23 @@ Other hyperparameters and settings (e.g., learning rate, weight decay, etc.) can
 --moe_type=dropless
 ```
 
-**MoE w/ Generalist** — 32 experts + a dense FFN with multiplier 0.5:
+**MoE w/ Generalist** w/ 32 experts + a generalist with granularity 0.5:
 
 ```bash
---moe_num_experts_list=32 --moe_hidden_multipliers_list=0.5 \
+--moe_num_experts_list=32 --moe_hidden_multipliers_list=0.25 \
 --moe_router_top_ks_list=2 --moe_generalist_hidden_multiplier=0.5
 ```
 
-**Heterogeneous MoE** — two groups per layer, 8 wider experts + 32 narrower experts:
+**Heterogeneous MoE** w/ two groups per layer, 16 experts @ g=1/4 + 32 experts @ g=1/8
 
 ```bash
---moe_num_experts_list=8,32 --moe_hidden_multipliers_list=0.25,0.125 \
+--moe_num_experts_list=16,32 --moe_hidden_multipliers_list=0.25,0.125 \
 --moe_router_top_ks_list=2,4 --moe_generalist_hidden_multiplier=0
 ```
 
 ### Available model sizes
 
-`olmo2_ml_10M`, `olmo2_ml_20M`, `olmo2_ml_50M`, `olmo2_ml_80M`, `olmo2_ml_100M`, `olmo2_ml_110M`, `olmo2_ml_200M`, `olmo2_ml_300M`, `olmo2_ml_500M` (see `MODEL_CONFIG_LOOKUP` in `single_train_launch.py`). Paper does not show results for `olmo2_ml_500M`, since our resource constraints resulted in a limited number of completed runs at that model parameter scale.
+`olmo2_ml_10M`, `olmo2_ml_20M`, `olmo2_ml_50M`, `olmo2_ml_80M`, `olmo2_ml_110M`, `olmo2_ml_200M`, `olmo2_ml_300M`, `olmo2_ml_500M` (see `MODEL_CONFIG_LOOKUP` in `single_train_launch.py`). Paper does not show results for `olmo2_ml_500M`, since our resource constraints resulted in a limited number of completed runs at that model parameter scale.
 
 ---
 
@@ -176,7 +179,7 @@ Any field of `ExperimentConfig` can be overridden from the CLI with dotted-path 
 --train_module.optim.lr=4e-4
 --train_module.optim.weight_decay=0.1
 --train_module.scheduler.warmup_steps=2000
---trainer.max_duration.value=1600000000   # tokens
+--trainer.max_duration.value=1600000000
 --trainer.save_interval=200
 ```
 
