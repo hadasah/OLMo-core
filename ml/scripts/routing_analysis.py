@@ -22,6 +22,7 @@ Usage:
 import argparse
 import json
 import logging
+import numpy as np
 import os
 from typing import Dict, List
 
