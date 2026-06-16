@@ -20,8 +20,7 @@ from ..buffer_cache import BufferCache
 from ..feed_forward import FeedForward, FeedForwardConfig
 from ..functional import l2_normalize
 from ..layer_norm import LayerNormConfig
-from ..moe import MoEConfig, MoERouter
-from ..moe.parallel_mlp import ParallelMLPBase
+from ..moe import MoEConfig
 from ..residual_stream import ResidualStream
 from .config import TransformerDataParallelWrappingStrategy
 
@@ -831,14 +830,16 @@ class MoEHybridTransformerBlockBase(MoETransformerBlock):
         # Force routers to be full-precision.
         fsdp_routers = []
         for router in self.feed_forward_moe.routers_list:
-            fsdp_routers.append(cast(
-                FSDPModule,
-                fully_shard(
-                    router,
-                    mesh=dp_mesh,
-                    mp_policy=MixedPrecisionPolicy(param_dtype=torch.float32),
-                ),
-            ))
+            fsdp_routers.append(
+                cast(
+                    FSDPModule,
+                    fully_shard(
+                        router,
+                        mesh=dp_mesh,
+                        mp_policy=MixedPrecisionPolicy(param_dtype=torch.float32),
+                    ),
+                )
+            )
 
         if wrapping_strategy == TransformerDataParallelWrappingStrategy.fine_grained:
             if not self.use_combined_forward:
@@ -1020,7 +1021,6 @@ class MoEHybridReorderedNormTransformerBlock(MoEHybridTransformerBlockBase):
         # dense operations while we wait on expert parallel all-to-all comms.
 
         ## TODO @margsli this needs to be edited to allow for hetMoE implementation
-
 
         B, _, D = x.shape
 

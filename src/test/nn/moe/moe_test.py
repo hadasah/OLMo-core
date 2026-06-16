@@ -44,9 +44,9 @@ def test_moe(moe_type: MoEType, shared: bool, dtype: torch.dtype):
     d_model = 128
     config = MoEConfig(
         name=moe_type,
-        num_experts=4,
-        hidden_size=256,
-        router=MoERouterConfig(top_k=1),
+        num_experts_list=[4],
+        hidden_sizes_list=[256],
+        routers_list=[MoERouterConfig(top_k=1)],
         shared_mlp=None if not shared else FeedForwardConfig(hidden_size=256),
         z_loss_weight=0.1,
         dtype=DType.from_pt(dtype),
@@ -182,14 +182,16 @@ def test_moe_with_expert_parallelism(
     d_model = 8
     config = MoEConfig(
         name=moe_type,
-        num_experts=4,
-        hidden_size=256,
-        router=MoERouterConfig(
-            top_k=1,
-            uniform_expert_assignment=moe_type
-            == MoEType.default,  # EP results may be different otherwise
-            dtype=DType.from_pt(dtype),
-        ),
+        num_experts_list=[4],
+        hidden_sizes_list=[256],
+        routers_list=[
+            MoERouterConfig(
+                top_k=1,
+                uniform_expert_assignment=moe_type
+                == MoEType.default,  # EP results may be different otherwise
+                dtype=DType.from_pt(dtype),
+            )
+        ],
         lb_loss_granularity=lb_granularity,
         z_loss_weight=0.1,
         dtype=DType.from_pt(dtype),
@@ -254,9 +256,9 @@ def test_moe_num_flops_per_token(shared: bool):
         #  Idealized FLOPs differ too much from actual FLOPs for default MoE implementation
         # (due to padding experts to a fixed capacity). So we use the dropless MoE implementation.
         name=MoEType.dropless,
-        num_experts=16,
-        hidden_size=hidden_size,
-        router=MoERouterConfig(top_k=2),
+        num_experts_list=[16],
+        hidden_sizes_list=[hidden_size],
+        routers_list=[MoERouterConfig(top_k=2)],
         shared_mlp=None if not shared else FeedForwardConfig(hidden_size=hidden_size),
     )
     moe = config.build(d_model=d_model, init_device="cuda")

@@ -1,32 +1,33 @@
 import argparse
 import json
 import os
-from datetime import datetime
 from copy import copy
+from datetime import datetime
+
+from constants import HARDWARE_SPECS_DICT, MODEL_HP_DEFAULTS, PROJECT_SPECS
 from slurm_job import run_grid
-from constants import PROJECT_SPECS, HARDWARE_SPECS_DICT, MODEL_HP_DEFAULTS
 from utils import dict_update
 
-
-SWEEP_NAME_DEFAULT = 'data_rep_AC'
-project = 'moe'
+SWEEP_NAME_DEFAULT = "data_rep_AC"
+project = "moe"
 MODELS = [
     # 'olmo2_ml_10M',
-    'olmo2_ml_80M',
+    "olmo2_ml_80M",
     # 'olmo2_ml_200M',
 ]
+
 
 def main(
     sweep_name=SWEEP_NAME_DEFAULT,
     relaunch_path=None,
     relaunch_name=None,
-    add_time_to_name='front',
-    add_model_to_name='end',
-    debug=False, 
+    add_time_to_name="front",
+    add_model_to_name="end",
+    debug=False,
     dry_mode=False,
-    account=None, 
+    account=None,
     partition=None,
-    job_time='24:00:00',
+    job_time="24:00:00",
     gpus=None,
     cpus=None,
     mem=None,
@@ -41,55 +42,61 @@ def main(
 
     DEBUG_MODE = debug
     DRY_MODE = dry_mode
-    job_time = '1:00:00' if debug else job_time
-    user = os.environ.get('USER')
+    job_time = "1:00:00" if debug else job_time
+    user = os.environ.get("USER")
     if user not in PROJECT_SPECS:
-        raise ValueError(f"User {user} not found in PROJECT_SPECS. Please add your user to the PROJECT_SPECS dictionary.")
+        raise ValueError(
+            f"User {user} not found in PROJECT_SPECS. Please add your user to the PROJECT_SPECS dictionary."
+        )
     USER_SPECS = PROJECT_SPECS[user]
 
     if relaunch_path or relaunch_name:
         if relaunch_name and relaunch_path:
             raise ValueError("Cannot specify both relaunch_name and relaunch_path")
         if relaunch_name:
-            relaunch_path = os.path.join(PROJECT_SPECS[user]['DEFAULT_SAVE_PATH'], relaunch_name)
-        relaunch_path = relaunch_path.rstrip('/')
+            relaunch_path = os.path.join(PROJECT_SPECS[user]["DEFAULT_SAVE_PATH"], relaunch_name)
+        relaunch_path = relaunch_path.rstrip("/")
         model_sweep_name = os.path.basename(relaunch_path)
-        path_to_grid_file = os.path.join(relaunch_path, 'grid.json')
-        path_to_specs = os.path.join(relaunch_path, 'specs.json')
+        path_to_grid_file = os.path.join(relaunch_path, "grid.json")
+        path_to_specs = os.path.join(relaunch_path, "specs.json")
         if not os.path.exists(path_to_grid_file):
             raise FileNotFoundError(f"Grid file {path_to_grid_file} does not exist.")
-        grid = json.load(open(path_to_grid_file, 'r'))
-        model = grid.get('main_grid', {}).get('model_name', [None])[0]
+        grid = json.load(open(path_to_grid_file, "r"))
+        model = grid.get("main_grid", {}).get("model_name", [None])[0]
 
         SPECS = copy(USER_SPECS)
-        SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT.get('all', {}))
+        SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT.get("all", {}))
         SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT.get(partition, {}))
-        SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT[model].get(partition, {})) 
-        SPECS['NUM_GPUS'] = gpus or SPECS['NUM_GPUS']
+        SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT[model].get(partition, {}))
+        SPECS["NUM_GPUS"] = gpus or SPECS["NUM_GPUS"]
         SPECS["NUM_CPUS"] = cpus or SPECS["NUM_CPUS"]
         SPECS["MEM_GB"] = mem or SPECS["MEM_GB"]
 
         if os.path.exists(path_to_specs):
-            old_specs = json.load(open(path_to_specs, 'r'))
+            old_specs = json.load(open(path_to_specs, "r"))
             for key in old_specs:
                 if key not in ignore_specs_check_keys:
-                    assert SPECS.get(key) == old_specs[key], f"Specs mismatch for {key}: {SPECS.get(key)} != {old_specs[key]}"
-        
+                    assert (
+                        SPECS.get(key) == old_specs[key]
+                    ), f"Specs mismatch for {key}: {SPECS.get(key)} != {old_specs[key]}"
+
         run_grid(
             grid,
-            default_grid=dict_update(copy(MODEL_HP_DEFAULTS['all']), MODEL_HP_DEFAULTS.get(model, {})),
+            default_grid=dict_update(
+                copy(MODEL_HP_DEFAULTS["all"]), MODEL_HP_DEFAULTS.get(model, {})
+            ),
             sweep_name=model_sweep_name,
             specs=SPECS,
             name_keys=SPECS.get("NAME_KEYS", []),
-            prefix=SPECS['COMMAND_PREFIX'],
-            gpus=SPECS['NUM_GPUS'],
+            prefix=SPECS["COMMAND_PREFIX"],
+            gpus=SPECS["NUM_GPUS"],
             cpus=SPECS["NUM_CPUS"],
-            nodes=((SPECS['NUM_GPUS'] - 1) // 8 + 1),
+            nodes=((SPECS["NUM_GPUS"] - 1) // 8 + 1),
             node_exclude=None,
             account=account,
             partition=partition,
             DIR_PATH=SPECS["PROJECT_DIR"],
-            jobtime=(job_time if job_time else SPECS.get("JOBTIME", '24:00:00')),            
+            jobtime=(job_time if job_time else SPECS.get("JOBTIME", "24:00:00")),
             include_job_id=False,
             hashname=False,
             saveroot=f"{SPECS['DEFAULT_SAVE_PATH']}/{model_sweep_name}",
@@ -113,24 +120,24 @@ def main(
             filter_running=filter_running,
             # append_to_sbatch_str=None,
         )
-        
+
     else:
         SWEEP_NAME = sweep_name
-        if add_time_to_name == 'front':
-            time_str = str(datetime.now().strftime('%Y_%m_%d-%H_%M_%S'))
+        if add_time_to_name == "front":
+            time_str = str(datetime.now().strftime("%Y_%m_%d-%H_%M_%S"))
             SWEEP_NAME = f"{time_str}_{SWEEP_NAME}" if SWEEP_NAME else time_str
         for model in MODELS:
-            model_sweep_name = f"{SWEEP_NAME}_{model}" if add_model_to_name == 'end' else SWEEP_NAME
+            model_sweep_name = f"{SWEEP_NAME}_{model}" if add_model_to_name == "end" else SWEEP_NAME
 
             SPECS = copy(USER_SPECS)
-            SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT.get('all', {}))
+            SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT.get("all", {}))
             SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT.get(partition, {}))
             SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT[model].get(partition, {}))
-            SPECS['NUM_GPUS'] = gpus or SPECS['NUM_GPUS']
+            SPECS["NUM_GPUS"] = gpus or SPECS["NUM_GPUS"]
             SPECS["NUM_CPUS"] = cpus or SPECS["NUM_CPUS"]
             SPECS["MEM_GB"] = mem or SPECS["MEM_GB"]
             grid = {
-                # main_grid is the top-level grid, the sweep will run over all combinations of these hyperparameters, 
+                # main_grid is the top-level grid, the sweep will run over all combinations of these hyperparameters,
                 # combined with the subgrids
                 "main_grid": {
                     "model_name": [model],
@@ -150,10 +157,10 @@ def main(
                     # "train_datamix_name": ["pes2o_only"],
                     # "moe_bias_gamma": [0.001],  # None for default, or specify a float value
                     # "moe_lb_loss_weight": [0.0001],  # Weight for the lb-loss in MoE
-                    'train_module': {
-                        'optim': {
+                    "train_module": {
+                        "optim": {
                             # 'lr': [4e-3, 1e-2],
-                            'lr': [4e-4],
+                            "lr": [4e-4],
                         },
                     },
                     "trainer": {
@@ -218,36 +225,144 @@ def main(
                     # "e32,64x0.25,0.125c2,2_0.25gen": {"moe_num_experts_list": ["32,64"], "moe_hidden_multipliers_list": ["0.25,0.125"], "moe_router_top_ks_list": ["2,2"], "moe_generalist_hidden_multiplier": ["0.25"]},
                     ## === Data repetition experiments (A+C) ===
                     ## Dense baselines at different repetition levels
-                    "dense_rep1x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["1.0"], "num_repetitions": ["1"]},
-                    "dense_rep2x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.5"], "num_repetitions": ["2"]},
-                    "dense_rep4x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.25"], "num_repetitions": ["4"]},
-                    "dense_rep8x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.125"], "num_repetitions": ["8"]},
-                    "dense_rep16x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.0625"], "num_repetitions": ["16"]},
-                    "dense_rep32x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.03125"], "num_repetitions": ["32"]},
+                    "dense_rep1x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["1.0"],
+                        "num_repetitions": ["1"],
+                    },
+                    "dense_rep2x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.5"],
+                        "num_repetitions": ["2"],
+                    },
+                    "dense_rep4x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.25"],
+                        "num_repetitions": ["4"],
+                    },
+                    "dense_rep8x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.125"],
+                        "num_repetitions": ["8"],
+                    },
+                    "dense_rep16x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.0625"],
+                        "num_repetitions": ["16"],
+                    },
+                    "dense_rep32x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.03125"],
+                        "num_repetitions": ["32"],
+                    },
                     # "dense_rep64x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.015625"], "num_repetitions": ["64"]},
                     # "dense_rep128x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.0078125"], "num_repetitions": ["128"]},
                     # "dense_rep256x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.00390625"], "num_repetitions": ["256"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "dense_rep512x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.001953125"], "num_repetitions": ["512"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "dense_rep1024x": {"moe_num_experts_list": ["1"], "unique_data_fraction": ["0.0009765625"], "num_repetitions": ["1024"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     ## MoE 32 experts at different repetition levels
-                    "moe32_rep1x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["1.0"], "num_repetitions": ["1"]},
-                    "moe32_rep2x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.5"], "num_repetitions": ["2"]},
-                    "moe32_rep4x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.25"], "num_repetitions": ["4"]},
-                    "moe32_rep8x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.125"], "num_repetitions": ["8"]},
-                    "moe32_rep16x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0625"], "num_repetitions": ["16"]},
-                    "moe32_rep32x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.03125"], "num_repetitions": ["32"]},
+                    "moe32_rep1x": {
+                        "moe_num_experts_list": ["32"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["1.0"],
+                        "num_repetitions": ["1"],
+                    },
+                    "moe32_rep2x": {
+                        "moe_num_experts_list": ["32"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["0.5"],
+                        "num_repetitions": ["2"],
+                    },
+                    "moe32_rep4x": {
+                        "moe_num_experts_list": ["32"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["0.25"],
+                        "num_repetitions": ["4"],
+                    },
+                    "moe32_rep8x": {
+                        "moe_num_experts_list": ["32"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["0.125"],
+                        "num_repetitions": ["8"],
+                    },
+                    "moe32_rep16x": {
+                        "moe_num_experts_list": ["32"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["0.0625"],
+                        "num_repetitions": ["16"],
+                    },
+                    "moe32_rep32x": {
+                        "moe_num_experts_list": ["32"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["0.03125"],
+                        "num_repetitions": ["32"],
+                    },
                     # "moe32_rep64x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.015625"], "num_repetitions": ["64"]},
                     # "moe32_rep128x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0078125"], "num_repetitions": ["128"]},
                     # "moe32_rep256x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.00390625"], "num_repetitions": ["256"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "moe32_rep512x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.001953125"], "num_repetitions": ["512"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "moe32_rep1024x": {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0009765625"], "num_repetitions": ["1024"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     ## MoE 64 experts at different repetition levels
-                    "moe64_rep1x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["1.0"], "num_repetitions": ["1"]},
-                    "moe64_rep2x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.5"], "num_repetitions": ["2"]},
-                    "moe64_rep4x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.25"], "num_repetitions": ["4"]},
-                    "moe64_rep8x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.125"], "num_repetitions": ["8"]},
-                    "moe64_rep16x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0625"], "num_repetitions": ["16"]},
-                    "moe64_rep32x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.03125"], "num_repetitions": ["32"]},
+                    "moe64_rep1x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["1.0"],
+                        "num_repetitions": ["1"],
+                    },
+                    "moe64_rep2x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["0.5"],
+                        "num_repetitions": ["2"],
+                    },
+                    "moe64_rep4x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["0.25"],
+                        "num_repetitions": ["4"],
+                    },
+                    "moe64_rep8x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["0.125"],
+                        "num_repetitions": ["8"],
+                    },
+                    "moe64_rep16x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["0.0625"],
+                        "num_repetitions": ["16"],
+                    },
+                    "moe64_rep32x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "unique_data_fraction": ["0.03125"],
+                        "num_repetitions": ["32"],
+                    },
                     # "moe64_rep64x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.015625"], "num_repetitions": ["64"]},
                     # "moe64_rep128x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0078125"], "num_repetitions": ["128"]},
                     # "moe64_rep256x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.00390625"], "num_repetitions": ["256"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
@@ -258,19 +373,21 @@ def main(
 
             run_grid(
                 grid,
-                default_grid=dict_update(copy(MODEL_HP_DEFAULTS['all']), MODEL_HP_DEFAULTS.get(model, {})),
+                default_grid=dict_update(
+                    copy(MODEL_HP_DEFAULTS["all"]), MODEL_HP_DEFAULTS.get(model, {})
+                ),
                 sweep_name=model_sweep_name,
                 specs=SPECS,
                 name_keys=SPECS.get("NAME_KEYS", []),
-                prefix=SPECS['COMMAND_PREFIX'],
-                gpus=SPECS['NUM_GPUS'],
+                prefix=SPECS["COMMAND_PREFIX"],
+                gpus=SPECS["NUM_GPUS"],
                 cpus=SPECS["NUM_CPUS"],
-                nodes=((SPECS['NUM_GPUS'] - 1) // 8 + 1),
+                nodes=((SPECS["NUM_GPUS"] - 1) // 8 + 1),
                 node_exclude=None,
                 account=account,
                 partition=partition,
                 DIR_PATH=SPECS["PROJECT_DIR"],
-                jobtime=(job_time if job_time else SPECS.get("JOBTIME", '24:00:00')),      
+                jobtime=(job_time if job_time else SPECS.get("JOBTIME", "24:00:00")),
                 include_job_id=False,
                 hashname=False,
                 saveroot=f"{SPECS['DEFAULT_SAVE_PATH']}/{model_sweep_name}",
@@ -295,22 +412,40 @@ def main(
                 # append_to_sbatch_str=None,
             )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('-n', '--sweep-name', type=str, default=SWEEP_NAME_DEFAULT)
-    parser.add_argument('-rp', '--relaunch-path', type=str, default=None, help="Path to the sweep directory containing grid.json and specs.json. Used to restart jobs from a previous sweep.")
-    parser.add_argument('-rn', '--relaunch-name', type=str, default=None, help="Name of sweep, also base of sweep directory containing grid.json and specs.json. Used to restart jobs from a previous sweep.")
-    parser.add_argument('--add-time-to-name', type=str, default='front', choices=['front', 'none'])
-    parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--dry-mode', action='store_true')
-    parser.add_argument('-a', '--slurm-account', type=str)
-    parser.add_argument('-p', '--slurm-partition', type=str)
-    parser.add_argument('-t', '--job-time', type=str)
-    parser.add_argument('--gpus', type=int)
-    parser.add_argument('--cpus', type=int)
-    parser.add_argument('--mem', type=str)
-    parser.add_argument('-i', '--include-jobs-indices', type=str, default=None)
-    parser.add_argument('-nf', '--no-filter', action='store_true', help="If set, will not filter out jobs that have already been run in the sweep. Useful for debugging.")
+    parser.add_argument("-n", "--sweep-name", type=str, default=SWEEP_NAME_DEFAULT)
+    parser.add_argument(
+        "-rp",
+        "--relaunch-path",
+        type=str,
+        default=None,
+        help="Path to the sweep directory containing grid.json and specs.json. Used to restart jobs from a previous sweep.",
+    )
+    parser.add_argument(
+        "-rn",
+        "--relaunch-name",
+        type=str,
+        default=None,
+        help="Name of sweep, also base of sweep directory containing grid.json and specs.json. Used to restart jobs from a previous sweep.",
+    )
+    parser.add_argument("--add-time-to-name", type=str, default="front", choices=["front", "none"])
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--dry-mode", action="store_true")
+    parser.add_argument("-a", "--slurm-account", type=str)
+    parser.add_argument("-p", "--slurm-partition", type=str)
+    parser.add_argument("-t", "--job-time", type=str)
+    parser.add_argument("--gpus", type=int)
+    parser.add_argument("--cpus", type=int)
+    parser.add_argument("--mem", type=str)
+    parser.add_argument("-i", "--include-jobs-indices", type=str, default=None)
+    parser.add_argument(
+        "-nf",
+        "--no-filter",
+        action="store_true",
+        help="If set, will not filter out jobs that have already been run in the sweep. Useful for debugging.",
+    )
 
     args = parser.parse_args()
 
@@ -319,15 +454,19 @@ if __name__ == '__main__':
         relaunch_path=args.relaunch_path,
         relaunch_name=args.relaunch_name,
         add_time_to_name=args.add_time_to_name,
-        debug=args.debug, 
+        debug=args.debug,
         dry_mode=args.dry_mode,
-        account=args.slurm_account, 
+        account=args.slurm_account,
         partition=args.slurm_partition,
         job_time=args.job_time,
         gpus=args.gpus,
         cpus=args.cpus,
         mem=args.mem,
-        include_jobs_indices=([int(i) for i in args.include_jobs_indices.split(",")] if args.include_jobs_indices else None),
+        include_jobs_indices=(
+            [int(i) for i in args.include_jobs_indices.split(",")]
+            if args.include_jobs_indices
+            else None
+        ),
         filter_running=not args.no_filter,
         filter_succeeded=not args.no_filter,
     )

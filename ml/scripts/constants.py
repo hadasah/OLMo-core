@@ -3,7 +3,7 @@
 
 import os
 
-DEFAULT_DIR_PATH = '/'.join(os.path.normpath(os.path.realpath(__file__)).split(os.path.sep)[:-3])
+DEFAULT_DIR_PATH = "/".join(os.path.normpath(os.path.realpath(__file__)).split(os.path.sep)[:-3])
 
 
 ## Default hyperparameters for all models, and specific models. The "all" key applies to all models, and the specific model keys override the "all" key for that model.
@@ -139,9 +139,9 @@ MODEL_HP_DEFAULTS = {
 
 PROJECT_SPECS = {
     "margsli": {
-        'DEFAULT_SAVE_PATH': os.path.join(DEFAULT_DIR_PATH, 'models'),
-        'DATA_WORK_DIR': "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data",
-        'VALID_DATA_DIR': "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed",
+        "DEFAULT_SAVE_PATH": os.path.join(DEFAULT_DIR_PATH, "models"),
+        "DATA_WORK_DIR": "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data",
+        "VALID_DATA_DIR": "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed",
         "WANDB_PROJECT": "moe",
         "WANDB_ENTITY": "ml-moe",
         "CONDA_ENV_NAME": "moe",
@@ -156,22 +156,22 @@ PROJECT_SPECS = {
         "NAME_KEYS": [],
     },
     "ubuntu": {
-          'DEFAULT_SAVE_PATH': os.path.join(DEFAULT_DIR_PATH, 'models'),
-          'DATA_WORK_DIR': os.path.join(DEFAULT_DIR_PATH, 'ml/data'),
-          'VALID_DATA_DIR': os.path.join(DEFAULT_DIR_PATH, 'ml/data/preprocessed'),
-          "WANDB_PROJECT": "data_rep_moe",
-          "WANDB_ENTITY": "ml-moe",
-          "CONDA_ENV_NAME": "olmoe-core",
-          "PROJECT_DIR": DEFAULT_DIR_PATH,
-          "SLURM_ACCOUNT": "",
-          "SLURM_PARTITION": "",
-          "COMMAND_PREFIX": f"{DEFAULT_DIR_PATH}/ml/scripts/single_train_launch.py",
-          "NUM_GPUS": 1,
-          "MODEL": [],
-          "DATAROOT": "https://olmo-data.org/",
-          "DATA_DIR": os.path.join(DEFAULT_DIR_PATH, 'data'),
-          "NAME_KEYS": [],
-      },
+        "DEFAULT_SAVE_PATH": os.path.join(DEFAULT_DIR_PATH, "models"),
+        "DATA_WORK_DIR": os.path.join(DEFAULT_DIR_PATH, "ml/data"),
+        "VALID_DATA_DIR": os.path.join(DEFAULT_DIR_PATH, "ml/data/preprocessed"),
+        "WANDB_PROJECT": "data_rep_moe",
+        "WANDB_ENTITY": "ml-moe",
+        "CONDA_ENV_NAME": "olmoe-core",
+        "PROJECT_DIR": DEFAULT_DIR_PATH,
+        "SLURM_ACCOUNT": "",
+        "SLURM_PARTITION": "",
+        "COMMAND_PREFIX": f"{DEFAULT_DIR_PATH}/ml/scripts/single_train_launch.py",
+        "NUM_GPUS": 1,
+        "MODEL": [],
+        "DATAROOT": "https://olmo-data.org/",
+        "DATA_DIR": os.path.join(DEFAULT_DIR_PATH, "data"),
+        "NAME_KEYS": [],
+    },
     # "atindra_coriander": {
     #       'DEFAULT_SAVE_PATH': '/m-coriander/coriander/atindra/models',
     #       'DATA_WORK_DIR': '/m-coriander/coriander/atindra/data/work',
@@ -190,39 +190,39 @@ PROJECT_SPECS = {
     #       "NAME_KEYS": [],
     # },
     "atindra": {
-          'DEFAULT_SAVE_PATH': '/gscratch/zlab/atindra/models',
-          'DATA_WORK_DIR': '/gscratch/zlab/atindra/data/work',
-          'VALID_DATA_DIR': '/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed',
-          "WANDB_PROJECT": "data_rep_moe",
-          "WANDB_ENTITY": "ml-moe",
-          "CONDA_ENV_NAME": "olmoe-core",
-          "PROJECT_DIR": DEFAULT_DIR_PATH,
-          "SLURM_ACCOUNT": "zlab",
-          "SLURM_PARTITION": "gpu-h200",
-          "COMMAND_PREFIX": f"{DEFAULT_DIR_PATH}/ml/scripts/single_train_launch.py",
-          "NUM_GPUS": 2,
-          "MODEL": [],
-          "DATAROOT": "https://olmo-data.org/",
-          "DATA_DIR": "/gscratch/zlab/atindra/data/",
-          "NAME_KEYS": [],
-      },
+        "DEFAULT_SAVE_PATH": "/gscratch/zlab/atindra/models",
+        "DATA_WORK_DIR": "/gscratch/zlab/atindra/data/work",
+        "VALID_DATA_DIR": "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed",
+        "WANDB_PROJECT": "data_rep_moe",
+        "WANDB_ENTITY": "ml-moe",
+        "CONDA_ENV_NAME": "olmoe-core",
+        "PROJECT_DIR": DEFAULT_DIR_PATH,
+        "SLURM_ACCOUNT": "zlab",
+        "SLURM_PARTITION": "gpu-h200",
+        "COMMAND_PREFIX": f"{DEFAULT_DIR_PATH}/ml/scripts/single_train_launch.py",
+        "NUM_GPUS": 2,
+        "MODEL": [],
+        "DATAROOT": "https://olmo-data.org/",
+        "DATA_DIR": "/gscratch/zlab/atindra/data/",
+        "NAME_KEYS": [],
+    },
     "rohan_sanda": {
-          'DEFAULT_SAVE_PATH': '/m-coriander/coriander/rohan_sanda/models',
-          'DATA_WORK_DIR': '/m-coriander/coriander/rohan_sanda/OLMo-core/ml/data',
-          'VALID_DATA_DIR': '/m-coriander/coriander/rohan_sanda/OLMo-core/ml/data/preprocessed',
-          "WANDB_PROJECT": "moe-rohan",
-          "WANDB_ENTITY": "ml-moe",
-          "CONDA_ENV_NAME": "olmo-core",
-          "PROJECT_DIR": DEFAULT_DIR_PATH,
-          "SLURM_ACCOUNT": "zlab",
-          "SLURM_PARTITION": "ckpt-g2",
-          "COMMAND_PREFIX": f"{DEFAULT_DIR_PATH}/ml/scripts/single_train_launch.py",
-          "NUM_GPUS": 1,
-          "MODEL": [],
-          "DATAROOT": "https://olmo-data.org/",
-          "DATA_DIR": "/m-coriander/coriander/rohan_sanda/data/",
-          "NAME_KEYS": [],
-      },
+        "DEFAULT_SAVE_PATH": "/m-coriander/coriander/rohan_sanda/models",
+        "DATA_WORK_DIR": "/m-coriander/coriander/rohan_sanda/OLMo-core/ml/data",
+        "VALID_DATA_DIR": "/m-coriander/coriander/rohan_sanda/OLMo-core/ml/data/preprocessed",
+        "WANDB_PROJECT": "moe-rohan",
+        "WANDB_ENTITY": "ml-moe",
+        "CONDA_ENV_NAME": "olmo-core",
+        "PROJECT_DIR": DEFAULT_DIR_PATH,
+        "SLURM_ACCOUNT": "zlab",
+        "SLURM_PARTITION": "ckpt-g2",
+        "COMMAND_PREFIX": f"{DEFAULT_DIR_PATH}/ml/scripts/single_train_launch.py",
+        "NUM_GPUS": 1,
+        "MODEL": [],
+        "DATAROOT": "https://olmo-data.org/",
+        "DATA_DIR": "/m-coriander/coriander/rohan_sanda/data/",
+        "NAME_KEYS": [],
+    },
 }
 
 HARDWARE_SPECS_DICT = {
@@ -268,24 +268,24 @@ HARDWARE_SPECS_DICT = {
             "MEM_GB": 220,
         },
     },
-    "olmo2_ml_300M": { 
+    "olmo2_ml_300M": {
         "gpu-h200": {
             "per_gpu_batch_size": 16,
             "NUM_CPUS": 16,
             "MEM_GB": 240,
-        }, 
+        },
     },
-    "olmo2_ml_500M": { 
+    "olmo2_ml_500M": {
         "gpu-l40": {
             "per_gpu_batch_size": 8,
-        }, 
+        },
         "gpu-a40": {
             "per_gpu_batch_size": 8,
-        }, 
+        },
         "gpu-h200": {
             "per_gpu_batch_size": 16,
             "NUM_CPUS": 16,
             "MEM_GB": 240,
-        }, 
-    }
+        },
+    },
 }
