@@ -16,6 +16,55 @@ MODELS = [
     # 'olmo2_ml_200M',
 ]
 
+# === Family B: two-domain specialist-injection sweep (additive) ===
+# When RUN_FAMILY_B is True, the sweep's subgrids are replaced (per model) by the grid
+# produced below; set it False to run the original single-source repetition subgrids that
+# are defined inline in the grid literal. INCLUDE_GRANULARITY additionally sweeps 16- and
+# 128-expert variants (fixed active params: top_k=4, hidden_mult=0.25).
+RUN_FAMILY_B = True
+INCLUDE_GRANULARITY = False
+
+
+def build_family_b_subgrids():
+    """Generate the Family B subgrids: a generalist primary blended with a repeated
+    specialist minority, swept over mixing cell x minority-repetition x architecture."""
+    # (cell label, primary datamix, minority datamix, minority fraction)
+    cells = [
+        ("sc50", "dclm_only", "starcoder_only", "0.5"),
+        ("sc90", "dclm_only", "starcoder_only", "0.1"),
+        ("p2o50", "dclm_only", "pes2o_only", "0.5"),
+    ]
+    reps = ["1", "2", "4", "8", "16", "32"]
+    arches = [
+        ("dense", {"moe_num_experts_list": ["1"]}),
+        ("moe32", {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"],
+                   "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+        ("moe64", {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"],
+                   "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+    ]
+    if INCLUDE_GRANULARITY:
+        arches += [
+            ("moe16", {"moe_num_experts_list": ["16"], "moe_hidden_multipliers_list": ["0.25"],
+                       "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+            ("moe128", {"moe_num_experts_list": ["128"], "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+        ]
+    subgrids = {}
+    for cell, primary, minority, frac in cells:
+        for rep in reps:
+            for arch_name, arch in arches:
+                sg = {
+                    "mix_primary": [primary],
+                    "mix_minority": [minority],
+                    "minority_fraction": [frac],
+                    "minority_repetition": [rep],
+                    "primary_repetition": ["1"],
+                }
+                sg.update(arch)
+                subgrids[f"famB_{cell}_rep{rep}x_{arch_name}"] = sg
+    return subgrids
+
+
 def main(
     sweep_name=SWEEP_NAME_DEFAULT,
     relaunch_path=None,
@@ -255,6 +304,12 @@ def main(
                     # "moe64_rep1024x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0009765625"], "num_repetitions": ["1024"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                 },
             }
+
+            if RUN_FAMILY_B:
+                # Replace the single-source repetition subgrids above with the additive
+                # Family B (specialist-injection) grid. Set RUN_FAMILY_B = False to restore
+                # the original single-source repetition sweep.
+                grid["subgrids"] = build_family_b_subgrids()
 
             run_grid(
                 grid,
