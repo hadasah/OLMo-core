@@ -87,6 +87,7 @@ DATAMIX_LOOKUP = {
     "starcoder_only": DataMix.starcoder_only,
     "wikipedia_only": DataMix.wikipedia_only,
     "pes2o_only": DataMix.pes2o_only,
+    "dolma17": DataMix.dolma17,
 }
 
 _user = os.environ.get('USER', '')
@@ -190,6 +191,11 @@ def build_config(
     moe_lb_loss_weight: float = 0.01,
     unique_data_fraction: float = 1.0,
     num_repetitions: int = 1,
+    mix_primary: Optional[str] = None,
+    mix_minority: Optional[str] = None,
+    minority_fraction: float = 0.0,
+    minority_repetition: int = 1,
+    primary_repetition: int = 1,
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS['WANDB_ENTITY'],
     wandb_project: str = USER_PROJECT_SPECS['WANDB_PROJECT'],
@@ -211,7 +217,107 @@ def build_config(
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
     )
 
-    if unique_data_fraction < 1.0:
+    if mix_primary is not None and mix_minority is not None:
+        # === Family B: two-domain mixture with differential per-source repetition ===
+        # A generalist "primary" source (e.g. dclm_only) at primary_repetition (usually 1x) is
+        # blended with a specialist "minority" source (e.g. starcoder_only/pes2o_only) repeated
+        # minority_repetition times over a shrinking, strictly-nested unique pool. The total
+        # training budget T (max_duration) is held fixed; the minority contributes
+        # `minority_fraction * T` tokens drawn from a unique pool of size
+        # `minority_fraction * T / minority_repetition`, tiled within the mixture.
+        actual_train_tokens = train_tokens
+        for ov in overrides:
+            if ov.startswith("--trainer.max_duration.value="):
+                actual_train_tokens = int(ov.split("=")[1])
+            elif ov.startswith("trainer.max_duration.value="):
+                actual_train_tokens = int(ov.split("=")[1])
+        train_tokens = actual_train_tokens
+        total_budget = train_tokens
+
+        f = float(minority_fraction)
+        if not 0.0 < f < 1.0:
+            raise ValueError(f"minority_fraction must be in (0, 1), got {f}")
+        r_min = max(1, int(minority_repetition))
+        r_pri = max(1, int(primary_repetition))
+
+        primary_paths, _ = DATAMIX_LOOKUP[mix_primary].build(data_root, tokenizer_config.identifier)
+        minority_paths, _ = DATAMIX_LOOKUP[mix_minority].build(data_root, tokenizer_config.identifier)
+
+        # Infer dtype itemsize (same logic as NumpyDatasetConfig.get_dtype).
+        npdtype = np.uint32
+        for dt in (np.uint8, np.uint16, np.uint32, np.uint64):
+            if (tokenizer_config.vocab_size - 1) <= np.iinfo(dt).max:
+                npdtype = dt
+                break
+        itemsize = npdtype(0).itemsize
+        primary_population = sum(get_file_size(p) // itemsize for p in primary_paths)
+        minority_population = sum(get_file_size(p) // itemsize for p in minority_paths)
+
+        # Unique (distinct) pools; nested across repetition because higher R => smaller prefix.
+        primary_unique = int((1.0 - f) * total_budget / r_pri)
+        minority_unique = int(f * total_budget / r_min)
+
+        if minority_unique > minority_population:
+            raise ValueError(
+                f"Minority source '{mix_minority}' has only {minority_population} tokens, but the "
+                f"requested unique pool is {minority_unique} (minority_fraction={f}, "
+                f"minority_repetition={r_min}, budget={total_budget}). Lower the fraction/repetition."
+            )
+        if primary_unique > primary_population:
+            raise ValueError(
+                f"Primary source '{mix_primary}' has only {primary_population} tokens, but the "
+                f"requested unique pool is {primary_unique}."
+            )
+
+        source_configs = [
+            SourceMixtureConfig(
+                source_name="primary",
+                target_ratio=(1.0 - f),
+                paths=primary_paths,
+                unique_tokens=(primary_unique if r_pri > 1 else None),
+                max_repetition_ratio=float(r_pri),
+            ),
+            SourceMixtureConfig(
+                source_name="minority",
+                target_ratio=f,
+                paths=minority_paths,
+                unique_tokens=minority_unique,
+                max_repetition_ratio=float(r_min),
+            ),
+        ]
+
+        src_mix_config = SourceMixtureDatasetConfig(
+            source_list=SourceMixtureList(sources=source_configs),
+            requested_tokens=total_budget,
+            global_batch_size=global_batch_size * sequence_length,
+            seed=DATA_SEED,
+        )
+
+        # Isolate this mixture's instance-index cache. The mixture indices cache path (under
+        # work_dir/dataset-common/) is keyed by (shard path, size, dtype, seq_len) and does NOT
+        # encode the per-source token allocation, so two configs drawing a different number of
+        # instances from the same shard would otherwise reuse each other's indices. Namespacing
+        # by the data-defining params keeps each config's cache separate while still sharing
+        # across architectures (which do not affect the data). Nesting across repetition levels is
+        # unaffected (it follows from the fixed seed + "prefix" sampler, independent of work_dir).
+        fam_b_tag = f"famB_{mix_primary}_{mix_minority}_f{f}_rmin{r_min}_rpri{r_pri}"
+        fam_b_work_dir = os.path.join(data_work_dir, fam_b_tag)
+
+        dataset_config = NumpyFSLDatasetConfig.from_src_mix(
+            src_mix_config,
+            tokenizer=tokenizer_config,
+            sequence_length=sequence_length,
+            max_target_sequence_length=sequence_length,
+            work_dir=fam_b_work_dir,
+            mixture_sample_mode="prefix",
+        )
+
+        log.info(
+            f"Family B mixture: primary={mix_primary} ({1.0 - f:.2f} @ {r_pri}x, "
+            f"unique={primary_unique:,}) + minority={mix_minority} ({f:.2f} @ {r_min}x, "
+            f"unique={minority_unique:,}); total budget={total_budget:,}"
+        )
+    elif unique_data_fraction < 1.0:
         # Use the actual training token budget (from overrides) instead of the
         # default train_tokens, which is only 200M and wrong for 80M/200M models.
         actual_train_tokens = train_tokens
@@ -452,6 +558,11 @@ def main(
             moe_lb_loss_weight=args.moe_lb_loss_weight,
             unique_data_fraction=args.unique_data_fraction,
             num_repetitions=args.num_repetitions,
+            mix_primary=args.mix_primary,
+            mix_minority=args.mix_minority,
+            minority_fraction=args.minority_fraction,
+            minority_repetition=args.minority_repetition,
+            primary_repetition=args.primary_repetition,
             overrides=overrides)
         logger.info("Config built successfully")
 
@@ -518,6 +629,16 @@ if __name__ == "__main__":
              "Lower fraction + same max_duration = more data repetition.")
     parser.add_argument("--num_repetitions", type=int, default=1,
         help="Expected number of data repetitions (for naming/tagging only, does not affect training)")
+    parser.add_argument("--mix_primary", type=str, default=None,
+        help="Family B: primary/generalist datamix name (e.g. dclm_only). Set with --mix_minority to enable a two-source mixture.")
+    parser.add_argument("--mix_minority", type=str, default=None,
+        help="Family B: minority/specialist datamix name (e.g. starcoder_only, pes2o_only).")
+    parser.add_argument("--minority_fraction", type=float, default=0.0,
+        help="Family B: fraction of the token budget drawn from the minority source, in (0,1).")
+    parser.add_argument("--minority_repetition", type=int, default=1,
+        help="Family B: number of times the minority unique pool is repeated (its pool shrinks as this grows).")
+    parser.add_argument("--primary_repetition", type=int, default=1,
+        help="Family B: number of times the primary unique pool is repeated (usually 1).")
     args, overrides = parser.parse_known_args()
 
     prepare_training_environment()
