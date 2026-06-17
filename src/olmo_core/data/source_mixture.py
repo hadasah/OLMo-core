@@ -59,6 +59,15 @@ class SourceMixtureConfig(Config):
     The maximum ratio of the source data to include in the mixture.
     """
 
+    unique_tokens: Optional[int] = None
+    """
+    If set, restrict the *distinct* token pool drawn from this source to (at most) this many
+    tokens, taken as a deterministic per-shard prefix, then tile that pool to meet the target
+    token count. This enables repeating a sub-shard-sized unique pool a fixed number of times
+    (contribution / unique_tokens) with strict nesting across repetition levels. ``None``
+    (default) preserves the original behavior (distinct pool == full source population).
+    """
+
     _resolved_paths: Optional[List[str]] = None
 
     def validate(self):
@@ -463,15 +472,28 @@ class SourceMixtureDatasetConfig(Config):
         """
         Get the paths and resulting token count for a source.
         """
-        take_ratio = token_details.num_selected / token_details.population
-        path_tokens: List[SourcePathTokens] = []
-
         resolved_paths = source_config.resolved_paths
         token_counts_by_path = {
             path: self._count_tokens_for_file(path, npdtype) for path in resolved_paths
         }
 
-        # When we need more than 1 repetition of the source data we have a take ration > 1
+        # By default the distinct pool is the entire source population. If ``unique_tokens`` is
+        # set, restrict the distinct pool to (at most) that many tokens, taken as a deterministic
+        # per-shard prefix fraction; the source is then tiled (take_ratio > 1) to meet the
+        # requested contribution. This lets us repeat a sub-shard-sized unique pool a fixed number
+        # of times while keeping the pool strictly nested across repetition levels.
+        if source_config.unique_tokens is not None:
+            distinct_population = min(token_details.population, source_config.unique_tokens)
+        else:
+            distinct_population = token_details.population
+        distinct_fraction = (
+            distinct_population / token_details.population if token_details.population > 0 else 0.0
+        )
+
+        take_ratio = token_details.num_selected / distinct_population
+        path_tokens: List[SourcePathTokens] = []
+
+        # When we need more than 1 repetition of the (distinct) source data we have take_ratio > 1.
         if take_ratio > 1:
             take_ratios = []
             remaining = take_ratio
@@ -480,31 +502,22 @@ class SourceMixtureDatasetConfig(Config):
                 chunk = min(1.0, remaining)
                 take_ratios.append(chunk)
                 remaining -= chunk
+        else:
+            take_ratios = [take_ratio]
 
-            for ratio in take_ratios:
-                for path in resolved_paths:
-                    available_tokens = token_counts_by_path[path]
-                    tokens_to_keep = int(math.ceil(available_tokens * ratio))
-                    path_tokens.append(
-                        SourcePathTokens(
-                            path=path,
-                            tokens=tokens_to_keep,
-                            max_tokens=available_tokens,
-                        )
+        for ratio in take_ratios:
+            for path in resolved_paths:
+                available_tokens = token_counts_by_path[path]
+                # Distinct tokens to draw from this shard (a prefix when distinct_fraction < 1).
+                distinct_tokens = available_tokens * distinct_fraction
+                tokens_to_keep = int(math.ceil(distinct_tokens * ratio))
+                path_tokens.append(
+                    SourcePathTokens(
+                        path=path,
+                        tokens=tokens_to_keep,
+                        max_tokens=int(math.ceil(distinct_tokens)),
                     )
-
-            return path_tokens
-
-        for path in resolved_paths:
-            available_tokens = token_counts_by_path[path]
-            tokens_to_keep = int(math.ceil(available_tokens * take_ratio))
-            path_tokens.append(
-                SourcePathTokens(
-                    path=path,
-                    tokens=tokens_to_keep,
-                    max_tokens=available_tokens,
                 )
-            )
 
         return path_tokens
 
