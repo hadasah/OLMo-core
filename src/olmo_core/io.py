@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import pickle
+import random
 import re
 import shutil
 import time
@@ -548,7 +549,9 @@ def deserialize_from_tensor(data: torch.Tensor) -> Any:
 
 
 def _wait_before_retry(attempt: int):
-    time.sleep(min(0.5 * 2**attempt, 3.0))
+    # Exponential backoff capped at 3s, plus jitter so many concurrent readers that hit the same
+    # rate limit (HTTP 429) don't retry in lockstep and immediately re-trip it.
+    time.sleep(min(0.5 * 2**attempt, 3.0) + random.uniform(0.0, 0.5))
 
 
 def _format_bytes(num: Union[int, float], suffix="B") -> str:
@@ -636,11 +639,11 @@ def _http_file_size(url: str) -> int:
 
 
 @retriable(
-    max_attempts=10,
+    max_attempts=20,
     retry_condition=lambda exc: (
         isinstance(exc, requests.exceptions.HTTPError)
         and exc.response is not None
-        and exc.response.status_code >= 500
+        and (exc.response.status_code >= 500 or exc.response.status_code == 429)
     ),
 )
 def _http_get_bytes_range(url: str, bytes_start: int, num_bytes: int) -> bytes:
