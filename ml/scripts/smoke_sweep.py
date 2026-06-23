@@ -78,7 +78,7 @@ def main(
             "model_name": [MODEL],
             "save_root": [f"{specs['DEFAULT_SAVE_PATH']}/{sweep_name}"],
             "moe_type": ["dropless"],
-            "train_datamix_name": ["dclm_only"],
+            "train_datamix_name": ["v3_small_ppl_validation"],
             # Override the model's default token budget for a quick smoke run.
             "trainer": {
                 "max_duration": {

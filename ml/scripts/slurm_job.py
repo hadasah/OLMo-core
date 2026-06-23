@@ -134,7 +134,7 @@ export NCCL_MIN_CHANNELS=32
 
 # olmo-core specific
 export OLMO_SHARED_FS=1
-export OLMO_CORE_FS_CACHE_DIR=/gscratch/zlab/atindra/fs_cache
+# export OLMO_CORE_FS_CACHE_DIR=/gscratch/zlab/atindra/fs_cache
 
 cd {NEW_DIR_PATH}
 export PYTHONPATH={SAVE_ROOT}/{repo_name}:$PYTHONPATH
