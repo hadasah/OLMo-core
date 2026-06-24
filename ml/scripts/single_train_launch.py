@@ -619,7 +619,7 @@ if __name__ == "__main__":
     )
     args, overrides = parser.parse_known_args()
 
-    prepare_training_environment(timeout=timedelta(minutes=60))
+    prepare_training_environment(timeout=timedelta(hours=3))
     try:
         main(args, overrides=overrides)
     except Exception as e:
