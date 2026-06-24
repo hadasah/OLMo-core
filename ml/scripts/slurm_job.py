@@ -133,6 +133,7 @@ export NCCL_MIN_CHANNELS=32
 
 # olmo-core specific
 export OLMO_SHARED_FS=1
+export OLMO_CORE_FS_CACHE_DIR=/gscratch/zlab/margsli/gitfiles/OLMo-core/ml/data
 
 {conda_command}
 cd {NEW_DIR_PATH}
