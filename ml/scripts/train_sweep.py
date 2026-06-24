@@ -42,7 +42,7 @@ def main(
 
     DEBUG_MODE = debug
     DRY_MODE = dry_mode
-    job_time = "1:00:00" if debug else job_time
+    job_time = "6:00:00" if debug else job_time
     user = os.environ.get("USER")
     if user not in PROJECT_SPECS:
         raise ValueError(
@@ -166,7 +166,7 @@ def main(
                             "lr": [4e-4],
                             # "weight_decay": [0.2, 0.4],
                         },
-                        "max_grad_norm": [None, 0.2],
+                        "max_grad_norm": [ 0.2, None],
                     },
                     "trainer": {
                         "max_duration": {
@@ -196,10 +196,10 @@ def main(
                     "dense": {
                         "moe_num_experts_list": ["1"],
                         "subgrids": {
-                            "rep1x": {
-                                "unique_data_fraction": ["1.0"],
-                                "num_repetitions": ["1"],
-                            },
+                            # "rep1x": {
+                            #    "unique_data_fraction": ["1.0"],
+                            #    "num_repetitions": ["1"],
+                            #},
                             "rep2x": {
                                 "unique_data_fraction": ["0.5"],
                                 "num_repetitions": ["2"],
