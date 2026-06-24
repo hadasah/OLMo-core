@@ -166,7 +166,7 @@ def main(
                             "lr": [4e-4],
                             "weight_decay": [0.2, 0.4],
                         },
-                        # "max_grad_norm": [None],
+                        "max_grad_norm": [None, 0.2],
                     },
                     "trainer": {
                         "max_duration": {
