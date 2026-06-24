@@ -133,8 +133,8 @@ export NCCL_MIN_CHANNELS=32
 
 # olmo-core specific
 export OLMO_SHARED_FS=1
-export OLMO_CORE_FS_CACHE_DIR=/gscratch/zlab/atindra/fs_cache
 
+{conda_command}
 cd {NEW_DIR_PATH}
 export PYTHONPATH={SAVE_ROOT}/{repo_name}:$PYTHONPATH
 if [[ "$SLURM_PROCID" == "0" ]]; then 
@@ -253,7 +253,8 @@ def run_grid(
             name_list.append(subgrid_name)
         for key in name_keys_list:
             value = args_dict.get(key, None)
-            if value is None or isinstance(value, collections.abc.Mapping):
+            # if value is None or isinstance(value, collections.abc.Mapping):
+            if isinstance(value, collections.abc.Mapping):
                 continue
             short_key = key.replace("_", "").split(".")[-1] if "." in key else key
             if isinstance(value, str):
@@ -454,6 +455,7 @@ def run_grid(
                 NEW_DIR_PATH=NEW_DIR_PATH,
                 repo_name=repo_name,
                 job_port=sweep_port_start + i,
+                conda_env_name=conda_env_name,
             )
         )
     submit_array_jobs(
@@ -497,6 +499,7 @@ def create_job_files(
     NEW_DIR_PATH="",
     repo_name="",
     job_port=None,
+    conda_env_name=None,
 ):
     """Creates job folders and scripts"""
 
@@ -508,6 +511,7 @@ def create_job_files(
     SCRIPTFILE = os.path.join(SAVE, "run.sh")
     ARGS_STR = " ".join(job_args)
     job_port = job_port or random.randint(RANDOM_PORT_MIN, RANDOM_PORT_MAX)
+    conda_command = f"conda activate {conda_env_name}" if conda_env_name else ""
 
     if data_parallel or not gpus:
         ntasks_per_node = 1
