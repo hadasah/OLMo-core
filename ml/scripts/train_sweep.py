@@ -164,7 +164,7 @@ def main(
                     "train_module": {
                         "optim": {
                             "lr": [4e-4],
-                            # "weight_decay": [0.2, 0.4],
+                            "weight_decay": [0.2, 0.4],
                         },
                         # "max_grad_norm": [None],
                     },
@@ -175,7 +175,7 @@ def main(
                     },
                     "model": {
                         "block": {
-                            "dropout": [0.05, 0.1, 0.2],
+                            # "dropout": [0.1, 0.2],
                             # "feed_forward_moe": {
                             #     "routers_list": {
                             #         "0": {
@@ -187,40 +187,44 @@ def main(
                         },
                     },
                 },
-                # allows you to bundle multiple hyperparameters together
+                # allows you to bundle multiple hyperparameters together.
+                # subgrids can be nested: use a "subgrids" key inside any subgrid
+                # to define children that inherit the parent's config values.
                 "subgrids": {
                     # "moe64": {
                     #     "moe_num_experts_list": ["64"],
                     #     "moe_hidden_multipliers_list": ["0.25"],
                     #     "moe_router_top_ks_list": ["4"],
                     #     "moe_generalist_hidden_multiplier": ["0"],
-                    #     "rep_1x": {
-                    #         "unique_data_fraction": ["1.0"],
-                    #         "num_repetitions": ["1"]
-                    #     },
-                    #     "rep_2x": {
-                    #         "unique_data_fraction": ["0.5"],
-                    #         "num_repetitions": ["2"]
-                    #     },
-                    #     "rep_4x": {
-                    #         "unique_data_fraction": ["0.25"],
-                    #         "num_repetitions": ["4"]
-                    #     },
-                    #     "rep_8x": {
-                    #         "unique_data_fraction": ["0.125"],
-                    #         "num_repetitions": ["8"]
-                    #     },
-                    #     "rep_16x": {
-                    #         "unique_data_fraction": ["0.0625"],
-                    #         "num_repetitions": ["16"]
-                    #     },
-                    #     "rep_32x": {
-                    #         "unique_data_fraction": ["0.03125"],
-                    #         "num_repetitions": ["32"]
-                    #     },
-                    #     "rep_64x": {
-                    #         "unique_data_fraction": ["0.015625"],
-                    #         "num_repetitions": ["64"]
+                    #     "subgrids": {
+                    #         "rep_1x": {
+                    #             "unique_data_fraction": ["1.0"],
+                    #             "num_repetitions": ["1"],
+                    #         },
+                    #         "rep_2x": {
+                    #             "unique_data_fraction": ["0.5"],
+                    #             "num_repetitions": ["2"],
+                    #         },
+                    #         "rep_4x": {
+                    #             "unique_data_fraction": ["0.25"],
+                    #             "num_repetitions": ["4"],
+                    #         },
+                    #         "rep_8x": {
+                    #             "unique_data_fraction": ["0.125"],
+                    #             "num_repetitions": ["8"],
+                    #         },
+                    #         "rep_16x": {
+                    #             "unique_data_fraction": ["0.0625"],
+                    #             "num_repetitions": ["16"],
+                    #         },
+                    #         "rep_32x": {
+                    #             "unique_data_fraction": ["0.03125"],
+                    #             "num_repetitions": ["32"],
+                    #         },
+                    #         "rep_64x": {
+                    #             "unique_data_fraction": ["0.015625"],
+                    #             "num_repetitions": ["64"],
+                    #         },
                     #     },
                     # },
                     ## === Data repetition experiments (A+C) ===
