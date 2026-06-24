@@ -7,6 +7,7 @@ import os
 import traceback
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import List, Optional, cast
 
 import numpy as np
@@ -618,7 +619,7 @@ if __name__ == "__main__":
     )
     args, overrides = parser.parse_known_args()
 
-    prepare_training_environment()
+    prepare_training_environment(timeout=timedelta(minutes=60))
     try:
         main(args, overrides=overrides)
     except Exception as e:
