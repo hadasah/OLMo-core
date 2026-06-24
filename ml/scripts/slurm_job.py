@@ -323,7 +323,7 @@ def run_grid(
     all_permutation_dicts = {}
     main_grid = dict_update(deepcopy(default_grid), grid["main_grid"])
 
-    def flatten_subgrids(subgrids, parent_config):
+    def flatten_subgrids(subgrids, parent_config, name_prefix=""):
         """
         Recursively flatten nested subgrids into a flat dict of {name: config_dict}.
 
@@ -332,21 +332,25 @@ def run_grid(
           - A "subgrids" key — a dict of child subgrids that inherit this level's config.
 
         If a subgrid has no "subgrids" key, it's a leaf and produces a single job config.
+
+        Names are built by joining ancestor keys with "_", e.g. "moe64" -> "rep_1x"
+        becomes "moe64_rep_1x".
         """
         result = {}
         for name, value in subgrids.items():
             if not isinstance(value, dict):
                 continue
+            full_name = f"{name_prefix}_{name}" if name_prefix else name
             # Separate config entries from nested subgrids.
             config_entries = {k: v for k, v in value.items() if k != "subgrids"}
             merged_config = dict_update(deepcopy(parent_config), config_entries)
 
             if "subgrids" in value:
-                # Recurse into children, passing down the merged config.
-                result.update(flatten_subgrids(value["subgrids"], merged_config))
+                # Recurse into children, passing down the merged config and name prefix.
+                result.update(flatten_subgrids(value["subgrids"], merged_config, name_prefix=full_name))
             else:
                 # Leaf subgrid — emit it.
-                result[name] = merged_config
+                result[full_name] = merged_config
         return result
 
     flat_subgrids = flatten_subgrids(grid["subgrids"], main_grid)
