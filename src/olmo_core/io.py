@@ -305,9 +305,14 @@ def dir_is_empty(dir: PathOrStr) -> bool:
         return True
 
 
+@maybe_cache(condition=is_url)
 def file_exists(path: PathOrStr) -> bool:
     """
     Check if a local or remote file exists.
+
+    .. warning::
+        Uses caching if the argument is a URL and the filesystem cache is enabled
+        (see :func:`olmo_core.fs_cache.maybe_cache`).
 
     :param path: Path/URL to a file.
     """
