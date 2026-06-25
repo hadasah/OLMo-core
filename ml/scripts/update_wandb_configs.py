@@ -1,8 +1,21 @@
-"""Update wandb run configs to add model_size_name based on run name."""
+"""Update wandb run configs and tags based on run name."""
 
 import argparse
 
 import wandb
+
+# Rules for setting config values based on run name substrings.
+# Each entry: (substring_to_match, config_key, config_value)
+CONFIG_RULES = [
+    ("200M", "model_size_name", "200M"),
+    ("80M", "model_size_name", "80M"),
+]
+
+# Rules for adding tags based on run name substrings.
+# Each entry: (substring_to_match, tag_to_add)
+TAG_RULES = [
+    ("moe64", "MoE64"),
+]
 
 
 def main(entity: str, project: str, dry_run: bool = False):
@@ -12,26 +25,33 @@ def main(entity: str, project: str, dry_run: bool = False):
     updated = 0
     for run in runs:
         name = run.name or ""
-        model_size_name = None
+        changes = []
 
-        if "200M" in name:
-            model_size_name = "200M"
-        elif "80M" in name:
-            model_size_name = "80M"
+        # Apply config rules (first match per config_key wins).
+        seen_keys = set()
+        for substring, config_key, config_value in CONFIG_RULES:
+            if config_key in seen_keys:
+                continue
+            if substring in name and run.config.get(config_key) != config_value:
+                run.config[config_key] = config_value
+                changes.append(f"config {config_key}={config_value}")
+                seen_keys.add(config_key)
 
-        if model_size_name is None:
-            continue
+        # Apply tag rules.
+        existing_tags = set(run.tags or [])
+        for substring, tag in TAG_RULES:
+            if substring in name and tag not in existing_tags:
+                run.tags.append(tag)
+                changes.append(f"tag +{tag}")
 
-        existing = run.config.get("model_size_name")
-        if existing == model_size_name:
+        if not changes:
             continue
 
         if dry_run:
-            print(f"[dry run] {run.name}: model_size_name={model_size_name}")
+            print(f"[dry run] {run.name}: {', '.join(changes)}")
         else:
-            run.config["model_size_name"] = model_size_name
             run.update()
-            print(f"Updated {run.name}: model_size_name={model_size_name}")
+            print(f"Updated {run.name}: {', '.join(changes)}")
 
         updated += 1
 
@@ -39,7 +59,7 @@ def main(entity: str, project: str, dry_run: bool = False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Update wandb run configs with model_size_name")
+    parser = argparse.ArgumentParser(description="Update wandb run configs and tags based on run name")
     parser.add_argument("--entity", type=str, default="ml-moe")
     parser.add_argument("--project", type=str, default="data_rep_moe")
     parser.add_argument("--dry-run", action="store_true", help="Print changes without applying them")
