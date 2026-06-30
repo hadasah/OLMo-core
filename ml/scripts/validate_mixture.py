@@ -116,6 +116,9 @@ def main():
                 ok = False
             prev_unique = min_unique
 
+        if args.check_paths and minority not in populations:
+            print(f"   !! could not size minority '{minority}' (fetch failed above); feasibility UNVERIFIED")
+            ok = False
         if args.check_paths and minority in populations:
             P = populations[minority]
             largest_needed = int(f * T / REPS[0])  # lowest rep needs the largest unique pool
