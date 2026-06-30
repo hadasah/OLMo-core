@@ -16,12 +16,16 @@ MODELS = [
     # 'olmo2_ml_200M',
 ]
 
-# === Family B: two-domain specialist-injection sweep (additive) ===
-# When RUN_FAMILY_B is True, the sweep's subgrids are replaced (per model) by the grid
-# produced below; set it False to run the original single-source repetition subgrids that
-# are defined inline in the grid literal. INCLUDE_GRANULARITY additionally sweeps 16- and
-# 128-expert variants (fixed active params: top_k=4, hidden_mult=0.25).
-RUN_FAMILY_B = True
+# === Family A / B: two-domain data-mixing sweeps (additive) ===
+# When RUN_FAMILY_A or RUN_FAMILY_B is True, the sweep's subgrids are replaced (per model) by
+# the corresponding grid produced below; set both False to run the original single-source
+# repetition subgrids defined inline in the grid literal. The two families are mutually
+# exclusive (each replaces the whole subgrid set). INCLUDE_GRANULARITY additionally sweeps 16-
+# and 128-expert variants (fixed active params: top_k=4, hidden_mult=0.25).
+#   Family A: DCLM<->Dolma1.7 interpolation (composition ratios x architecture, rep=1).
+#   Family B: generalist primary + repeated specialist minority (rep ladder x architecture).
+RUN_FAMILY_A = True
+RUN_FAMILY_B = False
 INCLUDE_GRANULARITY = False
 
 
@@ -62,6 +66,52 @@ def build_family_b_subgrids():
                 }
                 sg.update(arch)
                 subgrids[f"famB_{cell}_rep{rep}x_{arch_name}"] = sg
+    return subgrids
+
+
+def build_family_a_subgrids():
+    """Generate the Family A subgrids: DCLM<->Dolma1.7 interpolation (the DataDecide recipe,
+    plus an architecture axis), at rep=1 (pure composition, no repetition).
+
+    Five DCLM:Dolma17 composition ratios {100/0, 75/25, 50/50, 25/75, 0/100} x architecture.
+    The endpoints (100/0, 0/100) are single-source runs (just set train_datamix_name to
+    dclm_only / dolma17, which overrides the main_grid value). The three interior blends reuse
+    the Family B two-source mixture build path with minority=dolma17 and minority_repetition=1,
+    so minority_fraction = the dolma17 share of the fixed token budget.
+    """
+    arches = [
+        ("dense", {"moe_num_experts_list": ["1"]}),
+        ("moe32", {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"],
+                   "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+        ("moe64", {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"],
+                   "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+    ]
+    if INCLUDE_GRANULARITY:
+        arches += [
+            ("moe16", {"moe_num_experts_list": ["16"], "moe_hidden_multipliers_list": ["0.25"],
+                       "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+            ("moe128", {"moe_num_experts_list": ["128"], "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+        ]
+    # DCLM percentage of the blend (Dolma1.7 is the remaining 1 - pct/100).
+    dclm_pcts = [100, 75, 50, 25, 0]
+    subgrids = {}
+    for pct in dclm_pcts:
+        for arch_name, arch in arches:
+            if pct == 100:
+                sg = {"train_datamix_name": ["dclm_only"]}        # pure DCLM endpoint
+            elif pct == 0:
+                sg = {"train_datamix_name": ["dolma17"]}          # pure Dolma1.7 endpoint
+            else:
+                sg = {
+                    "mix_primary": ["dclm_only"],
+                    "mix_minority": ["dolma17"],
+                    "minority_fraction": [f"{(100 - pct) / 100:.2f}"],
+                    "minority_repetition": ["1"],
+                    "primary_repetition": ["1"],
+                }
+            sg.update(arch)
+            subgrids[f"famA_dclm{pct}_{arch_name}"] = sg
     return subgrids
 
 
@@ -305,10 +355,15 @@ def main(
                 },
             }
 
-            if RUN_FAMILY_B:
+            if RUN_FAMILY_A and RUN_FAMILY_B:
+                raise ValueError("RUN_FAMILY_A and RUN_FAMILY_B are mutually exclusive; enable only one.")
+            if RUN_FAMILY_A:
                 # Replace the single-source repetition subgrids above with the additive
-                # Family B (specialist-injection) grid. Set RUN_FAMILY_B = False to restore
-                # the original single-source repetition sweep.
+                # Family A (DCLM<->Dolma1.7 interpolation) grid.
+                grid["subgrids"] = build_family_a_subgrids()
+            elif RUN_FAMILY_B:
+                # Replace them with the additive Family B (specialist-injection) grid instead.
+                # Set both toggles False to restore the original single-source repetition sweep.
                 grid["subgrids"] = build_family_b_subgrids()
 
             run_grid(
