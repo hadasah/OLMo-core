@@ -91,7 +91,7 @@ def resource_path(folder: PathOrStr, fname: str, local_cache: Optional[PathOrStr
         log.info(f"Found local cache of {fname} at {local_path}")
         return local_path
     else:
-        return cached_path(f"{folder}/{fname}", quiet=True)
+        return _cached_path_with_retry(f"{folder}/{fname}")
 
 
 def is_url(path: PathOrStr) -> bool:
@@ -603,6 +603,21 @@ def retriable(
         return new_func
 
     return decorator
+
+
+@retriable(
+    max_attempts=20,
+    retry_condition=lambda exc: (
+        isinstance(exc, requests.exceptions.HTTPError)
+        and exc.response is not None
+        and (exc.response.status_code >= 500 or exc.response.status_code == 429)
+    ),
+)
+def _cached_path_with_retry(url: str) -> Path:
+    # Resolve/download a remote resource via cached_path, retrying transient server errors (5xx)
+    # and rate limits (429). The metadata (.csv.gz) fetches during dataset prep go through here,
+    # and olmo-data.org intermittently returns transient 500/429 that would otherwise abort prep.
+    return cached_path(url, quiet=True)
 
 
 ######################
