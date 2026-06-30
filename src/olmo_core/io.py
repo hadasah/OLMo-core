@@ -639,10 +639,25 @@ def _get_http_session() -> requests.Session:
     return session
 
 
-@retriable(max_attempts=10, retry_condition=lambda exc: isinstance(exc, requests.exceptions.HTTPError))
+@retriable(
+    max_attempts=20,
+    retry_condition=lambda exc: (
+        # olmo-data.org (Cloudflare) intermittently soft-blocks HEAD requests during shard
+        # sizing, returning a rate-limit/challenge response with no content-length (raised
+        # below as OLMoNetworkError) or a transient 429/5xx. Both are transient -- retry with
+        # jittered backoff rather than aborting data prep on the first flake.
+        isinstance(exc, OLMoNetworkError)
+        or (
+            isinstance(exc, requests.exceptions.HTTPError)
+            and exc.response is not None
+            and (exc.response.status_code >= 500 or exc.response.status_code == 429)
+        )
+    ),
+)
 def _http_file_size(url: str) -> int:
     session = _get_http_session()
     response = session.head(url, allow_redirects=True)
+    response.raise_for_status()
     content_length = response.headers.get("content-length")
     if content_length is None:
         raise OLMoNetworkError(
