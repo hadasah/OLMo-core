@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dry-run validator for the Family B (two-domain specialist-injection) data mixtures.
+Dry-run validator for the two-domain data mixtures (Family A and Family B).
 
 For each (cell, repetition) it prints the realized unique-pool sizes and the effective
 repetition, and asserts the invariant the experiment relies on: as the minority repetition R
@@ -9,26 +9,39 @@ inside the lower-R pool. (Byte-level nesting + full distinct coverage are guaran
 data layer by the deterministic "prefix" sampler over a seed-independent permutation; this
 script verifies the size/feasibility preconditions.)
 
+  --family b (default): specialist injection -- generalist primary (dclm) + repeated minority
+    specialist (starcoder/pes2o) over the rep ladder {1,2,4,8,16,32}.
+  --family a: DCLM<->Dolma1.7 interpolation at rep=1. Only the interior blends are mixtures and
+    need checking; the 100/0 and 0/100 endpoints are single-source and trivially feasible.
+
 Optionally (--check-paths) it fetches the real per-source token counts to confirm each cell is
 feasible -- the lowest-R unique pool must fit inside the source. That requires olmo_core and
 network access to the data root.
 
 This script does NOT launch anything and has no side effects.
 
-Keep CELLS/REPS in sync with build_family_b_subgrids() in train_sweep.py.
+Keep FAMILY_*_CELLS / *_REPS in sync with build_family_{a,b}_subgrids() in train_sweep.py.
 """
 import argparse
 
 # (cell label, primary datamix, minority datamix, minority fraction)
-CELLS = [
+FAMILY_B_CELLS = [
     ("sc50", "dclm_only", "starcoder_only", 0.5),
     ("sc90", "dclm_only", "starcoder_only", 0.1),
     ("p2o50", "dclm_only", "pes2o_only", 0.5),
 ]
-REPS = [1, 2, 4, 8, 16, 32]
+FAMILY_B_REPS = [1, 2, 4, 8, 16, 32]
+
+# Family A interior blends (minority fraction = the dolma17 share); rep is always 1.
+FAMILY_A_CELLS = [
+    ("dclm75", "dclm_only", "dolma17", 0.25),
+    ("dclm50", "dclm_only", "dolma17", 0.50),
+    ("dclm25", "dclm_only", "dolma17", 0.75),
+]
+FAMILY_A_REPS = [1]
 
 
-def _fetch_populations(data_root, tokenizer_name):
+def _fetch_populations(data_root, tokenizer_name, cells):
     """Return {datamix_name: total_token_count}; empty dict if olmo_core/network unavailable."""
     pops = {}
     try:
@@ -50,7 +63,7 @@ def _fetch_populations(data_root, tokenizer_name):
         "dolma17": DataMix.dolma17,
     }
     needed = set()
-    for _, primary, minority, _ in CELLS:
+    for _, primary, minority, _ in cells:
         needed.add(primary)
         needed.add(minority)
     for name in sorted(needed):
@@ -65,6 +78,8 @@ def _fetch_populations(data_root, tokenizer_name):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--family", choices=["a", "b"], default="b",
+                    help="Which family's cells to validate (default b).")
     ap.add_argument("--budget", type=int, default=1_600_000_000,
                     help="Total training token budget T (default 1.6B, the olmo2_ml_80M budget).")
     ap.add_argument("--seq-length", type=int, default=2048,
@@ -76,7 +91,12 @@ def main():
     args = ap.parse_args()
     T = args.budget
 
-    populations = _fetch_populations(args.data_root, args.tokenizer) if args.check_paths else {}
+    if args.family == "a":
+        CELLS, REPS = FAMILY_A_CELLS, FAMILY_A_REPS
+    else:
+        CELLS, REPS = FAMILY_B_CELLS, FAMILY_B_REPS
+
+    populations = _fetch_populations(args.data_root, args.tokenizer, CELLS) if args.check_paths else {}
 
     ok = True
     for cell, primary, minority, f in CELLS:
@@ -85,7 +105,7 @@ def main():
         prev_unique = None
         for r in REPS:
             min_unique = int(f * T / r)
-            pri_unique = int((1 - f) * T)  # primary is always 1x in Family B
+            pri_unique = int((1 - f) * T)  # primary is always 1x in Families A and B
             realized = (f * T) / min_unique if min_unique else float("inf")
             print(f"{r:>5} {min_unique:>16,} {pri_unique:>15,} {realized:>13.2f}")
             if min_unique <= 0:
@@ -103,13 +123,21 @@ def main():
             if largest_needed > P:
                 ok = False
             print(f"   feasibility: minority population={P:,}; largest pool (rep {REPS[0]}x)={largest_needed:,} -> {status}")
+            # Also confirm the primary unique pool fits inside the primary source.
+            if primary in populations:
+                Pp = populations[primary]
+                pstatus = "OK" if pri_unique <= Pp else "INFEASIBLE"
+                if pri_unique > Pp:
+                    ok = False
+                print(f"   feasibility: primary population={Pp:,}; primary pool={pri_unique:,} -> {pstatus}")
             # Flag shards too small to yield an instance at the highest repetition.
             n_shards_paths = None
             try:
                 import numpy as np
                 from olmo_core.data import DataMix, TokenizerConfig
                 tok = {"dolma2": TokenizerConfig.dolma2}[args.tokenizer]()
-                lookup = {"starcoder_only": DataMix.starcoder_only, "pes2o_only": DataMix.pes2o_only}
+                lookup = {"starcoder_only": DataMix.starcoder_only, "pes2o_only": DataMix.pes2o_only,
+                          "dolma17": DataMix.dolma17}
                 if minority in lookup:
                     paths, _ = lookup[minority].build(args.data_root, tok.identifier)
                     n_shards_paths = len(paths)
