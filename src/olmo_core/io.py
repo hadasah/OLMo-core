@@ -656,16 +656,34 @@ def _get_http_session() -> requests.Session:
 )
 def _http_file_size(url: str) -> int:
     session = _get_http_session()
-    response = session.head(url, allow_redirects=True)
-    response.raise_for_status()
-    content_length = response.headers.get("content-length")
-    if content_length is None:
-        raise OLMoNetworkError(
-            f"No content-length header found for {url}. "
-            f"This can happen when the server is rate-limiting requests or when DDoS protection flags this request. "
-            f"Headers: {dict(response.headers)}"
-        )
-    return int(content_length)
+    # Prefer a cheap HEAD. But olmo-data.org (Cloudflare) soft-blocks / strips content-length on
+    # HEAD once a burst of size probes trips rate-limiting (a few hundred HEADs is enough), so when
+    # HEAD doesn't yield a content-length we fall back to a single-byte ranged GET -- the same
+    # request type the data loader streams with successfully -- and read the total size from the
+    # Content-Range header (`bytes 0-0/<total>`).
+    head_resp = session.head(url, allow_redirects=True)
+    if head_resp.status_code < 400:
+        content_length = head_resp.headers.get("content-length")
+        if content_length is not None:
+            return int(content_length)
+
+    range_resp = session.get(url, headers={"Range": "bytes=0-0"}, allow_redirects=True)
+    range_resp.raise_for_status()
+    content_range = range_resp.headers.get("content-range")
+    if content_range and "/" in content_range:
+        total = content_range.rsplit("/", 1)[-1].strip()
+        if total.isdigit():
+            return int(total)
+    # Some servers ignore the Range and return 200 with the full body + a content-length.
+    range_cl = range_resp.headers.get("content-length")
+    if range_resp.status_code == 200 and range_cl is not None:
+        return int(range_cl)
+
+    raise OLMoNetworkError(
+        f"Could not determine the size of {url} from HEAD (status {head_resp.status_code}) or a "
+        f"ranged GET. This can happen when the server is rate-limiting or DDoS-flagging requests. "
+        f"HEAD headers: {dict(head_resp.headers)}; GET headers: {dict(range_resp.headers)}"
+    )
 
 
 @retriable(
