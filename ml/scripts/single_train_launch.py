@@ -88,6 +88,7 @@ DATAMIX_LOOKUP = {
     "wikipedia_only": DataMix.wikipedia_only,
     "pes2o_only": DataMix.pes2o_only,
     "dolma17": DataMix.dolma17,
+    "dolma3": DataMix.OLMo_mix_0925_official,
 }
 
 _user = os.environ.get('USER', '')
