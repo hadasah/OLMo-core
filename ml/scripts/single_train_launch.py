@@ -643,11 +643,11 @@ if __name__ == "__main__":
         help="Family B: number of times the primary unique pool is repeated (usually 1).")
     args, overrides = parser.parse_known_args()
 
-    # Data prep for large multi-source mixtures (e.g. Family A's ~950-shard dolma3) builds
-    # per-shard instance indices over HTTP on rank 0 while the other ranks wait at a barrier in
-    # dataset.prepare(). The default 15-min process-group timeout is too short for that first
-    # build (it's cached afterwards), so the waiting ranks time out. Give the first build room.
-    prepare_training_environment(timeout=timedelta(minutes=60))
+    # Data prep for large multi-source mixtures (e.g. Family A's ~950-shard, ~6.2B-tokens/shard
+    # dolma3) builds per-shard instance indices over HTTP on rank 0 while the other ranks wait at
+    # a barrier in dataset.prepare(). The default 15-min process-group timeout is far too short
+    # for that first build (it is cached afterwards), so the waiting ranks time out. Give it room.
+    prepare_training_environment(timeout=timedelta(minutes=120))
     try:
         main(args, overrides=overrides)
     except Exception as e:
