@@ -32,11 +32,12 @@ FAMILY_B_CELLS = [
 ]
 FAMILY_B_REPS = [1, 2, 4, 8, 16, 32]
 
-# Family A interior blends (minority fraction = the dolma17 share); rep is always 1.
+# Family A interior blends (minority fraction = the dolma3 share); rep is always 1.
+# dolma3 = OLMo-mix-0925-official (hosted substitute for the unhosted Dolma 1.7).
 FAMILY_A_CELLS = [
-    ("dclm75", "dclm_only", "dolma17", 0.25),
-    ("dclm50", "dclm_only", "dolma17", 0.50),
-    ("dclm25", "dclm_only", "dolma17", 0.75),
+    ("dclm75", "dclm_only", "dolma3", 0.25),
+    ("dclm50", "dclm_only", "dolma3", 0.50),
+    ("dclm25", "dclm_only", "dolma3", 0.75),
 ]
 FAMILY_A_REPS = [1]
 
@@ -61,6 +62,7 @@ def _fetch_populations(data_root, tokenizer_name, cells):
         "pes2o_only": DataMix.pes2o_only,
         "wikipedia_only": DataMix.wikipedia_only,
         "dolma17": DataMix.dolma17,
+        "dolma3": DataMix.OLMo_mix_0925_official,
     }
     needed = set()
     for _, primary, minority, _ in cells:
@@ -140,7 +142,7 @@ def main():
                 from olmo_core.data import DataMix, TokenizerConfig
                 tok = {"dolma2": TokenizerConfig.dolma2}[args.tokenizer]()
                 lookup = {"starcoder_only": DataMix.starcoder_only, "pes2o_only": DataMix.pes2o_only,
-                          "dolma17": DataMix.dolma17}
+                          "dolma17": DataMix.dolma17, "dolma3": DataMix.OLMo_mix_0925_official}
                 if minority in lookup:
                     paths, _ = lookup[minority].build(args.data_root, tok.identifier)
                     n_shards_paths = len(paths)
