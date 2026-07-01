@@ -746,7 +746,12 @@ class NumpyFSLDatasetMixture(NumpyFSLDataset):
     def indices_dtype(
         self,
     ) -> NumpyUIntTypes:
-        return np.uint32
+        # uint64, not uint32: these instance indices are within-shard token offsets, and some
+        # sources (e.g. dolma3 / OLMo-mix-0925 shards average ~6.2B tokens) exceed 2**32, which
+        # overflows uint32 in segment_documents_into_instances. The dtype name is part of the
+        # index-cache key (_get_instance_indices_path), so this does not corrupt existing uint32
+        # caches -- they simply get rebuilt under a uint64 key.
+        return np.uint64
 
     def prepare(self):
         if self.fs_local_rank == 0:
