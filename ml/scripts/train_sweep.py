@@ -70,14 +70,16 @@ def build_family_b_subgrids():
 
 
 def build_family_a_subgrids():
-    """Generate the Family A subgrids: DCLM<->Dolma1.7 interpolation (the DataDecide recipe,
-    plus an architecture axis), at rep=1 (pure composition, no repetition).
+    """Generate the Family A subgrids: DCLM<->Dolma3 interpolation (the DataDecide DCLM<->Dolma
+    recipe with the architecture axis added), at rep=1 (pure composition, no repetition).
 
-    Five DCLM:Dolma17 composition ratios {100/0, 75/25, 50/50, 25/75, 0/100} x architecture.
+    Five DCLM:Dolma3 composition ratios {100/0, 75/25, 50/50, 25/75, 0/100} x architecture.
+    (Dolma 1.7 is not hosted on olmo-data.org; Dolma3 = OLMo-mix-0925-official is the hosted,
+    faithful substitute -- same DCLM-vs-curated-mix contrast; dolma3-tokenizer == dolma2 vocab.)
     The endpoints (100/0, 0/100) are single-source runs (just set train_datamix_name to
-    dclm_only / dolma17, which overrides the main_grid value). The three interior blends reuse
-    the Family B two-source mixture build path with minority=dolma17 and minority_repetition=1,
-    so minority_fraction = the dolma17 share of the fixed token budget.
+    dclm_only / dolma3, which overrides the main_grid value). The three interior blends reuse
+    the Family B two-source mixture build path with minority=dolma3 and minority_repetition=1,
+    so minority_fraction = the dolma3 share of the fixed token budget.
     """
     arches = [
         ("dense", {"moe_num_experts_list": ["1"]}),
@@ -93,7 +95,7 @@ def build_family_a_subgrids():
             ("moe128", {"moe_num_experts_list": ["128"], "moe_hidden_multipliers_list": ["0.25"],
                         "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
         ]
-    # DCLM percentage of the blend (Dolma1.7 is the remaining 1 - pct/100).
+    # DCLM percentage of the blend (Dolma3 is the remaining 1 - pct/100).
     dclm_pcts = [100, 75, 50, 25, 0]
     subgrids = {}
     for pct in dclm_pcts:
@@ -101,11 +103,11 @@ def build_family_a_subgrids():
             if pct == 100:
                 sg = {"train_datamix_name": ["dclm_only"]}        # pure DCLM endpoint
             elif pct == 0:
-                sg = {"train_datamix_name": ["dolma17"]}          # pure Dolma1.7 endpoint
+                sg = {"train_datamix_name": ["dolma3"]}           # pure Dolma3 endpoint
             else:
                 sg = {
                     "mix_primary": ["dclm_only"],
-                    "mix_minority": ["dolma17"],
+                    "mix_minority": ["dolma3"],
                     "minority_fraction": [f"{(100 - pct) / 100:.2f}"],
                     "minority_repetition": ["1"],
                     "primary_repetition": ["1"],
