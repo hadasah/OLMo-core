@@ -72,6 +72,7 @@ class MoEConfig(ModuleConfig):
     )
     z_loss_weight: Optional[float] = None
     scale_loss_by_num_layers: bool = True
+    fom_prob: Optional[float] = None
     dtype: DType = DType.float32
 
     def num_params(self, d_model: int) -> int:
@@ -146,6 +147,7 @@ class MoEBase(nn.Module):
         z_loss_weight: Optional[float] = None,
         n_layers: int = 1,
         scale_loss_by_num_layers: bool = True,
+        fom_prob: Optional[float] = None,
         dtype: torch.dtype = torch.float32,
         cache: Optional[BufferCache] = None,
         **kwargs,
@@ -156,6 +158,8 @@ class MoEBase(nn.Module):
                 lb_loss_weight = lb_loss_weight / n_layers
             if z_loss_weight is not None:
                 z_loss_weight = z_loss_weight / n_layers
+
+        self.fom_prob = fom_prob
 
         self.routers_list = nn.ModuleList()
         self.experts_list = nn.ModuleList()
@@ -281,6 +285,15 @@ class MoEBase(nn.Module):
             weights.append(1)
 
         out = sum(outs) / sum(weights)
+
+        # Final Output Masking (FOM): independently zero the combined MoE output for each token
+        # with probability `fom_prob` during training. No rescaling is applied.
+        if self.fom_prob is not None and self.training and torch.is_grad_enabled():
+            keep_mask = torch.empty(
+                (*out.shape[:-1], 1), dtype=out.dtype, device=out.device
+            ).bernoulli_(1.0 - self.fom_prob)
+            out = out * keep_mask
+
         return out
 
     def apply_pp(self, pp_mesh: DeviceMesh):
