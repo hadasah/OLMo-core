@@ -184,6 +184,8 @@ def build_config(
     moe_bias_gamma: Optional[float] = None,
     moe_jitter_eps: Optional[float] = None,
     moe_normalize_expert_weights: Optional[float] = None,
+    moe_eom_prob: Optional[float] = None,
+    moe_fom_prob: Optional[float] = None,
     max_grad_norm: float = 1.0,
     moe_z_loss_weight: float = 0.001,
     moe_lb_loss_weight: float = 0.01,
@@ -207,6 +209,8 @@ def build_config(
         bias_gamma=moe_bias_gamma,
         jitter_eps=moe_jitter_eps,
         normalize_expert_weights=moe_normalize_expert_weights,
+        eom_prob=moe_eom_prob,
+        fom_prob=moe_fom_prob,
         z_loss_weight=moe_z_loss_weight,
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
     )
@@ -468,6 +472,8 @@ def main(args: argparse.Namespace, overrides: List[str]) -> None:
             moe_bias_gamma=args.moe_bias_gamma,
             moe_jitter_eps=args.moe_jitter_eps,
             moe_normalize_expert_weights=args.moe_normalize_expert_weights,
+            moe_eom_prob=args.moe_eom_prob,
+            moe_fom_prob=args.moe_fom_prob,
             moe_z_loss_weight=args.moe_z_loss_weight,
             moe_lb_loss_weight=args.moe_lb_loss_weight,
             unique_data_fraction=args.unique_data_fraction,
@@ -617,6 +623,21 @@ if __name__ == "__main__":
         default=None,
         help="P-norm order used to normalize expert weights after top-k selection "
         "(e.g. 1.0 for L1, 2.0 for L2). Default None (no normalization).",
+    )
+    parser.add_argument(
+        "--moe_eom_prob",
+        type=float,
+        default=None,
+        help="Expert Output Masking (EOM) probability. During training, each (token, top-k "
+        "expert) combination weight is independently zeroed with this probability. Does not "
+        "affect the load-balancing/z-losses. Default None (disabled).",
+    )
+    parser.add_argument(
+        "--moe_fom_prob",
+        type=float,
+        default=None,
+        help="Final Output Masking (FOM) probability. During training, the combined MoE output "
+        "for each token is independently zeroed with this probability. Default None (disabled).",
     )
     parser.add_argument(
         "--moe_z_loss_weight", type=float, default=0.001, help="Weight for the z-loss in MoE"
