@@ -1073,11 +1073,13 @@ class TransformerConfig(ModelConfig):
                         uniform_expert_assignment=kwargs.pop("uniform_expert_assignment", False),
                         jitter_eps=kwargs.pop("jitter_eps", None),
                         normalize_expert_weights=kwargs.pop("normalize_expert_weights", None),
+                        eom_prob=kwargs.pop("eom_prob", None),
                     )
                     for top_k in kwargs.pop("router_top_ks_list", [4])
                 ],
                 lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
                 z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+                fom_prob=kwargs.pop("fom_prob", None),
             )
             if use_moe
             else None
@@ -1133,11 +1135,13 @@ class TransformerConfig(ModelConfig):
                         bias_gamma=kwargs.pop("bias_gamma", None),
                         jitter_eps=kwargs.pop("jitter_eps", None),
                         normalize_expert_weights=kwargs.pop("normalize_expert_weights", None),
+                        eom_prob=kwargs.pop("eom_prob", None),
                     )
                     for top_k in kwargs.pop("router_top_ks_list", [4])
                 ],
                 lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
                 z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+                fom_prob=kwargs.pop("fom_prob", None),
             )
             if use_moe
             else None
@@ -1193,11 +1197,13 @@ class TransformerConfig(ModelConfig):
                         bias_gamma=kwargs.pop("bias_gamma", None),
                         jitter_eps=kwargs.pop("jitter_eps", None),
                         normalize_expert_weights=kwargs.pop("normalize_expert_weights", None),
+                        eom_prob=kwargs.pop("eom_prob", None),
                     )
                     for top_k in kwargs.pop("router_top_ks_list", [4])
                 ],
                 lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
                 z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+                fom_prob=kwargs.pop("fom_prob", None),
             )
             if use_moe
             else None
@@ -1253,11 +1259,13 @@ class TransformerConfig(ModelConfig):
                         bias_gamma=kwargs.pop("bias_gamma", None),
                         jitter_eps=kwargs.pop("jitter_eps", None),
                         normalize_expert_weights=kwargs.pop("normalize_expert_weights", None),
+                        eom_prob=kwargs.pop("eom_prob", None),
                     )
                     for top_k in kwargs.pop("router_top_ks_list", [4])
                 ],
                 lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
                 z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+                fom_prob=kwargs.pop("fom_prob", None),
             )
             if use_moe
             else None
@@ -1313,11 +1321,13 @@ class TransformerConfig(ModelConfig):
                         bias_gamma=kwargs.pop("bias_gamma", None),
                         jitter_eps=kwargs.pop("jitter_eps", None),
                         normalize_expert_weights=kwargs.pop("normalize_expert_weights", None),
+                        eom_prob=kwargs.pop("eom_prob", None),
                     )
                     for top_k in kwargs.pop("router_top_ks_list", [4])
                 ],
                 lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
                 z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+                fom_prob=kwargs.pop("fom_prob", None),
             )
             if use_moe
             else None
@@ -1373,11 +1383,13 @@ class TransformerConfig(ModelConfig):
                         bias_gamma=kwargs.pop("bias_gamma", None),
                         jitter_eps=kwargs.pop("jitter_eps", None),
                         normalize_expert_weights=kwargs.pop("normalize_expert_weights", None),
+                        eom_prob=kwargs.pop("eom_prob", None),
                     )
                     for top_k in kwargs.pop("router_top_ks_list", [4])
                 ],
                 lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
                 z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+                fom_prob=kwargs.pop("fom_prob", None),
             )
             if use_moe
             else None
@@ -1433,11 +1445,13 @@ class TransformerConfig(ModelConfig):
                         bias_gamma=kwargs.pop("bias_gamma", None),
                         jitter_eps=kwargs.pop("jitter_eps", None),
                         normalize_expert_weights=kwargs.pop("normalize_expert_weights", None),
+                        eom_prob=kwargs.pop("eom_prob", None),
                     )
                     for top_k in kwargs.pop("router_top_ks_list", [4])
                 ],
                 lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
                 z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+                fom_prob=kwargs.pop("fom_prob", None),
             )
             if use_moe
             else None
@@ -1493,11 +1507,13 @@ class TransformerConfig(ModelConfig):
                         bias_gamma=kwargs.pop("bias_gamma", None),
                         jitter_eps=kwargs.pop("jitter_eps", None),
                         normalize_expert_weights=kwargs.pop("normalize_expert_weights", None),
+                        eom_prob=kwargs.pop("eom_prob", None),
                     )
                     for top_k in kwargs.pop("router_top_ks_list", [4])
                 ],
                 lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
                 z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+                fom_prob=kwargs.pop("fom_prob", None),
             )
             if use_moe
             else None
@@ -1553,11 +1569,13 @@ class TransformerConfig(ModelConfig):
                         bias_gamma=kwargs.pop("bias_gamma", None),
                         jitter_eps=kwargs.pop("jitter_eps", None),
                         normalize_expert_weights=kwargs.pop("normalize_expert_weights", None),
+                        eom_prob=kwargs.pop("eom_prob", None),
                     )
                     for top_k in kwargs.pop("router_top_ks_list", [4])
                 ],
                 lb_loss_weight=kwargs.pop("lb_loss_weight", 0.01),
                 z_loss_weight=kwargs.pop("z_loss_weight", 0.001),
+                fom_prob=kwargs.pop("fom_prob", None),
             )
             if use_moe
             else None
