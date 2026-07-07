@@ -314,7 +314,7 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
         )
         return fig
 
-    return (make_repetition_figure,)
+    return collect_baseline_points, make_repetition_figure
 
 
 @app.cell
@@ -599,6 +599,134 @@ def _(finished_df, get_model_type, go, metric_dropdown, pd, re):
 
     fig_famA = make_famA_figure(finished_df, metric_dropdown.value)
     fig_famA
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Group 5 — `famB` runs: metric vs. repetition
+
+    `famB` runs mix a single source into `olmo_mix` at a fixed fraction, encoded in
+    the run name (`sc50`/`sc90` = 50%/90% starcoder, `p2o50`/`p2o90` = 50%/90% pes2o).
+
+    Each figure plots the chosen metric vs. repetition count (log X, power-of-2 ticks)
+    with:
+
+    - **line color** = data source (`olmo_mix` baseline, single-source baseline, and the
+      two famB mixes), and
+    - **line style** = model type (solid = dense, dotted = moe32, dashed = moe64).
+
+    The `olmo_mix` and single-source lines are **baseline** runs (tag `baseline`);
+    duplicate baseline runs at a rep count keep the lowest value (see Group 1 & 2).
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(collect_baseline_points, get_model_type, get_reps, go, pd, pow2_ticks):
+    def collect_famB_points(df, name_substr, model_type, metric):
+        """Sorted (reps, value) points for famB runs matching a name substring."""
+        by_reps: dict = {}
+        for _, row in df.iterrows():
+            name = str(row.get("Name", ""))
+            if "famB" not in name or name_substr not in name:
+                continue
+            if get_model_type(row) != model_type:
+                continue
+            reps = get_reps(row)
+            loss = row.get(metric)
+            if pd.isna(reps) or pd.isna(loss):
+                continue
+            prev = by_reps.get(reps)
+            by_reps[reps] = min(float(loss), prev) if prev is not None else float(loss)
+        return [(r, by_reps[r]) for r in sorted(by_reps)]
+
+    def make_famB_figure(df, metric, title, sources):
+        """One famB figure.
+
+        `sources` is an ordered list of (label, color, kind, key) tuples where kind is
+        either "baseline" (key = data tag, uses baseline runs at 80M) or "famB"
+        (key = run-name substring).
+        """
+        dash_map = {"dense": "solid", "moe32": "dot", "moe64": "dash"}
+        fig = go.Figure()
+        max_reps = 0
+        any_data = False
+        for label, color, kind, key in sources:
+            for model_type in ["dense", "moe32", "moe64"]:
+                if kind == "baseline":
+                    points = collect_baseline_points(df, key, "80M", model_type, metric)
+                else:
+                    points = collect_famB_points(df, key, model_type, metric)
+                if not points:
+                    continue
+                any_data = True
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                max_reps = max(max_reps, max(xs))
+                fig.add_trace(
+                    go.Scatter(
+                        x=xs,
+                        y=ys,
+                        mode="lines+markers",
+                        name=f"{label}, {model_type}",
+                        legendgroup=label,
+                        line=dict(color=color, dash=dash_map[model_type], width=2),
+                        marker=dict(size=7),
+                    )
+                )
+        tickvals, ticktext = pow2_ticks(max_reps if any_data else None)
+        fig.update_layout(
+            title=title,
+            xaxis_title="repetition count",
+            yaxis_title=metric,
+            xaxis_type="log",
+            xaxis=dict(tickmode="array", tickvals=tickvals, ticktext=ticktext),
+            template="plotly_white",
+            width=850,
+            height=550,
+        )
+        return fig
+
+    return (make_famB_figure,)
+
+
+@app.cell
+def _(finished_df, make_famB_figure, metric_dropdown):
+    # Plot 1: starcoder family. Color = source; dash = model type.
+    fig_famB_sc = make_famB_figure(
+        finished_df,
+        metric_dropdown.value,
+        "famB (starcoder): metric vs. repetition "
+        "(solid=dense, dotted=moe32, dashed=moe64)",
+        [
+            ("olmo_mix", "#1f77b4", "baseline", "olmo_mix"),
+            ("starcoder", "#2ca02c", "baseline", "starcoder"),
+            ("sc50", "#ff7f0e", "famB", "sc50"),
+            ("sc90", "#d62728", "famB", "sc90"),
+        ],
+    )
+    fig_famB_sc
+    return
+
+
+@app.cell
+def _(finished_df, make_famB_figure, metric_dropdown):
+    # Plot 2: pes2o family. Color = source; dash = model type.
+    fig_famB_p2o = make_famB_figure(
+        finished_df,
+        metric_dropdown.value,
+        "famB (pes2o): metric vs. repetition "
+        "(solid=dense, dotted=moe32, dashed=moe64)",
+        [
+            ("olmo_mix", "#1f77b4", "baseline", "olmo_mix"),
+            ("pes2o", "#2ca02c", "baseline", "pes2o"),
+            ("p2o50", "#ff7f0e", "famB", "p2o50"),
+            ("p2o90", "#d62728", "famB", "p2o90"),
+        ],
+    )
+    fig_famB_p2o
     return
 
 
