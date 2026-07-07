@@ -95,6 +95,7 @@ def _(pd):
     LOSS_COL = "train/CE loss"
     DROPOUT_COL = "model.block.dropout"
     WD_COL = "train_module.optim.weight_decay"
+    MGN_COL = "train_module.max_grad_norm"
     REPS_COL = "data_reps"
 
     # Data-source tags (single-source mixes + the full olmo mix).
@@ -217,6 +218,7 @@ def _(pd):
 
     return (
         DROPOUT_COL,
+        MGN_COL,
         WD_COL,
         filter_finished,
         filter_rep_points,
@@ -540,13 +542,14 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_wiki_80m):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Group 3 — Regularizer sweeps: dropout & weight decay
+    ## Group 3 — Regularizer sweeps: dropout, weight decay & max grad norm
 
     Model type is encoded as **line style** (solid = dense, dotted = moe32,
     dashed = moe64). Baseline vs. each regularizer value is encoded as **color**.
     X axis is the repetition count (log); Y is the chosen metric. Runs are restricted
     to the `olmo_mix` mixture at 80M scale (where the regularizer sweeps live). Note
-    the dropout/weight-decay sweeps currently only cover dense and moe64.
+    the sweeps currently only cover dense and moe64. For max grad norm, the baseline
+    is the default `1.0`; a `null` (no clipping) setting is shown as its own series.
     """)
     return
 
@@ -584,6 +587,7 @@ def _(
         exclude_archs=None,
         include_reps=None,
         exclude_reps=None,
+        nan_label=None,
     ):
         """model type -> line dash + shade; baseline vs each factor value -> base color.
 
@@ -593,6 +597,10 @@ def _(
         `baseline_value` is the value that represents 'no regularization' for this
         column (e.g. dropout baseline = None/blank, weight-decay baseline = 0.1).
 
+        `nan_label`: when set, runs whose column value is NaN/blank are bucketed under
+        this label (a real setting, e.g. max_grad_norm=null -> "no clip") instead of
+        being merged into "baseline". When None (the default), NaN counts as baseline.
+
         Filters (all default to no-op):
 
         - ``include_archs`` / ``exclude_archs``: keep/drop architectures.
@@ -601,6 +609,7 @@ def _(
         # Gather points keyed by (model_type, factor_value) -> {reps: min_value}.
         series: dict = {}
         factor_values = set()
+        extra_buckets: list = []  # non-numeric buckets (e.g. nan_label), in first-seen order
         for _, row in df.iterrows():
             if get_scale(row) != "80M":
                 continue
@@ -616,9 +625,15 @@ def _(
             if pd.isna(reps) or pd.isna(loss):
                 continue
 
+            raw_val = row.get(factor_col)
+            is_blank = pd.isna(raw_val) or str(raw_val).strip() == ""
             fval = _factor_value(row, factor_col)
-            # Normalize the "baseline" bucket.
-            if fval is None or (baseline_value is not None and fval == baseline_value):
+            # Bucket the run.
+            if is_blank and nan_label is not None:
+                fval_key = nan_label
+                if nan_label not in extra_buckets:
+                    extra_buckets.append(nan_label)
+            elif fval is None or (baseline_value is not None and fval == baseline_value):
                 fval_key = "baseline"
             else:
                 fval_key = fval
@@ -630,7 +645,7 @@ def _(
             series[key][reps] = min(loss, prev) if prev is not None else float(loss)
 
         # Base color per factor bucket; model type -> dash + shade of that color.
-        ordered_buckets = ["baseline"] + sorted(factor_values)
+        ordered_buckets = ["baseline"] + sorted(factor_values) + extra_buckets
         palette = ["#2ca02c", "#1f77b4", "#d62728", "#9467bd", "#ff7f0e", "#8c564b"]
         color_map = {b: palette[i % len(palette)] for i, b in enumerate(ordered_buckets)}
         dash_map = {"dense": "solid", "moe32": "dot", "moe64": "dash"}
@@ -646,9 +661,12 @@ def _(
                 continue
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
-            label_val = (
-                "baseline" if fval_key == "baseline" else f"{factor_label}={fval_key:g}"
-            )
+            if fval_key == "baseline":
+                label_val = "baseline"
+            elif isinstance(fval_key, str):
+                label_val = fval_key
+            else:
+                label_val = f"{factor_label}={fval_key:g}"
             line_color = model_color(color_map[fval_key], model_type)
             fig.add_trace(
                 go.Scatter(
@@ -723,6 +741,33 @@ def _(
     _out = render_side_by_side(
         sel_weight_decay.value,
         lambda m: make_factor_figure(finished_df, WD_COL, "weight_decay", 0.1, m),
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_max_grad_norm = metric_multiselect("max grad norm — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_max_grad_norm
+    return (sel_max_grad_norm,)
+
+
+@app.cell(hide_code=True)
+def _(
+    MGN_COL,
+    finished_df,
+    make_factor_figure,
+    render_side_by_side,
+    sel_max_grad_norm,
+):
+    # Max grad norm: baseline = the default 1.0; swept value is 0.2; a `null` (no
+    # clipping) setting is bucketed separately via nan_label.
+    _out = render_side_by_side(
+        sel_max_grad_norm.value,
+        lambda m: make_factor_figure(
+            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="no clip"
+        ),
     )
     _out
     return
