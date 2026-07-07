@@ -169,6 +169,22 @@ def _(pd):
         vals.append(p)  # smallest power of 2 >= max_reps
         return vals, [str(v) for v in vals]
 
+    # Per-model-type lightening: dense = darkest (0.0), moe64 = lightest.
+    MODEL_SHADE = {"dense": 0.0, "moe32": 0.35, "moe64": 0.65}
+
+    def shade_color(hex_color: str, lighten: float) -> str:
+        """Lighten a hex color toward white by `lighten` in [0, 1] (0 = unchanged)."""
+        h = hex_color.lstrip("#")
+        r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+        r = round(r + (255 - r) * lighten)
+        g = round(g + (255 - g) * lighten)
+        b = round(b + (255 - b) * lighten)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def model_color(base_hex: str, model_type: str) -> str:
+        """Shade of `base_hex` for a model type (dense darkest, moe64 lightest)."""
+        return shade_color(base_hex, MODEL_SHADE.get(model_type, 0.0))
+
     return (
         DROPOUT_COL,
         WD_COL,
@@ -177,6 +193,7 @@ def _(pd):
         get_reps,
         get_scale,
         has_tag,
+        model_color,
         pow2_ticks,
     )
 
@@ -217,10 +234,11 @@ def _(mo, raw_df):
         ["train/CE loss"] if "train/CE loss" in METRIC_OPTIONS else METRIC_OPTIONS[:1]
     )
 
-    def metric_multiselect(label):
+    def metric_multiselect(label, chosen_values=[]):
         """A per-plot multi-select over the available metrics."""
         return mo.ui.multiselect(
-            options=METRIC_OPTIONS, value=_DEFAULT_METRIC, label=label
+            options=METRIC_OPTIONS, value=(chosen_values if chosen_values else _DEFAULT_METRIC), label=label,
+            # full_width=True,
         )
 
     def render_side_by_side(metrics, build_fig):
@@ -251,7 +269,16 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
+def _(
+    get_model_type,
+    get_reps,
+    get_scale,
+    go,
+    has_tag,
+    model_color,
+    pd,
+    pow2_ticks,
+):
     def collect_baseline_points(
         df: pd.DataFrame, data_tag: str, scale: str, model_type: str, metric: str
     ):
@@ -295,9 +322,14 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
         return points
 
     def make_repetition_figure(df: pd.DataFrame, data_tag: str, scale: str, metric: str):
-        """One figure: Dense + MoE32 + MoE64 baseline, metric vs reps (log X)."""
+        """One figure: Dense + MoE32 + MoE64 baseline, metric vs reps (log X).
+
+        Model type is distinguished by both line style and shade of a single base
+        color (dense darkest, moe64 lightest).
+        """
         fig = go.Figure()
-        colors = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
+        base_color = "#1f77b4"
+        dash_map = {"dense": "solid", "moe32": "dot", "moe64": "dash"}
         any_data = False
         max_reps = 0
         for model_type in ["dense", "moe32", "moe64"]:
@@ -308,14 +340,15 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             max_reps = max(max_reps, max(xs))
+            line_color = model_color(base_color, model_type)
             fig.add_trace(
                 go.Scatter(
                     x=xs,
                     y=ys,
                     mode="lines+markers",
                     name=model_type,
-                    line=dict(color=colors[model_type], width=2),
-                    marker=dict(size=8),
+                    line=dict(color=line_color, dash=dash_map[model_type], width=2),
+                    marker=dict(size=8, color=line_color),
                 )
             )
         title = f"{data_tag} — {scale}: {metric} vs. repetition (baseline)"
@@ -329,7 +362,7 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
             xaxis_type="log",
             xaxis=dict(tickmode="array", tickvals=tickvals, ticktext=ticktext),
             template="plotly_white",
-            width=600,
+            width=450,
             height=450,
         )
         return fig
@@ -339,7 +372,7 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_olmo_80m = metric_multiselect("olmo_mix 80M — metrics")
+    sel_olmo_80m = metric_multiselect("olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/pile-validation/CE loss"])
     sel_olmo_80m
     return (sel_olmo_80m,)
 
@@ -356,7 +389,7 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_olmo_80m):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_olmo_200m = metric_multiselect("olmo_mix 200M — metrics")
+    sel_olmo_200m = metric_multiselect("olmo_mix 200M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/pile-validation/CE loss"])
     sel_olmo_200m
     return (sel_olmo_200m,)
 
@@ -381,7 +414,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_dclm_80m = metric_multiselect("dclm 80M — metrics")
+    sel_dclm_80m = metric_multiselect("dclm 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/pile-validation/CE loss"])
     sel_dclm_80m
     return (sel_dclm_80m,)
 
@@ -398,24 +431,7 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_dclm_80m):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_dclm_200m = metric_multiselect("dclm 200M — metrics")
-    sel_dclm_200m
-    return (sel_dclm_200m,)
-
-
-@app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_dclm_200m):
-    _out = render_side_by_side(
-        sel_dclm_200m.value,
-        lambda m: make_repetition_figure(finished_df, "dclm", "200M", m),
-    )
-    _out
-    return
-
-
-@app.cell(hide_code=True)
-def _(metric_multiselect):
-    sel_starcoder_80m = metric_multiselect("starcoder 80M — metrics")
+    sel_starcoder_80m = metric_multiselect("starcoder 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
     sel_starcoder_80m
     return (sel_starcoder_80m,)
 
@@ -437,29 +453,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_starcoder_200m = metric_multiselect("starcoder 200M — metrics")
-    sel_starcoder_200m
-    return (sel_starcoder_200m,)
-
-
-@app.cell(hide_code=True)
-def _(
-    finished_df,
-    make_repetition_figure,
-    render_side_by_side,
-    sel_starcoder_200m,
-):
-    _out = render_side_by_side(
-        sel_starcoder_200m.value,
-        lambda m: make_repetition_figure(finished_df, "starcoder", "200M", m),
-    )
-    _out
-    return
-
-
-@app.cell(hide_code=True)
-def _(metric_multiselect):
-    sel_pes2o_80m = metric_multiselect("pes2o 80M — metrics")
+    sel_pes2o_80m = metric_multiselect("pes2o 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
     sel_pes2o_80m
     return (sel_pes2o_80m,)
 
@@ -476,29 +470,7 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_pes2o_80m):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_pes2o_200m = metric_multiselect("pes2o 200M — metrics")
-    sel_pes2o_200m
-    return (sel_pes2o_200m,)
-
-
-@app.cell(hide_code=True)
-def _(
-    finished_df,
-    make_repetition_figure,
-    render_side_by_side,
-    sel_pes2o_200m,
-):
-    _out = render_side_by_side(
-        sel_pes2o_200m.value,
-        lambda m: make_repetition_figure(finished_df, "pes2o", "200M", m),
-    )
-    _out
-    return
-
-
-@app.cell(hide_code=True)
-def _(metric_multiselect):
-    sel_wiki_80m = metric_multiselect("wiki 80M — metrics")
+    sel_wiki_80m = metric_multiselect("wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss"])
     sel_wiki_80m
     return (sel_wiki_80m,)
 
@@ -508,23 +480,6 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_wiki_80m):
     _out = render_side_by_side(
         sel_wiki_80m.value,
         lambda m: make_repetition_figure(finished_df, "wiki", "80M", m),
-    )
-    _out
-    return
-
-
-@app.cell(hide_code=True)
-def _(metric_multiselect):
-    sel_wiki_200m = metric_multiselect("wiki 200M — metrics")
-    sel_wiki_200m
-    return (sel_wiki_200m,)
-
-
-@app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_wiki_200m):
-    _out = render_side_by_side(
-        sel_wiki_200m.value,
-        lambda m: make_repetition_figure(finished_df, "wiki", "200M", m),
     )
     _out
     return
@@ -545,7 +500,16 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
+def _(
+    get_model_type,
+    get_reps,
+    get_scale,
+    go,
+    has_tag,
+    model_color,
+    pd,
+    pow2_ticks,
+):
     def _factor_value(row, col):
         """Read a regularizer column as a float; blank/NaN means 'baseline'."""
         val = row.get(col)
@@ -557,7 +521,10 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
         return None
 
     def make_factor_figure(df, factor_col, factor_label, baseline_value, metric):
-        """dense/moe32/moe64 -> line dash; baseline vs each factor value -> color.
+        """model type -> line dash + shade; baseline vs each factor value -> base color.
+
+        Within a factor-value color, model type is distinguished by both dash style
+        and shade (dense darkest, moe64 lightest).
 
         `baseline_value` is the value that represents 'no regularization' for this
         column (e.g. dropout baseline = None/blank, weight-decay baseline = 0.1).
@@ -591,7 +558,7 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
             prev = series[key].get(reps)
             series[key][reps] = min(loss, prev) if prev is not None else float(loss)
 
-        # Color per factor bucket; dash per model type.
+        # Base color per factor bucket; model type -> dash + shade of that color.
         ordered_buckets = ["baseline"] + sorted(factor_values)
         palette = ["#2ca02c", "#1f77b4", "#d62728", "#9467bd", "#ff7f0e", "#8c564b"]
         color_map = {b: palette[i % len(palette)] for i, b in enumerate(ordered_buckets)}
@@ -607,14 +574,15 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
             label_val = (
                 "baseline" if fval_key == "baseline" else f"{factor_label}={fval_key:g}"
             )
+            line_color = model_color(color_map[fval_key], model_type)
             fig.add_trace(
                 go.Scatter(
                     x=xs,
                     y=ys,
                     mode="lines+markers",
                     name=f"{model_type}, {label_val}",
-                    line=dict(color=color_map[fval_key], dash=dash_map[model_type], width=2),
-                    marker=dict(size=7),
+                    line=dict(color=line_color, dash=dash_map[model_type], width=2),
+                    marker=dict(size=7, color=line_color),
                 )
             )
         # Power-of-2 ticks based on the largest repetition count present.
@@ -629,8 +597,8 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
             xaxis_type="log",
             xaxis=dict(tickmode="array", tickvals=_tickvals, ticktext=_ticktext),
             template="plotly_white",
-            width=650,
-            height=500,
+            width=700,
+            height=450,
         )
         return fig
 
@@ -639,7 +607,7 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_dropout = metric_multiselect("dropout — metrics")
+    sel_dropout = metric_multiselect("dropout — metrics", chosen_values=["train/CE loss", "eval/lm/pile-validation/CE loss"])
     sel_dropout
     return (sel_dropout,)
 
@@ -663,7 +631,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_weight_decay = metric_multiselect("weight decay — metrics")
+    sel_weight_decay = metric_multiselect("weight decay — metrics", chosen_values=["train/CE loss", "eval/lm/pile-validation/CE loss"])
     sel_weight_decay
     return (sel_weight_decay,)
 
@@ -748,7 +716,7 @@ def _(get_model_type, go, pd, re):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_famA = metric_multiselect("famA — metrics")
+    sel_famA = metric_multiselect("famA — metrics", chosen_values=["train/CE loss", "eval/lm/pile-validation/CE loss"])
     sel_famA
     return (sel_famA,)
 
@@ -784,7 +752,15 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(collect_baseline_points, get_model_type, get_reps, go, pd, pow2_ticks):
+def _(
+    collect_baseline_points,
+    get_model_type,
+    get_reps,
+    go,
+    model_color,
+    pd,
+    pow2_ticks,
+):
     def collect_famB_points(df, name_substr, model_type, metric):
         """Sorted (reps, value) points for famB runs matching a name substring."""
         by_reps: dict = {}
@@ -825,6 +801,7 @@ def _(collect_baseline_points, get_model_type, get_reps, go, pd, pow2_ticks):
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
                 max_reps = max(max_reps, max(xs))
+                line_color = model_color(color, model_type)
                 fig.add_trace(
                     go.Scatter(
                         x=xs,
@@ -832,8 +809,8 @@ def _(collect_baseline_points, get_model_type, get_reps, go, pd, pow2_ticks):
                         mode="lines+markers",
                         name=f"{label}, {model_type}",
                         legendgroup=label,
-                        line=dict(color=color, dash=dash_map[model_type], width=2),
-                        marker=dict(size=7),
+                        line=dict(color=line_color, dash=dash_map[model_type], width=2),
+                        marker=dict(size=7, color=line_color),
                     )
                 )
         tickvals, ticktext = pow2_ticks(max_reps if any_data else None)
@@ -854,7 +831,7 @@ def _(collect_baseline_points, get_model_type, get_reps, go, pd, pow2_ticks):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_famB_sc = metric_multiselect("famB starcoder — metrics")
+    sel_famB_sc = metric_multiselect("famB starcoder — metrics", chosen_values=["eval/lm/pile-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
     sel_famB_sc
     return (sel_famB_sc,)
 
@@ -880,7 +857,7 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_sc):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_famB_p2o = metric_multiselect("famB pes2o — metrics")
+    sel_famB_p2o = metric_multiselect("famB pes2o — metrics", chosen_values=["eval/lm/pile-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
     sel_famB_p2o
     return (sel_famB_p2o,)
 
