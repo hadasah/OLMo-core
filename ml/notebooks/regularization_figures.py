@@ -12,16 +12,16 @@ def _(mo):
     Figures built from the most recent Weights & Biases CSV export in
     `ml/notebooks/data/`.
 
-    Only runs with `State == "finished"` are plotted (see the data filtering
-    function below).
+    Only runs with `State == "finished"` are plotted, and any run tagged `_HIDE`
+    is dropped (see the data filtering function below).
 
     **Figure groups**
 
-    1. Final train loss vs. repetition count (log X), for Dense & MoE64 baseline
+    1. Final train loss vs. repetition count (log X), for Dense, MoE32 & MoE64 baseline
        runs on the `olmo_mix` mixture — one figure per model scale (80M, 200M).
     2. The same, repeated for each single-source data mixture: `dclm`,
        `starcoder`, `pes2o`, `wiki`.
-    3. Dense vs. MoE64 (line style) × baseline vs. regularizer value (color),
+    3. Dense / MoE32 / MoE64 (line style) × baseline vs. regularizer value (color),
        for **dropout** and **weight decay** — final train loss vs. repetition (log X).
     4. All `famA` runs: train loss vs. `%dclm` (0/25/50/75/100 from the run name).
     """)
@@ -41,7 +41,7 @@ def _():
     return glob, go, os, pd, re
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(glob, os, pd):
     def find_latest_data_file() -> str:
         """Return the path to the most recently modified CSV in ml/notebooks/data/."""
@@ -80,7 +80,7 @@ def _(DATA_FILE, mo, os, raw_df):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(pd):
     # ------------------------------------------------------------------
     # Data filtering + parsing helpers.
@@ -96,8 +96,10 @@ def _(pd):
     DATA_TAGS = ["olmo_mix", "dclm", "starcoder", "pes2o", "wiki"]
 
     def filter_finished(df: pd.DataFrame) -> pd.DataFrame:
-        """Keep only runs whose W&B State is 'finished'."""
-        return df[df["State"] == "finished"].copy()
+        """Keep only finished runs, dropping any tagged '_HIDE'."""
+        out = df[df["State"] == "finished"].copy()
+        hide_mask = out["Tags"].apply(lambda t: "_HIDE" in parse_tags(t))
+        return out[~hide_mask].copy()
 
     def parse_tags(tag_field) -> list:
         """Split the comma-separated Tags cell into a clean list."""
@@ -164,7 +166,7 @@ def _(filter_finished, raw_df):
     return (finished_df,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo, raw_df):
     # ------------------------------------------------------------------
     # Metric selector: train loss + all eval CE-loss metrics.
@@ -203,7 +205,7 @@ def _(mo):
     mo.md(r"""
     ## Group 1 & 2 — Final loss vs. repetition (baseline runs)
 
-    For each data mixture we plot Dense and MoE64 **baseline** runs (tag
+    For each data mixture we plot Dense, MoE32 and MoE64 **baseline** runs (tag
     `baseline`, i.e. no dropout/EOM/FOM/jitter). Final train loss on Y, repetition
     count on a log X axis. If more than one baseline run exists at the same
     repetition count, a warning is printed and the **lowest** train loss is kept.
@@ -211,7 +213,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
     def collect_baseline_points(
         df: pd.DataFrame, data_tag: str, scale: str, model_type: str, metric: str
@@ -256,11 +258,11 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
         return points
 
     def make_repetition_figure(df: pd.DataFrame, data_tag: str, scale: str, metric: str):
-        """One figure: Dense + MoE64 baseline, metric vs reps (log X), for a scale."""
+        """One figure: Dense + MoE32 + MoE64 baseline, metric vs reps (log X)."""
         fig = go.Figure()
-        colors = {"dense": "#1f77b4", "moe64": "#d62728"}
+        colors = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
         any_data = False
-        for model_type in ["dense", "moe64"]:
+        for model_type in ["dense", "moe32", "moe64"]:
             points = collect_baseline_points(df, data_tag, scale, model_type, metric)
             if not points:
                 continue
@@ -304,7 +306,7 @@ def _(finished_df, make_repetition_figure, metric_dropdown):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(finished_df, make_repetition_figure, metric_dropdown):
     fig_olmo_200m = make_repetition_figure(
         finished_df, "olmo_mix", "200M", metric_dropdown.value
@@ -321,14 +323,14 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(finished_df, make_repetition_figure, metric_dropdown):
     fig_dclm_80m = make_repetition_figure(finished_df, "dclm", "80M", metric_dropdown.value)
     fig_dclm_80m
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(finished_df, make_repetition_figure, metric_dropdown):
     fig_dclm_200m = make_repetition_figure(
         finished_df, "dclm", "200M", metric_dropdown.value
@@ -337,7 +339,7 @@ def _(finished_df, make_repetition_figure, metric_dropdown):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(finished_df, make_repetition_figure, metric_dropdown):
     fig_starcoder_80m = make_repetition_figure(
         finished_df, "starcoder", "80M", metric_dropdown.value
@@ -346,7 +348,7 @@ def _(finished_df, make_repetition_figure, metric_dropdown):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(finished_df, make_repetition_figure, metric_dropdown):
     fig_starcoder_200m = make_repetition_figure(
         finished_df, "starcoder", "200M", metric_dropdown.value
@@ -355,7 +357,7 @@ def _(finished_df, make_repetition_figure, metric_dropdown):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(finished_df, make_repetition_figure, metric_dropdown):
     fig_pes2o_80m = make_repetition_figure(
         finished_df, "pes2o", "80M", metric_dropdown.value
@@ -364,7 +366,7 @@ def _(finished_df, make_repetition_figure, metric_dropdown):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(finished_df, make_repetition_figure, metric_dropdown):
     fig_pes2o_200m = make_repetition_figure(
         finished_df, "pes2o", "200M", metric_dropdown.value
@@ -373,14 +375,14 @@ def _(finished_df, make_repetition_figure, metric_dropdown):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(finished_df, make_repetition_figure, metric_dropdown):
     fig_wiki_80m = make_repetition_figure(finished_df, "wiki", "80M", metric_dropdown.value)
     fig_wiki_80m
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(finished_df, make_repetition_figure, metric_dropdown):
     fig_wiki_200m = make_repetition_figure(
         finished_df, "wiki", "200M", metric_dropdown.value
@@ -394,15 +396,16 @@ def _(mo):
     mo.md(r"""
     ## Group 3 — Regularizer sweeps: dropout & weight decay
 
-    Dense vs. MoE64 is encoded as **line style** (solid = dense, dashed = moe64).
-    Baseline vs. each regularizer value is encoded as **color**. X axis is the
-    repetition count (log); Y is final train CE loss. Runs are restricted to the
-    `olmo_mix` mixture at 80M scale (where the regularizer sweeps live).
+    Model type is encoded as **line style** (solid = dense, dotted = moe32,
+    dashed = moe64). Baseline vs. each regularizer value is encoded as **color**.
+    X axis is the repetition count (log); Y is final train CE loss. Runs are
+    restricted to the `olmo_mix` mixture at 80M scale (where the regularizer sweeps
+    live). Note the dropout/weight-decay sweeps currently only cover dense and moe64.
     """)
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
     def _factor_value(row, col):
         """Read a regularizer column as a float; blank/NaN means 'baseline'."""
@@ -415,7 +418,7 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
         return None
 
     def make_factor_figure(df, factor_col, factor_label, baseline_value, metric):
-        """dense/moe64 -> line dash; baseline vs each factor value -> color.
+        """dense/moe32/moe64 -> line dash; baseline vs each factor value -> color.
 
         `baseline_value` is the value that represents 'no regularization' for this
         column (e.g. dropout baseline = None/blank, weight-decay baseline = 0.1).
@@ -429,7 +432,7 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
             if not has_tag(row, "olmo_mix"):
                 continue
             model_type = get_model_type(row)
-            if model_type not in ("dense", "moe64"):
+            if model_type not in ("dense", "moe32", "moe64"):
                 continue
             reps = get_reps(row)
             loss = row.get(metric)
@@ -453,7 +456,7 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
         ordered_buckets = ["baseline"] + sorted(factor_values)
         palette = ["#2ca02c", "#1f77b4", "#d62728", "#9467bd", "#ff7f0e", "#8c564b"]
         color_map = {b: palette[i % len(palette)] for i, b in enumerate(ordered_buckets)}
-        dash_map = {"dense": "solid", "moe64": "dash"}
+        dash_map = {"dense": "solid", "moe32": "dot", "moe64": "dash"}
 
         fig = go.Figure()
         for (model_type, fval_key), pts in sorted(
@@ -476,8 +479,8 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
                 )
             )
         fig.update_layout(
-            title=f"Dense (solid) vs MoE64 (dashed) — baseline vs {factor_label} "
-            f"(olmo_mix, 80M)",
+            title=f"Dense (solid) / MoE32 (dotted) / MoE64 (dashed) — "
+            f"baseline vs {factor_label} (olmo_mix, 80M)",
             xaxis_title="repetition count",
             yaxis_title=metric,
             xaxis_type="log",
@@ -500,7 +503,7 @@ def _(DROPOUT_COL, finished_df, make_factor_figure, metric_dropdown):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(WD_COL, finished_df, make_factor_figure, metric_dropdown):
     # Weight decay: baseline = the default 0.1; swept values are 0.2 / 0.4.
     fig_weight_decay = make_factor_figure(
@@ -522,7 +525,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(finished_df, get_model_type, go, metric_dropdown, pd, re):
     def parse_dclm_pct(name: str):
         """Extract the DCLM percentage from a 'dclm{N}' token in the run name."""
