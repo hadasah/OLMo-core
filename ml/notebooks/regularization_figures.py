@@ -185,14 +185,46 @@ def _(pd):
         """Shade of `base_hex` for a model type (dense darkest, moe64 lightest)."""
         return shade_color(base_hex, MODEL_SHADE.get(model_type, 0.0))
 
+    def keep_arch(model_type, include_archs=None, exclude_archs=None) -> bool:
+        """Whether a model type passes the arch include/exclude filters.
+
+        `include_archs=None` includes all; if a list is given, only those archs are
+        kept. `exclude_archs` removes archs. Both may be combined.
+        """
+        if include_archs is not None and model_type not in include_archs:
+            return False
+        if exclude_archs and model_type in exclude_archs:
+            return False
+        return True
+
+    def filter_rep_points(points, include_reps=None, exclude_reps=None):
+        """Filter a list of (reps, value) points by rep include/exclude sets.
+
+        `include_reps=None` includes all reps; if a list is given, only those rep
+        counts are kept. `exclude_reps` removes rep counts. Values are compared as
+        floats so e.g. 8 and 8.0 match.
+        """
+        inc = None if include_reps is None else {float(r) for r in include_reps}
+        exc = set() if not exclude_reps else {float(r) for r in exclude_reps}
+        out = []
+        for reps, val in points:
+            if inc is not None and float(reps) not in inc:
+                continue
+            if float(reps) in exc:
+                continue
+            out.append((reps, val))
+        return out
+
     return (
         DROPOUT_COL,
         WD_COL,
         filter_finished,
+        filter_rep_points,
         get_model_type,
         get_reps,
         get_scale,
         has_tag,
+        keep_arch,
         model_color,
         pow2_ticks,
     )
@@ -270,11 +302,13 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    filter_rep_points,
     get_model_type,
     get_reps,
     get_scale,
     go,
     has_tag,
+    keep_arch,
     model_color,
     pd,
     pow2_ticks,
@@ -321,11 +355,26 @@ def _(
             points.append((reps, best_loss))
         return points
 
-    def make_repetition_figure(df: pd.DataFrame, data_tag: str, scale: str, metric: str):
+    def make_repetition_figure(
+        df: pd.DataFrame,
+        data_tag: str,
+        scale: str,
+        metric: str,
+        include_archs=None,
+        exclude_archs=None,
+        include_reps=None,
+        exclude_reps=None,
+    ):
         """One figure: Dense + MoE32 + MoE64 baseline, metric vs reps (log X).
 
         Model type is distinguished by both line style and shade of a single base
         color (dense darkest, moe64 lightest).
+
+        Filters (all default to no-op):
+
+        - ``include_archs`` / ``exclude_archs``: keep/drop architectures
+          (``"dense"``, ``"moe32"``, ``"moe64"``).
+        - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
         fig = go.Figure()
         base_color = "#1f77b4"
@@ -333,7 +382,10 @@ def _(
         any_data = False
         max_reps = 0
         for model_type in ["dense", "moe32", "moe64"]:
+            if not keep_arch(model_type, include_archs, exclude_archs):
+                continue
             points = collect_baseline_points(df, data_tag, scale, model_type, metric)
+            points = filter_rep_points(points, include_reps, exclude_reps)
             if not points:
                 continue
             any_data = True
@@ -372,7 +424,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_olmo_80m = metric_multiselect("olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/pile-validation/CE loss"])
+    sel_olmo_80m = metric_multiselect("olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_olmo_80m
     return (sel_olmo_80m,)
 
@@ -389,7 +441,7 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_olmo_80m):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_olmo_200m = metric_multiselect("olmo_mix 200M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/pile-validation/CE loss"])
+    sel_olmo_200m = metric_multiselect("olmo_mix 200M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_olmo_200m
     return (sel_olmo_200m,)
 
@@ -414,7 +466,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_dclm_80m = metric_multiselect("dclm 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/pile-validation/CE loss"])
+    sel_dclm_80m = metric_multiselect("dclm 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_dclm_80m
     return (sel_dclm_80m,)
 
@@ -501,11 +553,13 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    filter_rep_points,
     get_model_type,
     get_reps,
     get_scale,
     go,
     has_tag,
+    keep_arch,
     model_color,
     pd,
     pow2_ticks,
@@ -520,7 +574,17 @@ def _(
             return None
         return None
 
-    def make_factor_figure(df, factor_col, factor_label, baseline_value, metric):
+    def make_factor_figure(
+        df,
+        factor_col,
+        factor_label,
+        baseline_value,
+        metric,
+        include_archs=None,
+        exclude_archs=None,
+        include_reps=None,
+        exclude_reps=None,
+    ):
         """model type -> line dash + shade; baseline vs each factor value -> base color.
 
         Within a factor-value color, model type is distinguished by both dash style
@@ -528,6 +592,11 @@ def _(
 
         `baseline_value` is the value that represents 'no regularization' for this
         column (e.g. dropout baseline = None/blank, weight-decay baseline = 0.1).
+
+        Filters (all default to no-op):
+
+        - ``include_archs`` / ``exclude_archs``: keep/drop architectures.
+        - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
         # Gather points keyed by (model_type, factor_value) -> {reps: min_value}.
         series: dict = {}
@@ -539,6 +608,8 @@ def _(
                 continue
             model_type = get_model_type(row)
             if model_type not in ("dense", "moe32", "moe64"):
+                continue
+            if not keep_arch(model_type, include_archs, exclude_archs):
                 continue
             reps = get_reps(row)
             loss = row.get(metric)
@@ -568,9 +639,13 @@ def _(
         for (model_type, fval_key), pts in sorted(
             series.items(), key=lambda kv: (str(kv[0][1]), kv[0][0])
         ):
-            reps_sorted = sorted(pts)
-            xs = reps_sorted
-            ys = [pts[r] for r in reps_sorted]
+            points = filter_rep_points(
+                sorted(pts.items()), include_reps, exclude_reps
+            )
+            if not points:
+                continue
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
             label_val = (
                 "baseline" if fval_key == "baseline" else f"{factor_label}={fval_key:g}"
             )
@@ -586,7 +661,7 @@ def _(
                 )
             )
         # Power-of-2 ticks based on the largest repetition count present.
-        _all_reps = [r for pts in series.values() for r in pts]
+        _all_reps = [x for tr in fig.data for x in tr.x]
         _max_reps = max(_all_reps) if _all_reps else None
         _tickvals, _ticktext = pow2_ticks(_max_reps)
         fig.update_layout(
@@ -607,7 +682,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_dropout = metric_multiselect("dropout — metrics", chosen_values=["train/CE loss", "eval/lm/pile-validation/CE loss"])
+    sel_dropout = metric_multiselect("dropout — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_dropout
     return (sel_dropout,)
 
@@ -631,7 +706,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_weight_decay = metric_multiselect("weight decay — metrics", chosen_values=["train/CE loss", "eval/lm/pile-validation/CE loss"])
+    sel_weight_decay = metric_multiselect("weight decay — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_weight_decay
     return (sel_weight_decay,)
 
@@ -666,13 +741,18 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(get_model_type, go, pd, re):
+def _(get_model_type, go, keep_arch, pd, re):
     def parse_dclm_pct(name: str):
         """Extract the DCLM percentage from a 'dclm{N}' token in the run name."""
         m = re.search(r"dclm(\d+)", str(name))
         return int(m.group(1)) if m else None
 
-    def make_famA_figure(df, metric):
+    def make_famA_figure(df, metric, include_archs=None, exclude_archs=None):
+        """famA: metric vs. %dclm, one line per architecture.
+
+        ``include_archs`` / ``exclude_archs`` keep/drop architectures. (There is no
+        repetition axis here, so rep filters do not apply.)
+        """
         fig = go.Figure()
         colors = {"dense": "#1f77b4", "moe64": "#d62728", "moe32": "#2ca02c"}
         # Collect points per model type.
@@ -686,6 +766,8 @@ def _(get_model_type, go, pd, re):
             if pct is None or pd.isna(loss):
                 continue
             mt = get_model_type(row)
+            if not keep_arch(mt, include_archs, exclude_archs):
+                continue
             per_type.setdefault(mt, []).append((pct, float(loss)))
 
         for mt in sorted(per_type):
@@ -716,7 +798,7 @@ def _(get_model_type, go, pd, re):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_famA = metric_multiselect("famA — metrics", chosen_values=["train/CE loss", "eval/lm/pile-validation/CE loss"])
+    sel_famA = metric_multiselect("famA — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_famA
     return (sel_famA,)
 
@@ -754,9 +836,11 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     collect_baseline_points,
+    filter_rep_points,
     get_model_type,
     get_reps,
     go,
+    keep_arch,
     model_color,
     pd,
     pow2_ticks,
@@ -778,12 +862,26 @@ def _(
             by_reps[reps] = min(float(loss), prev) if prev is not None else float(loss)
         return [(r, by_reps[r]) for r in sorted(by_reps)]
 
-    def make_famB_figure(df, metric, title, sources):
+    def make_famB_figure(
+        df,
+        metric,
+        title,
+        sources,
+        include_archs=None,
+        exclude_archs=None,
+        include_reps=None,
+        exclude_reps=None,
+    ):
         """One famB figure.
 
         `sources` is an ordered list of (label, color, kind, key) tuples where kind is
         either "baseline" (key = data tag, uses baseline runs at 80M) or "famB"
         (key = run-name substring).
+
+        Filters (all default to no-op):
+
+        - ``include_archs`` / ``exclude_archs``: keep/drop architectures.
+        - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
         dash_map = {"dense": "solid", "moe32": "dot", "moe64": "dash"}
         fig = go.Figure()
@@ -791,10 +889,13 @@ def _(
         any_data = False
         for label, color, kind, key in sources:
             for model_type in ["dense", "moe32", "moe64"]:
+                if not keep_arch(model_type, include_archs, exclude_archs):
+                    continue
                 if kind == "baseline":
                     points = collect_baseline_points(df, key, "80M", model_type, metric)
                 else:
                     points = collect_famB_points(df, key, model_type, metric)
+                points = filter_rep_points(points, include_reps, exclude_reps)
                 if not points:
                     continue
                 any_data = True
@@ -831,7 +932,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_famB_sc = metric_multiselect("famB starcoder — metrics", chosen_values=["eval/lm/pile-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
+    sel_famB_sc = metric_multiselect("famB starcoder — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
     sel_famB_sc
     return (sel_famB_sc,)
 
@@ -857,7 +958,7 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_sc):
 
 @app.cell(hide_code=True)
 def _(metric_multiselect):
-    sel_famB_p2o = metric_multiselect("famB pes2o — metrics", chosen_values=["eval/lm/pile-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
+    sel_famB_p2o = metric_multiselect("famB pes2o — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
     sel_famB_p2o
     return (sel_famB_p2o,)
 
