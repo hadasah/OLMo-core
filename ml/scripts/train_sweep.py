@@ -117,6 +117,7 @@ def main(
             dependencies=[],
             repo_name="olmoe-core",
             conda_env_name=SPECS.get("CONDA_ENV_NAME"),
+            init_script_path=SPECS.get("INIT_SCRIPT"),
             include_jobs_indices=include_jobs_indices,
             filter_succeeded=filter_succeeded,
             filter_running=filter_running,
@@ -161,6 +162,10 @@ def main(
                     # "train_datamix_name": ["pes2o_only"],
                     # "moe_bias_gamma": [0.001],  # Change in LB bias per step. Default is None
                     # "moe_lb_loss_weight": [0.0001],  # Weight for the lb-loss in MoE. Default 0.01
+                    # "moe_jitter_eps": [0.1, 0.2],
+                    # "moe_normalize_expert_weights": [1.0, 2.0],# None, 1.0=L1 or 2.0=L2 norma
+                    "moe_eom_prob": [0.1, 0.2],
+                    # "moe_fom_prob": [0.1, 0.2],
                     "train_module": {
                         "optim": {
                             "lr": [4e-4],
@@ -175,7 +180,7 @@ def main(
                     },
                     "model": {
                         "block": {
-                            "dropout": [0.1, 0.2],
+                            # "dropout": [0.1, 0.2],
                             # "feed_forward_moe": {
                             #     "routers_list": {
                             #         "0": {
@@ -196,10 +201,10 @@ def main(
                     "dense": {
                         "moe_num_experts_list": ["1"],
                         "subgrids": {
-                            # "rep1x": {
-                            #    "unique_data_fraction": ["1.0"],
-                            #    "num_repetitions": ["1"],
-                            #},
+                            "rep1x": {
+                               "unique_data_fraction": ["1.0"],
+                               "num_repetitions": ["1"],
+                            },
                             "rep2x": {
                                 "unique_data_fraction": ["0.5"],
                                 "num_repetitions": ["2"],
@@ -314,10 +319,10 @@ def main(
                         "moe_router_top_ks_list": ["4"],
                         "moe_generalist_hidden_multiplier": ["0"],
                         "subgrids": {
-                            # "rep1x": {
-                            #     "unique_data_fraction": ["1.0"],
-                            #     "num_repetitions": ["1"],
-                            # },
+                            "rep1x": {
+                                "unique_data_fraction": ["1.0"],
+                                "num_repetitions": ["1"],
+                            },
                             "rep2x": {
                                 "unique_data_fraction": ["0.5"],
                                 "num_repetitions": ["2"],
@@ -404,6 +409,7 @@ def main(
                 dependencies=[],
                 repo_name="olmoe-core",
                 conda_env_name=SPECS.get("CONDA_ENV_NAME"),
+                init_script_path=SPECS.get("INIT_SCRIPT"),
                 include_jobs_indices=include_jobs_indices,
                 filter_succeeded=filter_succeeded,
                 filter_running=filter_running,

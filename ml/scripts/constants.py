@@ -145,6 +145,7 @@ PROJECT_SPECS = {
         "WANDB_PROJECT": "data_rep_moe",
         "WANDB_ENTITY": "ml-moe",
         "CONDA_ENV_NAME": "olmoe-core-ml",
+        "INIT_SCRIPT": "~/init_scripts/.olmoe-core-ml.sh",
         "PROJECT_DIR": DEFAULT_DIR_PATH,
         "SLURM_ACCOUNT": "zlab",
         "SLURM_PARTITION": "ckpt-g2",
