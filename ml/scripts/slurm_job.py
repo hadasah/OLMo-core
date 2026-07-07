@@ -43,6 +43,7 @@ SLRM_JOB_ARRAY_TEMPLATE = """
 {SBATCH_EXTRAS}
 
 source ~/.bashrc
+{init_command}
 {conda_command}
 
 echo "# -------- BEGIN CALL TO run.sh --------"
@@ -133,10 +134,9 @@ export NCCL_MIN_CHANNELS=32
 
 # olmo-core specific
 export OLMO_SHARED_FS=1
-export OLMO_CORE_FS_CACHE_DIR={SAVE_ROOT}/fs_cache
-export CACHED_PATH_CACHE_ROOT={SAVE_ROOT}/cached_path_cache
 
 {conda_command}
+{init_command}
 cd {NEW_DIR_PATH}
 export PYTHONPATH={SAVE_ROOT}/{repo_name}:$PYTHONPATH
 if [[ "$SLURM_PROCID" == "0" ]]; then 
@@ -187,6 +187,7 @@ def run_grid(
     dependencies=[],
     repo_name="code",
     conda_env_name=None,
+    init_script_path=None,
     include_jobs_indices=None,
     filter_succeeded=True,
     filter_running=True,
@@ -222,6 +223,7 @@ def run_grid(
     dependencies -- (list) list of job ids that this job depends on
     repo_name -- (str) name of the repository to copy
     conda_env_name -- (str) name of the conda environment to activate
+    init_script -- (str) path to init script
     include_jobs_indices -- (list) list of job indices to include in the sweep
     filter_succeeded -- (bool) if True, filters out jobs that have already
         succeeded (i.e. have a log file with "got exitcode: 0")
@@ -458,6 +460,7 @@ def run_grid(
                 repo_name=repo_name,
                 job_port=sweep_port_start + i,
                 conda_env_name=conda_env_name,
+                init_script_path=init_script_path,
             )
         )
     submit_array_jobs(
@@ -479,6 +482,7 @@ def run_grid(
         jobs_path=jobs_path,
         dependencies=dependencies,
         conda_env_name=conda_env_name,
+        init_script_path=init_script_path,
     )
 
 
@@ -502,6 +506,7 @@ def create_job_files(
     repo_name="",
     job_port=None,
     conda_env_name=None,
+    init_script_path=None,
 ):
     """Creates job folders and scripts"""
 
@@ -514,6 +519,7 @@ def create_job_files(
     ARGS_STR = " ".join(job_args)
     job_port = job_port or random.randint(RANDOM_PORT_MIN, RANDOM_PORT_MAX)
     conda_command = f"conda activate {conda_env_name}" if conda_env_name else ""
+    init_command = f"source {init_script_path}" if init_script_path else ""
 
     if data_parallel or not gpus:
         ntasks_per_node = 1
@@ -546,6 +552,7 @@ def submit_array_jobs(
     jobs_path=[],
     dependencies=[],
     conda_env_name=None,
+    init_script_path=None,
     append_to_sbatch_str=None,
 ):
     """Submits the jobs as a SLURM job array."""
@@ -595,6 +602,7 @@ def submit_array_jobs(
         )
 
     conda_command = f"conda activate {conda_env_name}" if conda_env_name else ""
+    init_command = f"source {init_script_path}" if init_script_path else ""
 
     # make sure sbatch extras are a string
     SBATCH_EXTRAS = "\n".join(SBATCH_EXTRAS)

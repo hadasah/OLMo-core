@@ -103,38 +103,37 @@ def get_wandb_tags(
     moe_type,
     unique_data_fraction=1.0,
     num_repetitions=1,
+    train_datamix_name=None,
 ):
     """
     Returns a list of tags for W&B runs based on the current configuration.
     This function can be extended to include more complex logic for generating tags.
     """
     wandb_tags = []
-    if len(moe_num_experts_list) > 1:
-        wandb_tags.append("hetMoE")
-    elif len(moe_num_experts_list) == 1 and moe_num_experts_list[0] > 1:
-        wandb_tags.append("MoE")
+    if len(moe_num_experts_list) == 1 and moe_num_experts_list[0] > 1:
+        wandb_tags.append(f"MoE{','.join([str(m) for m in moe_num_experts_list])}")
     elif len(moe_num_experts_list) == 1 and moe_num_experts_list[0] == 1:
         wandb_tags.append("dense")
     else:
         raise ValueError("moe_num_experts_list must contain at least one element")
-    if moe_type == "dropless":
-        wandb_tags.append("dropless")
     if "5XD" in run_name:
         wandb_tags.append("Data=5C")
     else:
         wandb_tags.append("Data=1C")
-    if moe_generalist_hidden_multiplier > 0:
-        wandb_tags.append(f"{moe_generalist_hidden_multiplier}gen")
-    else:
-        wandb_tags.append("nogen")
 
-    wandb_tags.append(model_name.split("_")[1])  # e.g., "100M", "1B"
+    wandb_tags.append(model_name.replace("olmo2_ml_", ""))  # e.g., "100M", "1B"
 
     if unique_data_fraction < 1.0:
         wandb_tags.append(f"frac{unique_data_fraction}")
         wandb_tags.append(f"rep{num_repetitions}x")
     else:
         wandb_tags.append("rep1x")
+
+    if train_datamix_name:
+        for t in train_datamix_name.split(","):
+            wandb_tags.append(t)
+    else:
+        wandb_tags.append("olmo_mix")
 
     return wandb_tags
 
