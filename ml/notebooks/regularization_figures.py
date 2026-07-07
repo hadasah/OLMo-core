@@ -6,27 +6,25 @@ app = marimo.App(width="full")
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-        # Regularization & Data-Repetition Figures
+    mo.md(r"""
+    # Regularization & Data-Repetition Figures
 
-        Figures built from the most recent Weights & Biases CSV export in
-        `ml/notebooks/data/`.
+    Figures built from the most recent Weights & Biases CSV export in
+    `ml/notebooks/data/`.
 
-        Only runs with `State == "finished"` are plotted (see the data filtering
-        function below).
+    Only runs with `State == "finished"` are plotted (see the data filtering
+    function below).
 
-        **Figure groups**
+    **Figure groups**
 
-        1. Final train loss vs. repetition count (log X), for Dense & MoE64 baseline
-           runs on the `olmo_mix` mixture — one figure per model scale (80M, 200M).
-        2. The same, repeated for each single-source data mixture: `dclm`,
-           `starcoder`, `pes2o`, `wiki`.
-        3. Dense vs. MoE64 (line style) × baseline vs. regularizer value (color),
-           for **dropout** and **weight decay** — final train loss vs. repetition (log X).
-        4. All `famA` runs: train loss vs. `%dclm` (0/25/50/75/100 from the run name).
-        """
-    )
+    1. Final train loss vs. repetition count (log X), for Dense & MoE64 baseline
+       runs on the `olmo_mix` mixture — one figure per model scale (80M, 200M).
+    2. The same, repeated for each single-source data mixture: `dclm`,
+       `starcoder`, `pes2o`, `wiki`.
+    3. Dense vs. MoE64 (line style) × baseline vs. regularizer value (color),
+       for **dropout** and **weight decay** — final train loss vs. repetition (log X).
+    4. All `famA` runs: train loss vs. `%dclm` (0/25/50/75/100 from the run name).
+    """)
     return
 
 
@@ -40,7 +38,7 @@ def _():
     import pandas as pd
     import plotly.graph_objects as go
 
-    return glob, go, np, os, pd, re
+    return glob, go, os, pd, re
 
 
 @app.cell
@@ -74,13 +72,11 @@ def _(glob, os, pd):
 
 @app.cell(hide_code=True)
 def _(DATA_FILE, mo, os, raw_df):
-    mo.md(
-        f"""
-        **Loaded:** `{os.path.basename(DATA_FILE)}`  \n
-        **Total runs:** {len(raw_df)}  \n
-        **States present:** {", ".join(sorted(raw_df["State"].dropna().unique()))}
-        """
-    )
+    mo.md(f"""
+    **Loaded:** `{os.path.basename(DATA_FILE)}`  \n
+    **Total runs:** {len(raw_df)}  \n
+    **States present:** {", ".join(sorted(raw_df["State"].dropna().unique()))}
+    """)
     return
 
 
@@ -151,18 +147,13 @@ def _(pd):
         return None
 
     return (
-        DATA_TAGS,
         DROPOUT_COL,
-        LOSS_COL,
-        REPS_COL,
         WD_COL,
         filter_finished,
-        get_data_tag,
         get_model_type,
         get_reps,
         get_scale,
         has_tag,
-        parse_tags,
     )
 
 
@@ -173,36 +164,62 @@ def _(filter_finished, raw_df):
     return (finished_df,)
 
 
+@app.cell
+def _(mo, raw_df):
+    # ------------------------------------------------------------------
+    # Metric selector: train loss + all eval CE-loss metrics.
+    # ------------------------------------------------------------------
+    def build_metric_options(df):
+        """Collect the plottable metric columns present in the data.
+
+        Includes the train CE loss, every ``eval/lm/*/CE loss`` metric, and every
+        ``eval/downstream/* (CE loss)`` metric (the non-``v2`` variant).
+        """
+        cols = list(df.columns)
+        options = []
+        if "train/CE loss" in cols:
+            options.append("train/CE loss")
+        for c in cols:
+            if c.startswith("eval/lm/") and c.endswith("/CE loss"):
+                options.append(c)
+        for c in cols:
+            if c.startswith("eval/downstream/") and c.endswith("(CE loss)"):
+                options.append(c)
+        return options
+
+    METRIC_OPTIONS = build_metric_options(raw_df)
+
+    metric_dropdown = mo.ui.dropdown(
+        options=METRIC_OPTIONS,
+        value="train/CE loss" if "train/CE loss" in METRIC_OPTIONS else METRIC_OPTIONS[0],
+        label="Metric to plot",
+    )
+    metric_dropdown
+    return (metric_dropdown,)
+
+
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-        ## Group 1 & 2 — Final loss vs. repetition (baseline runs)
+    mo.md(r"""
+    ## Group 1 & 2 — Final loss vs. repetition (baseline runs)
 
-        For each data mixture we plot Dense and MoE64 **baseline** runs (tag
-        `baseline`, i.e. no dropout/EOM/FOM/jitter). Final train loss on Y, repetition
-        count on a log X axis. If more than one baseline run exists at the same
-        repetition count, a warning is printed and the **lowest** train loss is kept.
-        """
-    )
+    For each data mixture we plot Dense and MoE64 **baseline** runs (tag
+    `baseline`, i.e. no dropout/EOM/FOM/jitter). Final train loss on Y, repetition
+    count on a log X axis. If more than one baseline run exists at the same
+    repetition count, a warning is printed and the **lowest** train loss is kept.
+    """)
     return
 
 
 @app.cell
-def _(
-    LOSS_COL,
-    get_model_type,
-    get_reps,
-    get_scale,
-    go,
-    has_tag,
-    pd,
-):
-    def collect_baseline_points(df: pd.DataFrame, data_tag: str, scale: str, model_type: str):
-        """Return sorted (reps, loss) points for baseline runs of one series.
+def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
+    def collect_baseline_points(
+        df: pd.DataFrame, data_tag: str, scale: str, model_type: str, metric: str
+    ):
+        """Return sorted (reps, value) points for baseline runs of one series.
 
         Prints a warning when multiple baseline runs share a repetition count, and
-        keeps the run with the lowest final train loss.
+        keeps the run with the lowest metric value.
         """
         rows = []
         for _, row in df.iterrows():
@@ -215,12 +232,12 @@ def _(
             if not has_tag(row, data_tag):
                 continue
             reps = get_reps(row)
-            loss = row.get(LOSS_COL)
+            loss = row.get(metric)
             if pd.isna(reps) or pd.isna(loss):
                 continue
             rows.append((reps, float(loss), str(row.get("Name", ""))))
 
-        # Collapse duplicates at the same rep count -> keep min loss, warn.
+        # Collapse duplicates at the same rep count -> keep min value, warn.
         by_reps: dict = {}
         for reps, loss, name in rows:
             by_reps.setdefault(reps, []).append((loss, name))
@@ -232,19 +249,19 @@ def _(
                 print(
                     f"WARNING: {len(entries)} baseline runs for "
                     f"{data_tag}/{scale}/{model_type} at rep={reps:g}; "
-                    f"keeping lowest loss. Runs: {[n for _, n in entries]}"
+                    f"keeping lowest value. Runs: {[n for _, n in entries]}"
                 )
             best_loss = min(loss for loss, _ in entries)
             points.append((reps, best_loss))
         return points
 
-    def make_repetition_figure(df: pd.DataFrame, data_tag: str, scale: str):
-        """One figure: Dense + MoE64 baseline, loss vs reps (log X), for a scale."""
+    def make_repetition_figure(df: pd.DataFrame, data_tag: str, scale: str, metric: str):
+        """One figure: Dense + MoE64 baseline, metric vs reps (log X), for a scale."""
         fig = go.Figure()
         colors = {"dense": "#1f77b4", "moe64": "#d62728"}
         any_data = False
         for model_type in ["dense", "moe64"]:
-            points = collect_baseline_points(df, data_tag, scale, model_type)
+            points = collect_baseline_points(df, data_tag, scale, model_type, metric)
             if not points:
                 continue
             any_data = True
@@ -260,13 +277,13 @@ def _(
                     marker=dict(size=8),
                 )
             )
-        title = f"{data_tag} — {scale}: final train loss vs. repetition (baseline)"
+        title = f"{data_tag} — {scale}: {metric} vs. repetition (baseline)"
         if not any_data:
             title += "  [no finished baseline runs]"
         fig.update_layout(
             title=title,
             xaxis_title="repetition count",
-            yaxis_title="final train CE loss",
+            yaxis_title=metric,
             xaxis_type="log",
             template="plotly_white",
             width=700,
@@ -274,111 +291,119 @@ def _(
         )
         return fig
 
-    return collect_baseline_points, make_repetition_figure
+    return (make_repetition_figure,)
 
 
 @app.cell
-def _(finished_df, make_repetition_figure):
+def _(finished_df, make_repetition_figure, metric_dropdown):
     # Group 1: olmo_mix, 80M then 200M.
-    fig_olmo_80m = make_repetition_figure(finished_df, "olmo_mix", "80M")
-    fig_olmo_80m
-    return (fig_olmo_80m,)
-
-
-@app.cell
-def _(finished_df, make_repetition_figure):
-    fig_olmo_200m = make_repetition_figure(finished_df, "olmo_mix", "200M")
-    fig_olmo_200m
-    return (fig_olmo_200m,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""### Group 2 — Single-source mixtures (`dclm`, `starcoder`, `pes2o`, `wiki`)""")
-    return
-
-
-@app.cell
-def _(finished_df, make_repetition_figure):
-    fig_dclm_80m = make_repetition_figure(finished_df, "dclm", "80M")
-    fig_dclm_80m
-    return (fig_dclm_80m,)
-
-
-@app.cell
-def _(finished_df, make_repetition_figure):
-    fig_dclm_200m = make_repetition_figure(finished_df, "dclm", "200M")
-    fig_dclm_200m
-    return (fig_dclm_200m,)
-
-
-@app.cell
-def _(finished_df, make_repetition_figure):
-    fig_starcoder_80m = make_repetition_figure(finished_df, "starcoder", "80M")
-    fig_starcoder_80m
-    return (fig_starcoder_80m,)
-
-
-@app.cell
-def _(finished_df, make_repetition_figure):
-    fig_starcoder_200m = make_repetition_figure(finished_df, "starcoder", "200M")
-    fig_starcoder_200m
-    return (fig_starcoder_200m,)
-
-
-@app.cell
-def _(finished_df, make_repetition_figure):
-    fig_pes2o_80m = make_repetition_figure(finished_df, "pes2o", "80M")
-    fig_pes2o_80m
-    return (fig_pes2o_80m,)
-
-
-@app.cell
-def _(finished_df, make_repetition_figure):
-    fig_pes2o_200m = make_repetition_figure(finished_df, "pes2o", "200M")
-    fig_pes2o_200m
-    return (fig_pes2o_200m,)
-
-
-@app.cell
-def _(finished_df, make_repetition_figure):
-    fig_wiki_80m = make_repetition_figure(finished_df, "wiki", "80M")
-    fig_wiki_80m
-    return (fig_wiki_80m,)
-
-
-@app.cell
-def _(finished_df, make_repetition_figure):
-    fig_wiki_200m = make_repetition_figure(finished_df, "wiki", "200M")
-    fig_wiki_200m
-    return (fig_wiki_200m,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(
-        r"""
-        ## Group 3 — Regularizer sweeps: dropout & weight decay
-
-        Dense vs. MoE64 is encoded as **line style** (solid = dense, dashed = moe64).
-        Baseline vs. each regularizer value is encoded as **color**. X axis is the
-        repetition count (log); Y is final train CE loss. Runs are restricted to the
-        `olmo_mix` mixture at 80M scale (where the regularizer sweeps live).
-        """
+    fig_olmo_80m = make_repetition_figure(
+        finished_df, "olmo_mix", "80M", metric_dropdown.value
     )
+    fig_olmo_80m
     return
 
 
 @app.cell
-def _(
-    LOSS_COL,
-    get_model_type,
-    get_reps,
-    get_scale,
-    go,
-    has_tag,
-    pd,
-):
+def _(finished_df, make_repetition_figure, metric_dropdown):
+    fig_olmo_200m = make_repetition_figure(
+        finished_df, "olmo_mix", "200M", metric_dropdown.value
+    )
+    fig_olmo_200m
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Group 2 — Single-source mixtures (`dclm`, `starcoder`, `pes2o`, `wiki`)
+    """)
+    return
+
+
+@app.cell
+def _(finished_df, make_repetition_figure, metric_dropdown):
+    fig_dclm_80m = make_repetition_figure(finished_df, "dclm", "80M", metric_dropdown.value)
+    fig_dclm_80m
+    return
+
+
+@app.cell
+def _(finished_df, make_repetition_figure, metric_dropdown):
+    fig_dclm_200m = make_repetition_figure(
+        finished_df, "dclm", "200M", metric_dropdown.value
+    )
+    fig_dclm_200m
+    return
+
+
+@app.cell
+def _(finished_df, make_repetition_figure, metric_dropdown):
+    fig_starcoder_80m = make_repetition_figure(
+        finished_df, "starcoder", "80M", metric_dropdown.value
+    )
+    fig_starcoder_80m
+    return
+
+
+@app.cell
+def _(finished_df, make_repetition_figure, metric_dropdown):
+    fig_starcoder_200m = make_repetition_figure(
+        finished_df, "starcoder", "200M", metric_dropdown.value
+    )
+    fig_starcoder_200m
+    return
+
+
+@app.cell
+def _(finished_df, make_repetition_figure, metric_dropdown):
+    fig_pes2o_80m = make_repetition_figure(
+        finished_df, "pes2o", "80M", metric_dropdown.value
+    )
+    fig_pes2o_80m
+    return
+
+
+@app.cell
+def _(finished_df, make_repetition_figure, metric_dropdown):
+    fig_pes2o_200m = make_repetition_figure(
+        finished_df, "pes2o", "200M", metric_dropdown.value
+    )
+    fig_pes2o_200m
+    return
+
+
+@app.cell
+def _(finished_df, make_repetition_figure, metric_dropdown):
+    fig_wiki_80m = make_repetition_figure(finished_df, "wiki", "80M", metric_dropdown.value)
+    fig_wiki_80m
+    return
+
+
+@app.cell
+def _(finished_df, make_repetition_figure, metric_dropdown):
+    fig_wiki_200m = make_repetition_figure(
+        finished_df, "wiki", "200M", metric_dropdown.value
+    )
+    fig_wiki_200m
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Group 3 — Regularizer sweeps: dropout & weight decay
+
+    Dense vs. MoE64 is encoded as **line style** (solid = dense, dashed = moe64).
+    Baseline vs. each regularizer value is encoded as **color**. X axis is the
+    repetition count (log); Y is final train CE loss. Runs are restricted to the
+    `olmo_mix` mixture at 80M scale (where the regularizer sweeps live).
+    """)
+    return
+
+
+@app.cell
+def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
     def _factor_value(row, col):
         """Read a regularizer column as a float; blank/NaN means 'baseline'."""
         val = row.get(col)
@@ -389,13 +414,13 @@ def _(
             return None
         return None
 
-    def make_factor_figure(df, factor_col, factor_label, baseline_value):
+    def make_factor_figure(df, factor_col, factor_label, baseline_value, metric):
         """dense/moe64 -> line dash; baseline vs each factor value -> color.
 
         `baseline_value` is the value that represents 'no regularization' for this
         column (e.g. dropout baseline = None/blank, weight-decay baseline = 0.1).
         """
-        # Gather points keyed by (model_type, factor_value) -> {reps: min_loss}.
+        # Gather points keyed by (model_type, factor_value) -> {reps: min_value}.
         series: dict = {}
         factor_values = set()
         for _, row in df.iterrows():
@@ -407,7 +432,7 @@ def _(
             if model_type not in ("dense", "moe64"):
                 continue
             reps = get_reps(row)
-            loss = row.get(LOSS_COL)
+            loss = row.get(metric)
             if pd.isna(reps) or pd.isna(loss):
                 continue
 
@@ -454,7 +479,7 @@ def _(
             title=f"Dense (solid) vs MoE64 (dashed) — baseline vs {factor_label} "
             f"(olmo_mix, 80M)",
             xaxis_title="repetition count",
-            yaxis_title="final train CE loss",
+            yaxis_title=metric,
             xaxis_type="log",
             template="plotly_white",
             width=800,
@@ -466,47 +491,45 @@ def _(
 
 
 @app.cell
-def _(DROPOUT_COL, finished_df, make_factor_figure):
+def _(DROPOUT_COL, finished_df, make_factor_figure, metric_dropdown):
     # Dropout: baseline = no dropout set (blank).
     fig_dropout = make_factor_figure(
-        finished_df, DROPOUT_COL, "dropout", baseline_value=None
+        finished_df, DROPOUT_COL, "dropout", None, metric_dropdown.value
     )
     fig_dropout
-    return (fig_dropout,)
-
-
-@app.cell
-def _(WD_COL, finished_df, make_factor_figure):
-    # Weight decay: baseline = the default 0.1; swept values are 0.2 / 0.4.
-    fig_weight_decay = make_factor_figure(
-        finished_df, WD_COL, "weight_decay", baseline_value=0.1
-    )
-    fig_weight_decay
-    return (fig_weight_decay,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(
-        r"""
-        ## Group 4 — `famA` runs: train loss vs. %dclm
-
-        Every finished run whose name contains `famA`. The X axis is the DCLM
-        percentage parsed from `dclm{N}` in the run name (0, 25, 50, 75, 100);
-        Y is final train CE loss. Points are colored by model type.
-        """
-    )
     return
 
 
 @app.cell
-def _(LOSS_COL, finished_df, get_model_type, go, pd, re):
+def _(WD_COL, finished_df, make_factor_figure, metric_dropdown):
+    # Weight decay: baseline = the default 0.1; swept values are 0.2 / 0.4.
+    fig_weight_decay = make_factor_figure(
+        finished_df, WD_COL, "weight_decay", 0.1, metric_dropdown.value
+    )
+    fig_weight_decay
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Group 4 — `famA` runs: train loss vs. %dclm
+
+    Every finished run whose name contains `famA`. The X axis is the DCLM
+    percentage parsed from `dclm{N}` in the run name (0, 25, 50, 75, 100);
+    Y is final train CE loss. Points are colored by model type.
+    """)
+    return
+
+
+@app.cell
+def _(finished_df, get_model_type, go, metric_dropdown, pd, re):
     def parse_dclm_pct(name: str):
         """Extract the DCLM percentage from a 'dclm{N}' token in the run name."""
         m = re.search(r"dclm(\d+)", str(name))
         return int(m.group(1)) if m else None
 
-    def make_famA_figure(df):
+    def make_famA_figure(df, metric):
         fig = go.Figure()
         colors = {"dense": "#1f77b4", "moe64": "#d62728", "moe32": "#2ca02c"}
         # Collect points per model type.
@@ -516,7 +539,7 @@ def _(LOSS_COL, finished_df, get_model_type, go, pd, re):
             if "famA" not in name:
                 continue
             pct = parse_dclm_pct(name)
-            loss = row.get(LOSS_COL)
+            loss = row.get(metric)
             if pct is None or pd.isna(loss):
                 continue
             mt = get_model_type(row)
@@ -535,9 +558,9 @@ def _(LOSS_COL, finished_df, get_model_type, go, pd, re):
                 )
             )
         fig.update_layout(
-            title="famA runs: train loss vs. %dclm",
+            title=f"famA runs: {metric} vs. %dclm",
             xaxis_title="% dclm",
-            yaxis_title="final train CE loss",
+            yaxis_title=metric,
             xaxis=dict(tickmode="array", tickvals=[0, 25, 50, 75, 100]),
             template="plotly_white",
             width=700,
@@ -545,9 +568,9 @@ def _(LOSS_COL, finished_df, get_model_type, go, pd, re):
         )
         return fig
 
-    fig_famA = make_famA_figure(finished_df)
+    fig_famA = make_famA_figure(finished_df, metric_dropdown.value)
     fig_famA
-    return fig_famA, make_famA_figure, parse_dclm_pct
+    return
 
 
 @app.cell
