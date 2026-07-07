@@ -148,6 +148,22 @@ def _(pd):
                 return dt
         return None
 
+    def pow2_ticks(max_reps):
+        """Power-of-2 tick values from 1 up to the smallest power of 2 >= max_reps.
+
+        Returns (tickvals, ticktext) for a log-scaled repetition axis. If there is
+        no valid max (e.g. no data), returns ([1], ["1"]).
+        """
+        if max_reps is None or max_reps < 1:
+            return [1], ["1"]
+        vals = []
+        p = 1
+        while p < max_reps:
+            vals.append(p)
+            p *= 2
+        vals.append(p)  # smallest power of 2 >= max_reps
+        return vals, [str(v) for v in vals]
+
     return (
         DROPOUT_COL,
         WD_COL,
@@ -156,6 +172,7 @@ def _(pd):
         get_reps,
         get_scale,
         has_tag,
+        pow2_ticks,
     )
 
 
@@ -214,7 +231,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
+def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
     def collect_baseline_points(
         df: pd.DataFrame, data_tag: str, scale: str, model_type: str, metric: str
     ):
@@ -262,6 +279,7 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
         fig = go.Figure()
         colors = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
         any_data = False
+        max_reps = 0
         for model_type in ["dense", "moe32", "moe64"]:
             points = collect_baseline_points(df, data_tag, scale, model_type, metric)
             if not points:
@@ -269,6 +287,7 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
             any_data = True
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
+            max_reps = max(max_reps, max(xs))
             fig.add_trace(
                 go.Scatter(
                     x=xs,
@@ -282,11 +301,13 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
         title = f"{data_tag} — {scale}: {metric} vs. repetition (baseline)"
         if not any_data:
             title += "  [no finished baseline runs]"
+        tickvals, ticktext = pow2_ticks(max_reps if any_data else None)
         fig.update_layout(
             title=title,
             xaxis_title="repetition count",
             yaxis_title=metric,
             xaxis_type="log",
+            xaxis=dict(tickmode="array", tickvals=tickvals, ticktext=ticktext),
             template="plotly_white",
             width=700,
             height=450,
@@ -406,7 +427,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
+def _(get_model_type, get_reps, get_scale, go, has_tag, pd, pow2_ticks):
     def _factor_value(row, col):
         """Read a regularizer column as a float; blank/NaN means 'baseline'."""
         val = row.get(col)
@@ -478,12 +499,17 @@ def _(get_model_type, get_reps, get_scale, go, has_tag, pd):
                     marker=dict(size=7),
                 )
             )
+        # Power-of-2 ticks based on the largest repetition count present.
+        _all_reps = [r for pts in series.values() for r in pts]
+        _max_reps = max(_all_reps) if _all_reps else None
+        _tickvals, _ticktext = pow2_ticks(_max_reps)
         fig.update_layout(
             title=f"Dense (solid) / MoE32 (dotted) / MoE64 (dashed) — "
             f"baseline vs {factor_label} (olmo_mix, 80M)",
             xaxis_title="repetition count",
             yaxis_title=metric,
             xaxis_type="log",
+            xaxis=dict(tickmode="array", tickvals=_tickvals, ticktext=_ticktext),
             template="plotly_white",
             width=800,
             height=500,
