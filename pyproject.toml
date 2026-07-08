@@ -26,6 +26,8 @@ dependencies = [
     "importlib_resources",
     "bettermap",
     "pandas",
+    "seaborn",
+    "matplotlib",
 ]
 
 [project.urls]
