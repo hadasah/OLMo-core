@@ -199,12 +199,15 @@ def _(json, pd):
     MODEL_SHADE = {"dense": 0.0, "moe32": 0.35, "moe64": 0.65}
 
     def shade_color(hex_color: str, lighten: float) -> str:
-        """Lighten a hex color toward white by `lighten` in [0, 1] (0 = unchanged)."""
+        """Shade a hex color. Positive `lighten` blends toward white, negative blends
+        toward black; 0 leaves it unchanged. Values are clamped to [-1, 1]."""
         h = hex_color.lstrip("#")
         r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
-        r = round(r + (255 - r) * lighten)
-        g = round(g + (255 - g) * lighten)
-        b = round(b + (255 - b) * lighten)
+        t = max(-1.0, min(1.0, lighten))
+        if t >= 0:
+            r, g, b = (round(c + (255 - c) * t) for c in (r, g, b))
+        else:
+            r, g, b = (round(c * (1 + t)) for c in (r, g, b))
         return f"#{r:02x}{g:02x}{b:02x}"
 
     def model_color(base_hex: str, model_type: str) -> str:
@@ -750,12 +753,14 @@ def _(
         factor_dash = {
             b: dash_cycle[i % len(dash_cycle)] for i, b in enumerate(ordered_buckets)
         }
-        # Shade level per bucket: 0.0 (darkest) for baseline up to LIGHTEST for the
-        # last bucket, spread evenly. With a single bucket everything stays darkest.
+        # Shade level per bucket: baseline is the DARKEST (blended toward black),
+        # higher factor values get progressively lighter up to LIGHTEST. Spread
+        # evenly; with a single bucket everything sits at DARKEST.
+        _DARKEST = -0.45
         _LIGHTEST = 0.4
         _n = len(ordered_buckets)
         bucket_shade = {
-            b: (_LIGHTEST * i / (_n - 1) if _n > 1 else 0.0)
+            b: (_DARKEST + (_LIGHTEST - _DARKEST) * i / (_n - 1) if _n > 1 else _DARKEST)
             for i, b in enumerate(ordered_buckets)
         }
 
