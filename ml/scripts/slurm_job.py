@@ -3,15 +3,15 @@ cluster using the SLURM scheduler.
 Adapted from ParlAI
 """
 
-from collections import namedtuple
-from copy import deepcopy
 import collections.abc
 import hashlib
 import json
 import os
 import random
 import subprocess
-import sys
+from collections import namedtuple
+from copy import deepcopy
+
 from utils import dict_update, has_file_been_modified_recently
 
 RANDOM_PORT_MIN = 10000
@@ -149,7 +149,7 @@ nvidia-smi
 
 def sha1(string):
     """Compute the sha1 hexdigest of the string."""
-    return hashlib.sha1(string.encode('utf-8')).hexdigest()
+    return hashlib.sha1(string.encode("utf-8")).hexdigest()
 
 
 def run_grid(
@@ -163,14 +163,14 @@ def run_grid(
     cpus=10,
     nodes=1,
     node_exclude=None,
-    account='zlab',
-    partition='gpu-rtx6k',
+    account="zlab",
+    partition="gpu-rtx6k",
     DIR_PATH="",
-    jobtime='01:59:59',
+    jobtime="01:59:59",
     include_job_id=False,
     hashname=False,
-    saveroot='',
-    logroot='',
+    saveroot="",
+    logroot="",
     mem_gb=64,
     requeue=False,
     data_parallel=False,
@@ -226,7 +226,7 @@ def run_grid(
     sweep_port_start -- (int) starting port for the sweep, if None, a random
         port will be chosen for each job
     """
-    
+
     def get_name_keys(dictionary, parents_key_list=[], name_keys=[], use_all_keys=False):
         items = []
         for key, value in dictionary.items():
@@ -241,11 +241,11 @@ def run_grid(
                         if isinstance(vd, collections.abc.Mapping):
                             items.extend(get_name_keys(vd, new_key_list))
                 elif len(value) > 1 or use_all_keys:
-                    items.append('.'.join(new_key_list))
+                    items.append(".".join(new_key_list))
         items = list(set(items + name_keys))  # remove duplicates
         return items
 
-    def make_job_name(name_keys_list, args_dict, sweep_name='', subgrid_name=''):
+    def make_job_name(name_keys_list, args_dict, sweep_name="", subgrid_name=""):
         name_list = []
         if sweep_name:
             name_list.append(sweep_name)
@@ -255,61 +255,63 @@ def run_grid(
             value = args_dict.get(key, None)
             if value is None or isinstance(value, collections.abc.Mapping):
                 continue
-            short_key = key.replace("_", "").split('.')[-1] if '.' in key else key
-            if type(value) == str:
-                value = value.replace('_', '')
-                if ' ' in value:
-                    value = value.replace(' --', '_').replace(' -', '_')
-                    value = value.replace(' ', '=')
-            name_list.append('{}={}'.format(short_key, str(value)))
-        return '_'.join(name_list)
-    
-    def unroll_args(d, prefix=''):
+            short_key = key.replace("_", "").split(".")[-1] if "." in key else key
+            if isinstance(value, str):
+                value = value.replace("_", "")
+                if " " in value:
+                    value = value.replace(" --", "_").replace(" -", "_")
+                    value = value.replace(" ", "=")
+            name_list.append("{}={}".format(short_key, str(value)))
+        return "_".join(name_list)
+
+    def unroll_args(d, prefix=""):
         """Unrolls a dict of args into a list of strings."""
         args = {}
         for k, v in d.items():
             if isinstance(v, collections.abc.Mapping):
-                args = dict_update(args, unroll_args(v, f'{prefix}.{k}' if prefix else k))
+                args = dict_update(args, unroll_args(v, f"{prefix}.{k}" if prefix else k))
             else:
                 if prefix:
                     args[f"{prefix}.{k}"] = v
                 else:
                     args[k] = v
         return args
-    
 
     def check_if_job_succeeded_before(job_name, save_root):
         """Check if a job has already been run before."""
-        wandb_log_path = os.path.join(save_root, job_name, 'wandb', 'wandb', 'latest-run', 'logs', 'debug.log')
+        wandb_log_path = os.path.join(
+            save_root, job_name, "wandb", "wandb", "latest-run", "logs", "debug.log"
+        )
         if os.path.exists(wandb_log_path):
-            with open(wandb_log_path, 'r') as f:
+            with open(wandb_log_path, "r") as f:
                 s = f.read()
                 if "got exitcode: 0" in s:
                     print(f"Job {job_name} already done before, skipping.")
                     return True
         return False
-    
+
     # if updated in the last 10 minutes, assume it's running
     def check_if_job_is_running(job_name, save_root, recent_threshold_seconds=3600):
         """Check if a job is currently running."""
-        stdout_path = os.path.join(save_root, job_name, 'stdout')
-        running = has_file_been_modified_recently(stdout_path, recent_threshold_seconds=recent_threshold_seconds) 
+        stdout_path = os.path.join(save_root, job_name, "stdout")
+        running = has_file_been_modified_recently(
+            stdout_path, recent_threshold_seconds=recent_threshold_seconds
+        )
         if running:
             print(f"Job {job_name} may be running right now, skipping.")
         return running
 
-    
-
     if not prefix:
-        raise ValueError('Need prefix command')
+        raise ValueError("Need prefix command")
     SAVE_ROOT = saveroot
     LOG_ROOT = logroot
 
-    Job = namedtuple('Job', ['cmd', 'name'])
+    Job = namedtuple("Job", ["cmd", "name"])
     all_jobs = []
     name_key_lists = {}
 
     import itertools
+
     def c_prod(d):
         if isinstance(d, list):
             for i in d:
@@ -347,29 +349,30 @@ def run_grid(
         for config_dict in permutations_dicts:
             for _ in range(num_copies):
                 cmd_args = unroll_args(config_dict)
-                name = make_job_name(name_key_list, cmd_args, sweep_name=sweep_name, subgrid_name=subgrid_name)
+                name = make_job_name(
+                    name_key_list, cmd_args, sweep_name=sweep_name, subgrid_name=subgrid_name
+                )
                 name = name[:cutoff] if cutoff else name
                 name = sha1(name) if hashname else name
-                cmd = f"{prefix} {name} " + ' '.join([f'--{k}={v}' for k, v in cmd_args.items()])
+                cmd = f"{prefix} {name} " + " ".join([f"--{k}={v}" for k, v in cmd_args.items()])
                 if include_job_id:
-                    name += '/_jobid=' + str(job_id)
+                    name += "/_jobid=" + str(job_id)
                 final_jobs.append(Job(cmd=cmd, name=name))
                 job_id += 1
 
     # Copy the directory if needed
     to_copy = [] + copy_dirs
     if copy_env and to_copy:
-        bash('mkdir -p ' + os.path.join(SAVE_ROOT, repo_name))
+        bash("mkdir -p " + os.path.join(SAVE_ROOT, repo_name))
         for c in to_copy:
             c_head, _ = os.path.split(c)
             # if subfolder, copy folder then subfolder
             if len(c_head) > 1:
-                bash('mkdir {SAVE_ROOT}/{repo_name}/{c_head}'.format(**locals()))
-            bash('cp -r {DIR_PATH}/{c} {SAVE_ROOT}/{repo_name}/{c}'.format(**locals()))
-        NEW_DIR_PATH = '{SAVE_ROOT}/{repo_name}'.format(**locals())
+                bash("mkdir {SAVE_ROOT}/{repo_name}/{c_head}".format(**locals()))
+            bash("cp -r {DIR_PATH}/{c} {SAVE_ROOT}/{repo_name}/{c}".format(**locals()))
+        NEW_DIR_PATH = "{SAVE_ROOT}/{repo_name}".format(**locals())
     else:
         NEW_DIR_PATH = DIR_PATH
-
 
     # Filter out jobs based on debug mode, indices, and status
     if debug_mode and len(final_jobs) > 1:
@@ -377,30 +380,33 @@ def run_grid(
     elif include_jobs_indices:
         final_jobs = [final_jobs[i] for i in include_jobs_indices]
     if filter_succeeded:
-        final_jobs = [job for job in final_jobs if not check_if_job_succeeded_before(job.name, SAVE_ROOT)]
+        final_jobs = [
+            job for job in final_jobs if not check_if_job_succeeded_before(job.name, SAVE_ROOT)
+        ]
     if filter_running:
         final_jobs = [job for job in final_jobs if not check_if_job_is_running(job.name, SAVE_ROOT)]
 
-    
-    print(f'Found a total of {len(final_jobs)} jobs. \nExample of first job:\n{final_jobs[0].cmd}\n')
+    print(
+        f"Found a total of {len(final_jobs)} jobs. \nExample of first job:\n{final_jobs[0].cmd}\n"
+    )
     print(final_jobs)
 
     if dry_mode:
         return
 
-    print(f'Launching! Your jobs will run for {jobtime}.')
+    print(f"Launching! Your jobs will run for {jobtime}.")
 
     # Dump grid, specs, jobs to files
     if not os.path.exists(SAVE_ROOT):
         os.makedirs(SAVE_ROOT)
-        with open(os.path.join(SAVE_ROOT, 'grid.json'), 'w') as f:
+        with open(os.path.join(SAVE_ROOT, "grid.json"), "w") as f:
             json.dump(grid, f)
-        with open(os.path.join(SAVE_ROOT, 'specs.json'), 'w') as f:
+        with open(os.path.join(SAVE_ROOT, "specs.json"), "w") as f:
             json.dump(specs, f)
-        with open(os.path.join(SAVE_ROOT, 'jobs_lookup.jsonl'), 'w') as f:
+        with open(os.path.join(SAVE_ROOT, "jobs_lookup.jsonl"), "w") as f:
             for i, job in enumerate(final_jobs):
-                f.write(json.dumps({'i': i, 'name': job.name, 'cmd': job.cmd}) + '\n')
-    
+                f.write(json.dumps({"i": i, "name": job.name, "cmd": job.cmd}) + "\n")
+
     jobs_path = []
     sweep_port_start = sweep_port_start or random.randint(RANDOM_PORT_MIN, RANDOM_PORT_MAX)
     for i, job in enumerate(final_jobs):
@@ -417,7 +423,7 @@ def run_grid(
                 requeue=requeue,
                 NEW_DIR_PATH=NEW_DIR_PATH,
                 repo_name=repo_name,
-                job_port=sweep_port_start+i,
+                job_port=sweep_port_start + i,
             )
         )
     submit_array_jobs(
@@ -446,6 +452,7 @@ def bash(bashCommand):
     result = subprocess.run(bashCommand.split(), capture_output=True, text=True)
     return result.stdout.strip()
 
+
 def create_job_files(
     SWEEP_NAME,
     SAVE_ROOT,
@@ -462,14 +469,14 @@ def create_job_files(
     job_port=None,
 ):
     """Creates job folders and scripts"""
-    
+
     SHOULD_REQUEUE = str(requeue).lower()
     SAVE = os.path.join(SAVE_ROOT, job_name)
-    bash('mkdir -p ' + SAVE)
+    bash("mkdir -p " + SAVE)
     LOG = os.path.join(LOG_ROOT, job_name)
-    bash('mkdir -p ' + LOG)
-    SCRIPTFILE = os.path.join(SAVE, 'run.sh')
-    ARGS_STR = ' '.join(job_args)
+    bash("mkdir -p " + LOG)
+    SCRIPTFILE = os.path.join(SAVE, "run.sh")
+    ARGS_STR = " ".join(job_args)
     job_port = job_port or random.randint(RANDOM_PORT_MIN, RANDOM_PORT_MAX)
 
     if data_parallel or not gpus:
@@ -479,7 +486,7 @@ def create_job_files(
             ntasks_per_node = 8
         else:
             ntasks_per_node = gpus
-    with open(SCRIPTFILE, 'w') as fw:
+    with open(SCRIPTFILE, "w") as fw:
         fw.write(SH_TEMPLATE.format(**locals()).lstrip())
     return SAVE
 
@@ -491,9 +498,9 @@ def submit_array_jobs(
     cpus=1,
     nodes=1,
     node_exclude=None,
-    account='zlab',
-    partition='gpu-rtx6k',
-    jobtime='23:59:59',
+    account="zlab",
+    partition="gpu-rtx6k",
+    jobtime="23:59:59",
     DIR_PATH="",
     mem_gb=64,
     requeue=False,
@@ -504,16 +511,16 @@ def submit_array_jobs(
     dependencies=[],
     conda_env_name=None,
     append_to_sbatch_str=None,
-):  
+):
     """Submits the jobs as a SLURM job array."""
     if not jobs_path:
         raise ValueError("No jobs to submit.")
 
     i = 0
-    SLURMFILE = os.path.join(SAVE_ROOT, f'run_{i}.slrm')
+    SLURMFILE = os.path.join(SAVE_ROOT, f"run_{i}.slrm")
     while os.path.exists(SLURMFILE):
         i += 1
-        SLURMFILE = os.path.join(SAVE_ROOT, f'run_{i}.slrm')
+        SLURMFILE = os.path.join(SAVE_ROOT, f"run_{i}.slrm")
     if data_parallel or not gpus:
         ntasks_per_node = 1
     else:
@@ -524,7 +531,7 @@ def submit_array_jobs(
     SBATCH_EXTRAS = []
     if node_exclude is not None:
         # If any nodes are down, exclude them here
-        SBATCH_EXTRAS.append('#SBATCH --exclude ' + str(node_exclude))
+        SBATCH_EXTRAS.append("#SBATCH --exclude " + str(node_exclude))
 
     constraints = []
 
@@ -533,22 +540,25 @@ def submit_array_jobs(
     # Request the number of GPUs (defaults to 1)
     if gpus > 0:
         if gpus > 8:
-            gpustr = '#SBATCH --gpus-per-node=8'
+            gpustr = "#SBATCH --gpus-per-node=8"
         else:
-            gpustr = '#SBATCH --gpus-per-node={}'.format(gpus)
+            gpustr = "#SBATCH --gpus-per-node={}".format(gpus)
         SBATCH_EXTRAS.append(gpustr)
 
     if constraints:
-        SBATCH_EXTRAS.append("#SBATCH -C '{}'".format('&'.join(constraints)))
-    
-    
+        SBATCH_EXTRAS.append("#SBATCH -C '{}'".format("&".join(constraints)))
+
     if comment:
         SBATCH_EXTRAS.append('#SBATCH --comment="{}"'.format(comment))
 
     if dependencies:
-        SBATCH_EXTRAS.append('#SBATCH --dependency="{}"'.format(','.join(['afterok:' + str(d) for d in dependencies])))
+        SBATCH_EXTRAS.append(
+            '#SBATCH --dependency="{}"'.format(
+                ",".join(["afterok:" + str(d) for d in dependencies])
+            )
+        )
 
-    conda_command = f'conda activate {conda_env_name}' if conda_env_name else ''
+    conda_command = f"conda activate {conda_env_name}" if conda_env_name else ""
 
     # make sure sbatch extras are a string
     SBATCH_EXTRAS = "\n".join(SBATCH_EXTRAS)
@@ -556,8 +566,8 @@ def submit_array_jobs(
     for idx, each_path in enumerate(jobs_path):
         JOB_LAUNCHER.append(BASH_IF_CLAUSE.format(index=idx, SAVE=each_path, nodes=nodes))
     JOB_LAUNCHER = "\n".join(JOB_LAUNCHER)
-    bash('mkdir -p ' + os.path.join(SAVE_ROOT, 'slurm_logs'))
-    with open(SLURMFILE, 'w') as fw:
+    bash("mkdir -p " + os.path.join(SAVE_ROOT, "slurm_logs"))
+    with open(SLURMFILE, "w") as fw:
         fw.write(SLRM_JOB_ARRAY_TEMPLATE.format(**locals()).lstrip())
-        
-    print(bash('sbatch --array=0-{} {}'.format(total_num_jobs, SLURMFILE)))
+
+    print(bash("sbatch --array=0-{} {}".format(total_num_jobs, SLURMFILE)))

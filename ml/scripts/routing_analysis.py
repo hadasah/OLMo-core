@@ -22,15 +22,13 @@ Usage:
 import argparse
 import json
 import logging
+import numpy as np
 import os
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import torch
-import torch.nn.functional as F
-import numpy as np
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 
 
@@ -85,7 +83,7 @@ def get_routing_decisions(model, input_ids: torch.Tensor) -> Dict[int, Dict[str,
     # Register hooks on router forward methods
     hooks = []
     for block_key, block in model.blocks.items():
-        if not hasattr(block, 'feed_forward_moe'):
+        if not hasattr(block, "feed_forward_moe"):
             continue
 
         layer_idx = int(block_key)
@@ -108,6 +106,7 @@ def get_routing_decisions(model, input_ids: torch.Tensor) -> Dict[int, Dict[str,
                         x = input[0]
                         logits = module.get_expert_logits(x).detach().cpu()
                         info_dict[f"router_{r_idx}"]["logits"] = logits
+
                 return hook_fn
 
             h = router.register_forward_hook(make_hook(routing_info[layer_idx], router_idx, router))
@@ -191,7 +190,7 @@ def analyze_expert_knockout(
     # Get baseline loss
     with torch.no_grad():
         baseline_output = model(eval_input_ids.to(device), labels=labels.to(device))
-        if hasattr(baseline_output, 'loss'):
+        if hasattr(baseline_output, "loss"):
             baseline_loss = baseline_output.loss.item()
         else:
             baseline_loss = baseline_output.item()
@@ -200,15 +199,13 @@ def analyze_expert_knockout(
     results = {"baseline_loss": baseline_loss, "knockout_losses": {}}
 
     for block_key, block in model.blocks.items():
-        if not hasattr(block, 'feed_forward_moe'):
+        if not hasattr(block, "feed_forward_moe"):
             continue
 
         layer_idx = int(block_key)
         moe = block.feed_forward_moe
 
-        for router_idx, (router, experts) in enumerate(
-            zip(moe.routers_list, moe.experts_list)
-        ):
+        for router_idx, (router, experts) in enumerate(zip(moe.routers_list, moe.experts_list)):
             key = f"layer{layer_idx}_router{router_idx}"
             results["knockout_losses"][key] = {}
 
@@ -248,7 +245,7 @@ def analyze_expert_knockout(
 
                 with torch.no_grad():
                     ko_output = model(eval_input_ids.to(device), labels=labels.to(device))
-                    if hasattr(ko_output, 'loss'):
+                    if hasattr(ko_output, "loss"):
                         ko_loss = ko_output.loss.item()
                     else:
                         ko_loss = ko_output.item()
@@ -267,8 +264,10 @@ def analyze_expert_knockout(
                     "loss_increase": loss_increase,
                 }
 
-            log.info(f"  {key}: max loss increase = "
-                     f"{max(v['loss_increase'] for v in results['knockout_losses'][key].values()):.4f}")
+            log.info(
+                f"  {key}: max loss increase = "
+                f"{max(v['loss_increase'] for v in results['knockout_losses'][key].values()):.4f}"
+            )
 
     del model
     return results
@@ -359,7 +358,7 @@ def _extract_step(checkpoint_dir: str) -> int:
             return int(part)
         except ValueError:
             continue
-    for part in basename.split('_'):
+    for part in basename.split("_"):
         try:
             return int(part)
         except ValueError:

@@ -102,6 +102,8 @@ exclude = '''
 [tool.isort]
 profile = "black"
 multi_line_output = 3
+known_first_party = ["olmo_core"]
+known_local_folder = ["constants", "routing_analysis", "single_train_launch", "slurm_job", "train_sweep", "utils"]
 
 [tool.ruff]
 line-length = 100

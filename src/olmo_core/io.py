@@ -709,7 +709,9 @@ def _http_get_bytes_range(url: str, bytes_start: int, num_bytes: int) -> bytes:
     # Some web servers silently ignore range requests and send everything
     # assert len(result) == num_bytes, f"expected {num_bytes} bytes, got {len(result)}"
     if len(result) != num_bytes:
-        raise requests.exceptions.HTTPError(f"{response.status_code}: {response.text}. expected {num_bytes} bytes, got {len(result)}")
+        raise requests.exceptions.HTTPError(
+            f"{response.status_code}: {response.text}. expected {num_bytes} bytes, got {len(result)}"
+        )
 
     return result
 
