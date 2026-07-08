@@ -255,6 +255,7 @@ def _(json, pd):
         keep_arch,
         pow2_ticks,
         router_field,
+        shade_color,
     )
 
 
@@ -652,6 +653,7 @@ def _(
     keep_arch,
     pd,
     plt,
+    shade_color,
 ):
     def _factor_value(row, col):
         """Read a regularizer column as a float; blank/NaN means 'baseline'."""
@@ -740,11 +742,21 @@ def _(
             series[key][reps] = min(loss, prev) if prev is not None else float(loss)
 
         # Color encodes the model type; line style encodes the factor value.
+        # Within a model-type color, the factor value also sets the shade: baseline is
+        # the darkest, higher factor values are progressively lighter.
         ordered_buckets = ["baseline"] + sorted(factor_values) + extra_buckets
         color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
         dash_cycle = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
         factor_dash = {
             b: dash_cycle[i % len(dash_cycle)] for i, b in enumerate(ordered_buckets)
+        }
+        # Shade level per bucket: 0.0 (darkest) for baseline up to LIGHTEST for the
+        # last bucket, spread evenly. With a single bucket everything stays darkest.
+        _LIGHTEST = 0.65
+        _n = len(ordered_buckets)
+        bucket_shade = {
+            b: (_LIGHTEST * i / (_n - 1) if _n > 1 else 0.0)
+            for i, b in enumerate(ordered_buckets)
         }
 
         fig, ax = plt.subplots(figsize=(6.5, 4.5))
@@ -785,7 +797,7 @@ def _(
                 markersize=3,
                 linewidth=1.2,
                 linestyle=factor_dash[fval_key],
-                color=color_map[model_type],
+                color=shade_color(color_map[model_type], bucket_shade[fval_key]),
                 label=full_label,
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
