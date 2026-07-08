@@ -699,6 +699,7 @@ class NumpyFSLDatasetMixture(NumpyFSLDataset):
         *paths: PathOrStr,
         path_offset_index: Dict[Tuple[str, int], int],
         seed: int,
+        sample_mode: str = "random",
         sequence_length: int,
         pad_token_id: int,
         eos_token_id: int,
@@ -739,12 +740,18 @@ class NumpyFSLDatasetMixture(NumpyFSLDataset):
         self._instances_per_bucket: Optional[Tuple[Tuple[int, int], ...]] = None
         self._path_offset_index = path_offset_index
         self._seed = seed
+        self._sample_mode = sample_mode
 
     @property
     def indices_dtype(
         self,
     ) -> NumpyUIntTypes:
-        return np.uint32
+        # uint64, not uint32: these instance indices are within-shard token offsets, and some
+        # sources (e.g. dolma3 / OLMo-mix-0925 shards average ~6.2B tokens) exceed 2**32, which
+        # overflows uint32 in segment_documents_into_instances. The dtype name is part of the
+        # index-cache key (_get_instance_indices_path), so this does not corrupt existing uint32
+        # caches -- they simply get rebuilt under a uint64 key.
+        return np.uint64
 
     def prepare(self):
         if self.fs_local_rank == 0:
@@ -791,6 +798,7 @@ class NumpyFSLDatasetMixture(NumpyFSLDataset):
                             dtype=self.dtype,
                             indices_dtype=self.indices_dtype,
                             sample=(max_instances, self._seed),
+                            sample_mode=self._sample_mode,
                         )
                         futures.append(future)
 
@@ -2547,6 +2555,12 @@ class NumpyFSLDatasetConfig(NumpyDatasetConfig):
     """
     A source mixture dataset config. If set, the dataset will be built from a mixture of sources.
     """
+    mixture_sample_mode: str = "random"
+    """
+    How to select instances from each source when building a mixture: ``"random"`` (default,
+    sample with replacement) or ``"prefix"`` (deterministic, fully-distinct, nested across
+    repetition levels). Only used when ``source_mixture_config`` is set.
+    """
 
     @classmethod
     def from_src_mix(
@@ -2595,6 +2609,7 @@ class NumpyFSLDatasetConfig(NumpyDatasetConfig):
                 generate_doc_lengths=self.generate_doc_lengths,
                 bos_token_id=self.tokenizer.bos_token_id,
                 instance_filter_config=self.instance_filter_config,
+                sample_mode=self.mixture_sample_mode,
             )
             return self._finalize(dataset)
 

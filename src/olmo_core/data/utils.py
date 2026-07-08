@@ -544,12 +544,16 @@ def segment_documents_into_instances(
     ] = np.uint32,
     bos_token_id: Optional[int] = None,
     sample: Optional[Tuple[int, int]] = None,
+    sample_mode: str = "random",
 ) -> Tuple[int, int]:
     """
     Segment documents into instances of at most ``sequence_length`` tokens.
     Saving the indices of the instances to ``target``.
 
     Sample a subset of the instances if ``sample`` is provided as a tuple of ``(max_instances, seed)``.
+    ``sample_mode`` controls how: ``"random"`` (default) samples with replacement (original
+    behavior); ``"prefix"`` takes a count-independent seeded permutation prefix, giving a
+    deterministic, fully-distinct subset that is nested across different ``max_instances``.
 
     Returns the number of original documents and the number of resulting instances documents.
     """
@@ -567,7 +571,24 @@ def segment_documents_into_instances(
     if sample is not None:
         max_instances, seed = sample
         rng = get_rng(seed)
-        indices = rng.choice(indices.reshape(-1, 2), size=max_instances).reshape(-1)
+        pairs = indices.reshape(-1, 2)
+        if sample_mode == "prefix":
+            # Deterministic, nested, full-coverage selection: permute all instances with a
+            # count-independent seed and take the first ``max_instances``. Because the permutation
+            # does not depend on ``max_instances``, a smaller selection is a strict prefix-subset of
+            # a larger one (e.g. an 8x-repetition unique pool nests inside the 4x pool), and no
+            # instance is drawn more than once.
+            take = min(int(max_instances), len(pairs))
+            perm = rng.permutation(len(pairs))
+            indices = pairs[perm[:take]].reshape(-1)
+        elif sample_mode == "random":
+            # Original behavior: sample with replacement (nested by the sequential-draw property
+            # of a fixed-seed RNG, but only ~63% distinct coverage when max_instances ~ population).
+            indices = rng.choice(pairs, size=max_instances).reshape(-1)
+        else:
+            raise ValueError(
+                f"Unknown sample_mode '{sample_mode}' (expected 'random' or 'prefix')"
+            )
 
     if indices.size == 0:
         raise RuntimeError(f"Failed to produce any documents from '{path}'")

@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import pickle
+import random
 import re
 import shutil
 import time
@@ -90,7 +91,7 @@ def resource_path(folder: PathOrStr, fname: str, local_cache: Optional[PathOrStr
         log.info(f"Found local cache of {fname} at {local_path}")
         return local_path
     else:
-        return cached_path(f"{folder}/{fname}", quiet=True)
+        return _cached_path_with_retry(f"{folder}/{fname}")
 
 
 def is_url(path: PathOrStr) -> bool:
@@ -548,7 +549,9 @@ def deserialize_from_tensor(data: torch.Tensor) -> Any:
 
 
 def _wait_before_retry(attempt: int):
-    time.sleep(min(0.5 * 2**attempt, 3.0))
+    # Exponential backoff capped at 3s, plus jitter so many concurrent readers that hit the same
+    # rate limit (HTTP 429) don't retry in lockstep and immediately re-trip it.
+    time.sleep(min(0.5 * 2**attempt, 3.0) + random.uniform(0.0, 0.5))
 
 
 def _format_bytes(num: Union[int, float], suffix="B") -> str:
@@ -602,6 +605,21 @@ def retriable(
     return decorator
 
 
+@retriable(
+    max_attempts=20,
+    retry_condition=lambda exc: (
+        isinstance(exc, requests.exceptions.HTTPError)
+        and exc.response is not None
+        and (exc.response.status_code >= 500 or exc.response.status_code == 429)
+    ),
+)
+def _cached_path_with_retry(url: str) -> Path:
+    # Resolve/download a remote resource via cached_path, retrying transient server errors (5xx)
+    # and rate limits (429). The metadata (.csv.gz) fetches during dataset prep go through here,
+    # and olmo-data.org intermittently returns transient 500/429 that would otherwise abort prep.
+    return cached_path(url, quiet=True)
+
+
 ######################
 ## HTTPS IO helpers ##
 ######################
@@ -622,27 +640,58 @@ def _get_http_session() -> requests.Session:
 
 
 @retriable(
-    max_attempts=10, retry_condition=lambda exc: isinstance(exc, requests.exceptions.HTTPError)
+    max_attempts=20,
+    retry_condition=lambda exc: (
+        # olmo-data.org (Cloudflare) intermittently soft-blocks HEAD requests during shard
+        # sizing, returning a rate-limit/challenge response with no content-length (raised
+        # below as OLMoNetworkError) or a transient 429/5xx. Both are transient -- retry with
+        # jittered backoff rather than aborting data prep on the first flake.
+        isinstance(exc, OLMoNetworkError)
+        or (
+            isinstance(exc, requests.exceptions.HTTPError)
+            and exc.response is not None
+            and (exc.response.status_code >= 500 or exc.response.status_code == 429)
+        )
+    ),
 )
 def _http_file_size(url: str) -> int:
     session = _get_http_session()
-    response = session.head(url, allow_redirects=True)
-    content_length = response.headers.get("content-length")
-    if content_length is None:
-        raise OLMoNetworkError(
-            f"No content-length header found for {url}. "
-            f"This can happen when the server is rate-limiting requests or when DDoS protection flags this request. "
-            f"Headers: {dict(response.headers)}"
-        )
-    return int(content_length)
+    # Prefer a cheap HEAD. But olmo-data.org (Cloudflare) soft-blocks / strips content-length on
+    # HEAD once a burst of size probes trips rate-limiting (a few hundred HEADs is enough), so when
+    # HEAD doesn't yield a content-length we fall back to a single-byte ranged GET -- the same
+    # request type the data loader streams with successfully -- and read the total size from the
+    # Content-Range header (`bytes 0-0/<total>`).
+    head_resp = session.head(url, allow_redirects=True)
+    if head_resp.status_code < 400:
+        content_length = head_resp.headers.get("content-length")
+        if content_length is not None:
+            return int(content_length)
+
+    range_resp = session.get(url, headers={"Range": "bytes=0-0"}, allow_redirects=True)
+    range_resp.raise_for_status()
+    content_range = range_resp.headers.get("content-range")
+    if content_range and "/" in content_range:
+        total = content_range.rsplit("/", 1)[-1].strip()
+        if total.isdigit():
+            return int(total)
+    # Some servers ignore the Range and return 200 with the full body + a content-length.
+    range_cl = range_resp.headers.get("content-length")
+    if range_resp.status_code == 200 and range_cl is not None:
+        return int(range_cl)
+
+    raise OLMoNetworkError(
+        f"Could not determine the size of {url} from HEAD (status {head_resp.status_code}) or a "
+        f"ranged GET. This can happen when the server is rate-limiting or DDoS-flagging requests. "
+        f"HEAD headers: {dict(head_resp.headers)}; GET headers: {dict(range_resp.headers)}"
+    )
 
 
 @retriable(
-    max_attempts=10,
+    max_attempts=20,
     retry_condition=lambda exc: (
         isinstance(exc, requests.exceptions.HTTPError)
         and exc.response is not None
-        and exc.response.status_code >= 500
+        and (exc.response.status_code >= 500 or exc.response.status_code == 429)
     ),
 )
 def _http_get_bytes_range(url: str, bytes_start: int, num_bytes: int) -> bytes:
