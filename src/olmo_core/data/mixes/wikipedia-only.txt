@@ -1,0 +1,2 @@
+wikipedia,preprocessed/olmo-mix/danyh-compiled-v1_7/documents/wiki/{TOKENIZER}/part-0-00000.npy
+wikipedia,preprocessed/olmo-mix/danyh-compiled-v1_7/documents/wiki/{TOKENIZER}/part-1-00000.npy

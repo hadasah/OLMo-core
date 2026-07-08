@@ -22,6 +22,7 @@ Usage:
 import argparse
 import json
 import logging
+import numpy as np
 import os
 from typing import Dict, List
 
@@ -32,30 +33,36 @@ log = logging.getLogger(__name__)
 
 
 def load_model_from_checkpoint(checkpoint_path: str, device: str = "cpu"):
-    """Load a model from an OLMo-core checkpoint directory."""
+    """Load a model from an OLMo-core distributed-checkpoint directory.
+
+    Expected layout (Layout A — OLMo-core FSDP/DDP):
+        checkpoint_path/
+            config.json
+            model_and_optim/   ← directory of .distcp shards
+            train/
+    """
     from olmo_core.nn.transformer import TransformerConfig
+    from olmo_core.distributed.checkpoint import load_model_and_optim_state
 
     config_path = os.path.join(checkpoint_path, "config.json")
     if not os.path.exists(config_path):
-        # Try parent directory for config
+        # Fallback: config may live at the sweep level rather than per-step
         config_path = os.path.join(os.path.dirname(checkpoint_path), "config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"No config.json found at or above {checkpoint_path}")
 
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            config_dict = json.load(f)
-        model_config = TransformerConfig.from_dict(config_dict.get("model", config_dict))
-    else:
-        raise FileNotFoundError(f"No config found at {config_path}")
-
+    with open(config_path) as f:
+        config_dict = json.load(f)
+    model_config = TransformerConfig.from_dict(config_dict.get("model", config_dict))
     model = model_config.build(init_device=device)
 
-    # Load weights
-    weights_path = os.path.join(checkpoint_path, "model.pt")
-    if os.path.exists(weights_path):
-        state_dict = torch.load(weights_path, map_location=device)
-        model.load_state_dict(state_dict)
-    else:
-        log.warning(f"No model weights found at {weights_path}")
+    model_and_optim_path = os.path.join(checkpoint_path, "model_and_optim")
+    if not os.path.isdir(model_and_optim_path):
+        raise FileNotFoundError(
+            f"No model_and_optim/ directory at {model_and_optim_path}. "
+            f"This script expects OLMo-core distributed checkpoints."
+        )
+    load_model_and_optim_state(model_and_optim_path, model)
 
     model.eval()
     return model
@@ -130,7 +137,9 @@ def analyze_ossification(
     results = {"steps": [], "stability_rates": {}}
     prev_decisions = None
 
-    for ckpt_dir in sorted(checkpoint_dirs):
+    # checkpoint_dirs is already sorted by step from find_checkpoints; do NOT re-sort here
+    # with default (lexicographic) ordering, which would put step1000 before step200.
+    for ckpt_dir in sorted(checkpoint_dirs, key=_extract_step):
         step = _extract_step(ckpt_dir)
         log.info(f"  Loading checkpoint at step {step}...")
 
@@ -201,14 +210,38 @@ def analyze_expert_knockout(
             results["knockout_losses"][key] = {}
 
             num_experts = router.num_experts
+            expert_mlp = experts.mlp
+
+            # OLMo-core's MoEMLP / DroplessMoEMLP flatten the first 2 dims of expert
+            # weight tensors as [num_experts * stride, ...] for FSDP-friendly sharding.
+            # To zero expert e we must zero a CONTIGUOUS slice of `stride` rows, not row e.
+            #   DroplessMoEMLP: w1, w2, w3 all have shape [num_experts * hidden_size, d_model]
+            #   MoEMLP:         w1, w3 are [num_experts * d_model, hidden_size]
+            #                   w2     is [num_experts * hidden_size, d_model]
+            d_model = expert_mlp.d_model
+            hidden_size = expert_mlp.hidden_size
+            mlp_cls_name = type(expert_mlp).__name__
+
+            def stride_for(name: str):
+                if mlp_cls_name == "DroplessMoEMLP":
+                    return hidden_size
+                if mlp_cls_name == "MoEMLP":
+                    return hidden_size if name == "w2" else d_model
+                return None  # unknown layout, will be skipped
+
             for expert_id in range(num_experts):
-                # Zero out the expert's weights temporarily
                 original_weights = {}
-                expert_mlp = experts.mlp
                 for name, param in expert_mlp.named_parameters():
-                    if param.dim() >= 2 and param.shape[0] >= num_experts:
-                        original_weights[name] = param.data[expert_id].clone()
-                        param.data[expert_id].zero_()
+                    stride = stride_for(name)
+                    if stride is None:
+                        continue
+                    expected_dim0 = num_experts * stride
+                    if param.dim() < 2 or param.shape[0] != expected_dim0:
+                        continue
+                    start = expert_id * stride
+                    end = (expert_id + 1) * stride
+                    original_weights[name] = param.data[start:end].clone()
+                    param.data[start:end].zero_()
 
                 with torch.no_grad():
                     ko_output = model(eval_input_ids.to(device), labels=labels.to(device))
@@ -220,7 +253,10 @@ def analyze_expert_knockout(
                 # Restore weights
                 for name, param in expert_mlp.named_parameters():
                     if name in original_weights:
-                        param.data[expert_id] = original_weights[name]
+                        stride = stride_for(name)
+                        start = expert_id * stride
+                        end = (expert_id + 1) * stride
+                        param.data[start:end] = original_weights[name]
 
                 loss_increase = ko_loss - baseline_loss
                 results["knockout_losses"][key][expert_id] = {
@@ -310,9 +346,14 @@ def analyze_co_activation(
 
 def _extract_step(checkpoint_dir: str) -> int:
     """Extract the training step number from a checkpoint directory name."""
-    basename = os.path.basename(checkpoint_dir.rstrip("/"))
-    # Common patterns: "step-1000", "step_1000", "1000"
-    for part in basename.split("-"):
+    import re
+    basename = os.path.basename(checkpoint_dir.rstrip('/'))
+    # OLMo-core default pattern: "step1000", "step1526", etc. (no separator)
+    m = re.match(r"step(\d+)$", basename)
+    if m:
+        return int(m.group(1))
+    # Fallbacks: "step-1000", "step_1000", or just "1000"
+    for part in basename.split('-'):
         try:
             return int(part)
         except ValueError:
@@ -326,53 +367,54 @@ def _extract_step(checkpoint_dir: str) -> int:
 
 
 def find_checkpoints(save_dir: str) -> List[str]:
-    """Find all checkpoint directories sorted by step."""
+    """Find all OLMo-core checkpoint directories (step*/model_and_optim/) sorted by step."""
     checkpoints = []
     for entry in os.listdir(save_dir):
         full_path = os.path.join(save_dir, entry)
-        if os.path.isdir(full_path) and any(
-            f.endswith(".pt")
-            for f in os.listdir(full_path)
-            if os.path.isfile(os.path.join(full_path, f))
-        ):
+        if not os.path.isdir(full_path):
+            continue
+        # OLMo-core layout: a checkpoint dir contains a model_and_optim/ subdir of .distcp files.
+        if os.path.isdir(os.path.join(full_path, "model_and_optim")):
             checkpoints.append(full_path)
-
     return sorted(checkpoints, key=_extract_step)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Post-training routing analysis for A+C experiments"
-    )
-    parser.add_argument(
-        "--checkpoint_dir",
-        type=str,
-        required=True,
-        help="Directory containing training checkpoints",
-    )
-    parser.add_argument(
-        "--analysis",
-        nargs="+",
-        choices=["ossification", "knockout", "co_activation", "all"],
-        default=["all"],
-        help="Which analyses to run",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=None,
-        help="Directory to save results (defaults to checkpoint_dir/routing_analysis)",
-    )
-    parser.add_argument("--device", type=str, default="cpu", help="Device to run analysis on")
-    parser.add_argument(
-        "--num_eval_batches", type=int, default=4, help="Number of evaluation batches to use"
-    )
-    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for evaluation")
-    parser.add_argument(
-        "--seq_length", type=int, default=2048, help="Sequence length for evaluation"
-    )
+    parser = argparse.ArgumentParser(description="Post-training routing analysis for A+C experiments")
+    parser.add_argument("--checkpoint_dir", type=str, required=True,
+                        help="Directory containing training checkpoints")
+    parser.add_argument("--analysis", nargs="+",
+                        choices=["ossification", "knockout", "co_activation", "all"],
+                        default=["all"],
+                        help="Which analyses to run")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Directory to save results (defaults to checkpoint_dir/routing_analysis)")
+    parser.add_argument("--device", type=str, default="cpu",
+                        help="Device to run analysis on")
+    parser.add_argument("--num_eval_batches", type=int, default=4,
+                        help="Number of evaluation batches to use")
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Batch size for evaluation")
+    parser.add_argument("--seq_length", type=int, default=2048,
+                        help="Sequence length for evaluation")
+    parser.add_argument("--data_path", type=str, default=None,
+                        help="Path to a tokenized .npy file to use for evaluation "
+                             "(e.g. a v3-small-ppl-validation file). If omitted, falls "
+                             "back to random tokens (knockout / co-activation will be "
+                             "uninformative on random input — only ossification is meaningful).")
 
     args = parser.parse_args()
+
+    # OLMo-core's distributed checkpoint loader (torch.distributed.checkpoint) requires an
+    # initialized process group, even on a single GPU. Spin up a 1-rank gloo group.
+    import torch.distributed as dist
+    if not dist.is_initialized():
+        os.environ.setdefault("MASTER_ADDR", "localhost")
+        os.environ.setdefault("MASTER_PORT", "29500")
+        os.environ.setdefault("WORLD_SIZE", "1")
+        os.environ.setdefault("RANK", "0")
+        os.environ.setdefault("LOCAL_RANK", "0")
+        dist.init_process_group(backend="gloo", rank=0, world_size=1)
 
     analyses = set(args.analysis)
     if "all" in analyses:
@@ -381,9 +423,28 @@ if __name__ == "__main__":
     output_dir = args.output_dir or os.path.join(args.checkpoint_dir, "routing_analysis")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Create dummy eval data (in practice, load from the actual validation set)
-    log.info("Creating evaluation data...")
-    eval_input_ids = torch.randint(0, 50257, (args.batch_size, args.seq_length))
+    log.info("Preparing evaluation data...")
+    total_needed = args.batch_size * args.seq_length
+    if args.data_path is not None:
+        log.info(f"  Loading real tokens from {args.data_path}")
+        # OLMo-core stores tokens as raw binary (no .npy header) — use np.memmap, not np.load.
+        # dolma2 vocab is 100,278 so tokens require uint32 (uint16 caps at 65535).
+        raw_tokens = np.memmap(args.data_path, dtype=np.uint32, mode='r')
+        log.info(f"  Token array dtype={raw_tokens.dtype}, total tokens={raw_tokens.size}")
+        if raw_tokens.size < total_needed:
+            raise ValueError(
+                f"Eval file has {raw_tokens.size} tokens but need "
+                f"{total_needed} (batch_size {args.batch_size} x seq_length {args.seq_length})"
+            )
+        tokens_slice = np.asarray(raw_tokens[:total_needed]).astype(np.int64)
+        eval_input_ids = torch.from_numpy(tokens_slice).view(args.batch_size, args.seq_length)
+    else:
+        log.warning(
+            "No --data_path provided — falling back to RANDOM tokens. "
+            "Knockout and co-activation results will be uninformative; only ossification is meaningful."
+        )
+        eval_input_ids = torch.randint(0, 50257, (args.batch_size, args.seq_length))
+
     labels = eval_input_ids.clone()
     labels[:, :-1] = eval_input_ids[:, 1:]
     labels[:, -1] = -100
