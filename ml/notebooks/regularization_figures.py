@@ -819,17 +819,20 @@ def _(
                 Line2D([0], [0], color=color_map[m], linewidth=2, linestyle="-")
                 for m in model_order
             ]
-            # Section 2: line style -> factor value (black/grey lines).
+            # Section 2: line style -> factor value. Shade the key from black (first
+            # bucket, solid) to light grey (last bucket), mirroring the data lines.
             bucket_order = [b for b in ordered_buckets if b in shown_buckets]
+            _nb = len(bucket_order)
+            _grey_top = 0.7  # lightest grey level for the last bucket
             bucket_handles = [
                 Line2D(
                     [0],
                     [0],
-                    color="#333333",
+                    color=shade_color("#000000", _grey_top * i / (_nb - 1) if _nb > 1 else 0.0),
                     linewidth=1.5,
                     linestyle=factor_dash[b],
                 )
-                for b in bucket_order
+                for i, b in enumerate(bucket_order)
             ]
             leg1 = ax.legend(
                 model_handles,
