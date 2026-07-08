@@ -752,7 +752,7 @@ def _(
         }
         # Shade level per bucket: 0.0 (darkest) for baseline up to LIGHTEST for the
         # last bucket, spread evenly. With a single bucket everything stays darkest.
-        _LIGHTEST = 0.65
+        _LIGHTEST = 0.4
         _n = len(ordered_buckets)
         bucket_shade = {
             b: (_LIGHTEST * i / (_n - 1) if _n > 1 else 0.0)
