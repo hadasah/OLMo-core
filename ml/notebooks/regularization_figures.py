@@ -461,8 +461,8 @@ def _(
                 xs,
                 ys,
                 marker="o",
-                markersize=6,
-                linewidth=2,
+                markersize=4,
+                linewidth=1.2,
                 linestyle=dash_map[model_type],
                 color=color_map[model_type],
                 label=model_type,
@@ -475,7 +475,10 @@ def _(
         ax.set_ylabel(metric)
         ax.set_title(title, fontsize=10)
         if any_data:
+            # plt.rcParams['legend.numpoints'] = 1
             ax.legend(fontsize=8)
+            from matplotlib.legend_handler import HandlerLine2D
+            # ax.legend(fontsize=8, handler_map={plt.Line2D: HandlerLine2D(numpoints=)})
         fig.tight_layout()
         return fig
 
@@ -608,8 +611,8 @@ def _(mo):
     mo.md(r"""
     ## Group 3 — Regularizer sweeps: dropout, weight decay & max grad norm
 
-    Model type is encoded as **line style** (solid = dense, dotted = moe32,
-    dashed = moe64). Baseline vs. each regularizer value is encoded as **color**.
+    Model type is encoded as **color** (blue = dense, green = moe32, red = moe64).
+    Baseline vs. each regularizer value is encoded as **line style**.
     X axis is the repetition count (log); Y is the chosen metric. Runs are restricted
     to the `olmo_mix` mixture at 80M scale (where the regularizer sweeps live). Note
     the sweeps currently only cover dense and moe64. For max grad norm, the baseline
@@ -707,11 +710,13 @@ def _(
             prev = series[key].get(reps)
             series[key][reps] = min(loss, prev) if prev is not None else float(loss)
 
-        # Color encodes the factor value; line style encodes the model type.
+        # Color encodes the model type; line style encodes the factor value.
         ordered_buckets = ["baseline"] + sorted(factor_values) + extra_buckets
-        palette = ["#2ca02c", "#1f77b4", "#d62728", "#9467bd", "#ff7f0e", "#8c564b"]
-        color_map = {b: palette[i % len(palette)] for i, b in enumerate(ordered_buckets)}
-        dash_map = {"dense": "-", "moe32": ":", "moe64": "--"}
+        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
+        dash_cycle = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
+        factor_dash = {
+            b: dash_cycle[i % len(dash_cycle)] for i, b in enumerate(ordered_buckets)
+        }
 
         fig, ax = plt.subplots(figsize=(6.5, 4.5))
         any_data = False
@@ -732,15 +737,14 @@ def _(
                 label_val = fval_key
             else:
                 label_val = f"{factor_label}={fval_key:g}"
-            line_color = color_map[fval_key]
             ax.plot(
                 xs,
                 ys,
                 marker="o",
-                markersize=5,
-                linewidth=2,
-                linestyle=dash_map[model_type],
-                color=line_color,
+                markersize=3,
+                linewidth=1.2,
+                linestyle=factor_dash[fval_key],
+                color=color_map[model_type],
                 label=f"{model_type}, {label_val}",
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
@@ -748,7 +752,7 @@ def _(
         ax.set_ylabel(metric)
         ax.set_title(
             f"{factor_label} — {metric} (olmo_mix, 80M)\n"
-            f"solid=dense / dotted=moe32 / dashed=moe64",
+            f"color=arch (blue=dense/green=moe32/red=moe64); line style=value",
             fontsize=10,
         )
         if any_data:
@@ -929,9 +933,9 @@ def _(mo):
     Each figure plots the chosen metric vs. repetition count (log X, power-of-2 ticks)
     with:
 
-    - **line color** = data source (`olmo_mix` baseline, single-source baseline, and the
-      two famB mixes), and
-    - **line style** = model type (solid = dense, dotted = moe32, dashed = moe64).
+    - **line color** = model type (blue = dense, green = moe32, red = moe64), and
+    - **line style** = data source (`olmo_mix` baseline, single-source baseline, and
+      the two famB mixes).
 
     The `olmo_mix` and single-source lines are **baseline** runs (tag `baseline`);
     duplicate baseline runs at a rep count keep the lowest value (see Group 1 & 2).
@@ -981,14 +985,19 @@ def _(
 
         `sources` is an ordered list of (label, color, kind, key) tuples where kind is
         either "baseline" (key = data tag, uses baseline runs at 80M) or "famB"
-        (key = run-name substring).
+        (key = run-name substring). The per-source color is ignored: color now encodes
+        the model type and line style encodes the source.
 
         Filters (all default to no-op):
 
         - ``include_archs`` / ``exclude_archs``: keep/drop architectures.
         - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
-        dash_map = {"dense": "-", "moe32": ":", "moe64": "--"}
+        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
+        dash_cycle = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
+        source_dash = {
+            src[0]: dash_cycle[i % len(dash_cycle)] for i, src in enumerate(sources)
+        }
         fig, ax = plt.subplots(figsize=(6.0, 5.0))
         max_reps = 0
         any_data = False
@@ -1013,8 +1022,8 @@ def _(
                     marker="o",
                     markersize=5,
                     linewidth=2,
-                    linestyle=dash_map[model_type],
-                    color=color,
+                    linestyle=source_dash[label],
+                    color=color_map[model_type],
                     label=f"{label}, {model_type}",
                 )
         apply_pow2_xaxis(ax, max_reps, any_data)
@@ -1038,7 +1047,7 @@ def _(metric_multiselect):
 
 @app.cell(hide_code=True)
 def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_sc):
-    # Plot 1: starcoder family. Color = source; dash = model type.
+    # Plot 1: starcoder family. Color = model type; line style = source.
     _sources = [
         ("olmo_mix", "#1f77b4", "baseline", "olmo_mix"),
         ("starcoder", "#2ca02c", "baseline", "starcoder"),
@@ -1065,7 +1074,7 @@ def _(metric_multiselect):
 
 @app.cell(hide_code=True)
 def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_p2o):
-    # Plot 2: pes2o family. Color = source; dash = model type.
+    # Plot 2: pes2o family. Color = model type; line style = source.
     _sources = [
         ("olmo_mix", "#1f77b4", "baseline", "olmo_mix"),
         ("pes2o", "#2ca02c", "baseline", "pes2o"),
