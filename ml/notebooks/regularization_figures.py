@@ -39,11 +39,17 @@ def _():
     import os
     import re
 
+    import matplotlib
+
+    matplotlib.use("Agg")  # non-interactive backend: no GUI/browser needed for PDF export
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
     import numpy as np
     import pandas as pd
-    import plotly.graph_objects as go
+    import seaborn as sns
 
-    return glob, go, os, pd, re
+    sns.set_theme(style="whitegrid", context="notebook")
+    return glob, os, pd, plt, re
 
 
 @app.cell(hide_code=True)
@@ -269,17 +275,17 @@ def _(os):
         return "".join(keep).strip("_")
 
     def save_pdf(fig, plot_key: str, metric: str):
-        """Write `fig` to ml/figures/<plot_key>__<metric>.pdf.
+        """Write matplotlib `fig` to ml/figures/<plot_key>__<metric>.pdf.
 
-        Silently skips (with a printed note) if the static-image backend (kaleido)
-        is unavailable, so the notebook never fails just because PDFs can't render.
+        matplotlib's PDF backend is pure-Python (no browser/kaleido needed), so this
+        is reliable. Failures are caught so the notebook never crashes on export.
         """
         os.makedirs(FIGURES_DIR, exist_ok=True)
         fname = f"{_sanitize(plot_key)}__{_sanitize(metric)}.pdf"
         path = os.path.join(FIGURES_DIR, fname)
         try:
-            fig.write_image(path)
-        except Exception as e:  # pragma: no cover - backend/env dependent
+            fig.savefig(path, bbox_inches="tight")
+        except Exception as e:  # pragma: no cover - env dependent
             print(f"NOTE: could not save PDF '{fname}': {type(e).__name__}: {e}")
         return fig
 
@@ -325,8 +331,8 @@ def _(mo, raw_df, save_pdf):
     def render_side_by_side(metrics, build_fig, plot_key):
         """Render one figure per selected metric, laid out side by side.
 
-        `build_fig(metric)` should return a plotly figure for a single metric. Each
-        figure is also saved to ml/figures/ as `<plot_key>__<metric>.pdf`.
+        `build_fig(metric)` should return a matplotlib figure for a single metric.
+        Each figure is also saved to ml/figures/ as `<plot_key>__<metric>.pdf`.
         """
         if not metrics:
             return mo.md("*Select at least one metric.*")
@@ -359,11 +365,11 @@ def _(
     get_model_type,
     get_reps,
     get_scale,
-    go,
     has_tag,
     keep_arch,
     model_color,
     pd,
+    plt,
     pow2_ticks,
 ):
     def collect_baseline_points(
@@ -408,6 +414,14 @@ def _(
             points.append((reps, best_loss))
         return points
 
+    def apply_pow2_xaxis(ax, max_reps, any_data):
+        """Log2 x-axis with power-of-2 tick labels."""
+        tickvals, ticktext = pow2_ticks(max_reps if any_data else None)
+        ax.set_xscale("log", base=2)
+        ax.set_xticks(tickvals)
+        ax.set_xticklabels(ticktext)
+        ax.minorticks_off()
+
     def make_repetition_figure(
         df: pd.DataFrame,
         data_tag: str,
@@ -429,9 +443,9 @@ def _(
           (``"dense"``, ``"moe32"``, ``"moe64"``).
         - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
-        fig = go.Figure()
+        fig, ax = plt.subplots(figsize=(5.0, 4.5))
         base_color = "#1f77b4"
-        dash_map = {"dense": "solid", "moe32": "dot", "moe64": "dash"}
+        dash_map = {"dense": "-", "moe32": ":", "moe64": "--"}
         any_data = False
         max_reps = 0
         for model_type in ["dense", "moe32", "moe64"]:
@@ -446,33 +460,29 @@ def _(
             ys = [p[1] for p in points]
             max_reps = max(max_reps, max(xs))
             line_color = model_color(base_color, model_type)
-            fig.add_trace(
-                go.Scatter(
-                    x=xs,
-                    y=ys,
-                    mode="lines+markers",
-                    name=model_type,
-                    line=dict(color=line_color, dash=dash_map[model_type], width=2),
-                    marker=dict(size=8, color=line_color),
-                )
+            ax.plot(
+                xs,
+                ys,
+                marker="o",
+                markersize=6,
+                linewidth=2,
+                linestyle=dash_map[model_type],
+                color=line_color,
+                label=model_type,
             )
-        title = f"{data_tag} — {scale}: {metric} vs. repetition (baseline)"
+        title = f"{data_tag} — {scale}\n{metric} vs. repetition (baseline)"
         if not any_data:
             title += "  [no finished baseline runs]"
-        tickvals, ticktext = pow2_ticks(max_reps if any_data else None)
-        fig.update_layout(
-            title=title,
-            xaxis_title="repetition count",
-            yaxis_title=metric,
-            xaxis_type="log",
-            xaxis=dict(tickmode="array", tickvals=tickvals, ticktext=ticktext),
-            template="plotly_white",
-            width=450,
-            height=450,
-        )
+        apply_pow2_xaxis(ax, max_reps, any_data)
+        ax.set_xlabel("repetition count")
+        ax.set_ylabel(metric)
+        ax.set_title(title, fontsize=10)
+        if any_data:
+            ax.legend(fontsize=8)
+        fig.tight_layout()
         return fig
 
-    return collect_baseline_points, make_repetition_figure
+    return apply_pow2_xaxis, collect_baseline_points, make_repetition_figure
 
 
 @app.cell(hide_code=True)
@@ -613,16 +623,16 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    apply_pow2_xaxis,
     filter_rep_points,
     get_model_type,
     get_reps,
     get_scale,
-    go,
     has_tag,
     keep_arch,
     model_color,
     pd,
-    pow2_ticks,
+    plt,
 ):
     def _factor_value(row, col):
         """Read a regularizer column as a float; blank/NaN means 'baseline'."""
@@ -705,19 +715,21 @@ def _(
         ordered_buckets = ["baseline"] + sorted(factor_values) + extra_buckets
         palette = ["#2ca02c", "#1f77b4", "#d62728", "#9467bd", "#ff7f0e", "#8c564b"]
         color_map = {b: palette[i % len(palette)] for i, b in enumerate(ordered_buckets)}
-        dash_map = {"dense": "solid", "moe32": "dot", "moe64": "dash"}
+        dash_map = {"dense": "-", "moe32": ":", "moe64": "--"}
 
-        fig = go.Figure()
+        fig, ax = plt.subplots(figsize=(6.5, 4.5))
+        any_data = False
+        max_reps = 0
         for (model_type, fval_key), pts in sorted(
             series.items(), key=lambda kv: (str(kv[0][1]), kv[0][0])
         ):
-            points = filter_rep_points(
-                sorted(pts.items()), include_reps, exclude_reps
-            )
+            points = filter_rep_points(sorted(pts.items()), include_reps, exclude_reps)
             if not points:
                 continue
+            any_data = True
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
+            max_reps = max(max_reps, max(xs))
             if fval_key == "baseline":
                 label_val = "baseline"
             elif isinstance(fval_key, str):
@@ -725,31 +737,27 @@ def _(
             else:
                 label_val = f"{factor_label}={fval_key:g}"
             line_color = model_color(color_map[fval_key], model_type)
-            fig.add_trace(
-                go.Scatter(
-                    x=xs,
-                    y=ys,
-                    mode="lines+markers",
-                    name=f"{model_type}, {label_val}",
-                    line=dict(color=line_color, dash=dash_map[model_type], width=2),
-                    marker=dict(size=7, color=line_color),
-                )
+            ax.plot(
+                xs,
+                ys,
+                marker="o",
+                markersize=5,
+                linewidth=2,
+                linestyle=dash_map[model_type],
+                color=line_color,
+                label=f"{model_type}, {label_val}",
             )
-        # Power-of-2 ticks based on the largest repetition count present.
-        _all_reps = [x for tr in fig.data for x in tr.x]
-        _max_reps = max(_all_reps) if _all_reps else None
-        _tickvals, _ticktext = pow2_ticks(_max_reps)
-        fig.update_layout(
-            title=f"{factor_label} — {metric} (olmo_mix, 80M)\n"
+        apply_pow2_xaxis(ax, max_reps, any_data)
+        ax.set_xlabel("repetition count")
+        ax.set_ylabel(metric)
+        ax.set_title(
+            f"{factor_label} — {metric} (olmo_mix, 80M)\n"
             f"solid=dense / dotted=moe32 / dashed=moe64",
-            xaxis_title="repetition count",
-            yaxis_title=metric,
-            xaxis_type="log",
-            xaxis=dict(tickmode="array", tickvals=_tickvals, ticktext=_ticktext),
-            template="plotly_white",
-            width=700,
-            height=450,
+            fontsize=10,
         )
+        if any_data:
+            ax.legend(fontsize=7)
+        fig.tight_layout()
         return fig
 
     return (make_factor_figure,)
@@ -846,7 +854,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(get_model_type, go, keep_arch, pd, re):
+def _(get_model_type, keep_arch, pd, plt, re):
     def parse_dclm_pct(name: str):
         """Extract the DCLM percentage from a 'dclm{N}' token in the run name."""
         m = re.search(r"dclm(\d+)", str(name))
@@ -858,7 +866,6 @@ def _(get_model_type, go, keep_arch, pd, re):
         ``include_archs`` / ``exclude_archs`` keep/drop architectures. (There is no
         repetition axis here, so rep filters do not apply.)
         """
-        fig = go.Figure()
         colors = {"dense": "#1f77b4", "moe64": "#d62728", "moe32": "#2ca02c"}
         # Collect points per model type.
         per_type: dict = {}
@@ -875,27 +882,25 @@ def _(get_model_type, go, keep_arch, pd, re):
                 continue
             per_type.setdefault(mt, []).append((pct, float(loss)))
 
+        fig, ax = plt.subplots(figsize=(5.5, 4.5))
         for mt in sorted(per_type):
             pts = sorted(per_type[mt])
-            fig.add_trace(
-                go.Scatter(
-                    x=[p[0] for p in pts],
-                    y=[p[1] for p in pts],
-                    mode="lines+markers",
-                    name=mt,
-                    line=dict(color=colors.get(mt, "#7f7f7f"), width=2),
-                    marker=dict(size=9),
-                )
+            ax.plot(
+                [p[0] for p in pts],
+                [p[1] for p in pts],
+                marker="o",
+                markersize=7,
+                linewidth=2,
+                color=colors.get(mt, "#7f7f7f"),
+                label=mt,
             )
-        fig.update_layout(
-            title=f"famA runs: {metric} vs. %dclm",
-            xaxis_title="% dclm",
-            yaxis_title=metric,
-            xaxis=dict(tickmode="array", tickvals=[0, 25, 50, 75, 100]),
-            template="plotly_white",
-            width=600,
-            height=450,
-        )
+        ax.set_xticks([0, 25, 50, 75, 100])
+        ax.set_xlabel("% dclm")
+        ax.set_ylabel(metric)
+        ax.set_title(f"famA runs: {metric} vs. %dclm", fontsize=10)
+        if per_type:
+            ax.legend(fontsize=8)
+        fig.tight_layout()
         return fig
 
     return (make_famA_figure,)
@@ -940,15 +945,15 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    apply_pow2_xaxis,
     collect_baseline_points,
     filter_rep_points,
     get_model_type,
     get_reps,
-    go,
     keep_arch,
     model_color,
     pd,
-    pow2_ticks,
+    plt,
 ):
     def collect_famB_points(df, name_substr, model_type, metric):
         """Sorted (reps, value) points for famB runs matching a name substring."""
@@ -988,8 +993,8 @@ def _(
         - ``include_archs`` / ``exclude_archs``: keep/drop architectures.
         - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
-        dash_map = {"dense": "solid", "moe32": "dot", "moe64": "dash"}
-        fig = go.Figure()
+        dash_map = {"dense": "-", "moe32": ":", "moe64": "--"}
+        fig, ax = plt.subplots(figsize=(6.0, 5.0))
         max_reps = 0
         any_data = False
         for label, color, kind, key in sources:
@@ -1008,28 +1013,23 @@ def _(
                 ys = [p[1] for p in points]
                 max_reps = max(max_reps, max(xs))
                 line_color = model_color(color, model_type)
-                fig.add_trace(
-                    go.Scatter(
-                        x=xs,
-                        y=ys,
-                        mode="lines+markers",
-                        name=f"{label}, {model_type}",
-                        legendgroup=label,
-                        line=dict(color=line_color, dash=dash_map[model_type], width=2),
-                        marker=dict(size=7, color=line_color),
-                    )
+                ax.plot(
+                    xs,
+                    ys,
+                    marker="o",
+                    markersize=5,
+                    linewidth=2,
+                    linestyle=dash_map[model_type],
+                    color=line_color,
+                    label=f"{label}, {model_type}",
                 )
-        tickvals, ticktext = pow2_ticks(max_reps if any_data else None)
-        fig.update_layout(
-            title=title,
-            xaxis_title="repetition count",
-            yaxis_title=metric,
-            xaxis_type="log",
-            xaxis=dict(tickmode="array", tickvals=tickvals, ticktext=ticktext),
-            template="plotly_white",
-            width=700,
-            height=550,
-        )
+        apply_pow2_xaxis(ax, max_reps, any_data)
+        ax.set_xlabel("repetition count")
+        ax.set_ylabel(metric)
+        ax.set_title(title, fontsize=10)
+        if any_data:
+            ax.legend(fontsize=7)
+        fig.tight_layout()
         return fig
 
     return (make_famB_figure,)
