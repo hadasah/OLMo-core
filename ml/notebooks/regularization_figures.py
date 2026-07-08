@@ -813,6 +813,10 @@ def _(
         if any_data:
             from matplotlib.lines import Line2D
 
+            def _header():
+                # Invisible handle used to render a section-title row in the legend.
+                return Line2D([0], [0], linestyle="none", marker="", label="")
+
             # Section 1: color -> model type (solid lines in each model's color).
             model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
             model_handles = [
@@ -834,27 +838,32 @@ def _(
                 )
                 for i, b in enumerate(bucket_order)
             ]
-            leg1 = ax.legend(
-                model_handles,
-                model_order,
-                title="Model type",
+            # Combine both sections into one legend box with bold section headers.
+            handles = (
+                [_header()]
+                + model_handles
+                + [_header()]
+                + bucket_handles
+            )
+            labels = (
+                ["Model type"]
+                + model_order
+                + [factor_label]
+                + [_bucket_label(b) for b in bucket_order]
+            )
+            legend = ax.legend(
+                handles,
+                labels,
                 fontsize=7,
-                title_fontsize=8,
                 loc="upper left",
                 bbox_to_anchor=(1.02, 1.0),
                 borderaxespad=0.0,
+                handlelength=2.2,
             )
-            leg2 = ax.legend(
-                bucket_handles,
-                [_bucket_label(b) for b in bucket_order],
-                title=factor_label,
-                fontsize=7,
-                title_fontsize=8,
-                loc="upper left",
-                bbox_to_anchor=(1.02, 0.55),
-                borderaxespad=0.0,
-            )
-            ax.add_artist(leg1)
+            # Bold + left-align the section-header rows.
+            for text in legend.get_texts():
+                if text.get_text() in ("Model type", factor_label):
+                    text.set_fontweight("bold")
         fig.tight_layout()
         return fig
 
@@ -1244,6 +1253,9 @@ def _(
         if any_data:
             from matplotlib.lines import Line2D
 
+            def _header():
+                return Line2D([0], [0], linestyle="none", marker="", label="")
+
             # Section 1: color -> model type.
             model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
             model_handles = [
@@ -1256,27 +1268,26 @@ def _(
                 Line2D([0], [0], color="#333333", linewidth=1.5, linestyle=source_dash[s])
                 for s in source_order
             ]
-            leg1 = ax.legend(
-                model_handles,
-                model_order,
-                title="Model type",
+            # Combine both sections into one legend box with bold section headers.
+            handles = [_header()] + model_handles + [_header()] + source_handles
+            labels = (
+                ["Model type"]
+                + model_order
+                + ["Data source"]
+                + source_order
+            )
+            legend = ax.legend(
+                handles,
+                labels,
                 fontsize=7,
-                title_fontsize=8,
                 loc="upper left",
                 bbox_to_anchor=(1.02, 1.0),
                 borderaxespad=0.0,
+                handlelength=2.2,
             )
-            leg2 = ax.legend(
-                source_handles,
-                source_order,
-                title="Data source",
-                fontsize=7,
-                title_fontsize=8,
-                loc="upper left",
-                bbox_to_anchor=(1.02, 0.55),
-                borderaxespad=0.0,
-            )
-            ax.add_artist(leg1)
+            for text in legend.get_texts():
+                if text.get_text() in ("Model type", "Data source"):
+                    text.set_fontweight("bold")
         fig.tight_layout()
         return fig
 
