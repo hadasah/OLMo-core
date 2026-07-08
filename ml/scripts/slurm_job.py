@@ -134,13 +134,14 @@ export NCCL_MIN_CHANNELS=32
 
 # olmo-core specific
 export OLMO_SHARED_FS=1
+export OLMO_CORE_FS_CACHE_DIR=/gscratch/zlab/atindra/fs_cache
 
 {conda_command}
 {init_command}
 cd {NEW_DIR_PATH}
 export PYTHONPATH={SAVE_ROOT}/{repo_name}:$PYTHONPATH
-if [[ "$SLURM_PROCID" == "0" ]]; then 
-    CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per-node=gpu --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT {cmd} 
+if [[ "$SLURM_PROCID" == "0" ]]; then
+    CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per-node=gpu --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT {cmd}
 fi
 echo "# -------- FINISHED CALL TO SRUN --------"
 echo
@@ -352,7 +353,9 @@ def run_grid(
 
             if "subgrids" in value:
                 # Recurse into children, passing down the merged config and name prefix.
-                result.update(flatten_subgrids(value["subgrids"], merged_config, name_prefix=full_name))
+                result.update(
+                    flatten_subgrids(value["subgrids"], merged_config, name_prefix=full_name)
+                )
             else:
                 # Leaf subgrid — emit it.
                 result[full_name] = merged_config
