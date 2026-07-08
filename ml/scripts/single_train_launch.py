@@ -7,6 +7,7 @@ import os
 import traceback
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import List, Optional, cast
 
 import numpy as np
@@ -102,38 +103,37 @@ def get_wandb_tags(
     moe_type,
     unique_data_fraction=1.0,
     num_repetitions=1,
+    train_datamix_name=None,
 ):
     """
     Returns a list of tags for W&B runs based on the current configuration.
     This function can be extended to include more complex logic for generating tags.
     """
     wandb_tags = []
-    if len(moe_num_experts_list) > 1:
-        wandb_tags.append("hetMoE")
-    elif len(moe_num_experts_list) == 1 and moe_num_experts_list[0] > 1:
-        wandb_tags.append("MoE")
+    if len(moe_num_experts_list) == 1 and moe_num_experts_list[0] > 1:
+        wandb_tags.append(f"MoE{','.join([str(m) for m in moe_num_experts_list])}")
     elif len(moe_num_experts_list) == 1 and moe_num_experts_list[0] == 1:
         wandb_tags.append("dense")
     else:
         raise ValueError("moe_num_experts_list must contain at least one element")
-    if moe_type == "dropless":
-        wandb_tags.append("dropless")
     if "5XD" in run_name:
         wandb_tags.append("Data=5C")
     else:
         wandb_tags.append("Data=1C")
-    if moe_generalist_hidden_multiplier > 0:
-        wandb_tags.append(f"{moe_generalist_hidden_multiplier}gen")
-    else:
-        wandb_tags.append("nogen")
 
-    wandb_tags.append(model_name.split("_")[1])  # e.g., "100M", "1B"
+    wandb_tags.append(model_name.replace("olmo2_ml_", ""))  # e.g., "100M", "1B"
 
     if unique_data_fraction < 1.0:
         wandb_tags.append(f"frac{unique_data_fraction}")
         wandb_tags.append(f"rep{num_repetitions}x")
     else:
         wandb_tags.append("rep1x")
+
+    if train_datamix_name:
+        for t in train_datamix_name.split(","):
+            wandb_tags.append(t)
+    else:
+        wandb_tags.append("olmo_mix")
 
     return wandb_tags
 
@@ -181,6 +181,10 @@ def build_config(
     moe_generalist_hidden_multiplier: int = 1,
     moe_type: str = "default",  # "default" or "dropless"
     moe_bias_gamma: Optional[float] = None,
+    moe_jitter_eps: Optional[float] = None,
+    moe_normalize_expert_weights: Optional[float] = None,
+    moe_eom_prob: Optional[float] = None,
+    moe_fom_prob: Optional[float] = None,
     max_grad_norm: float = 1.0,
     moe_z_loss_weight: float = 0.001,
     moe_lb_loss_weight: float = 0.01,
@@ -202,6 +206,10 @@ def build_config(
         moe_generalist_hidden_multiplier=moe_generalist_hidden_multiplier,
         dropless_moe=(moe_type == "dropless"),
         bias_gamma=moe_bias_gamma,
+        jitter_eps=moe_jitter_eps,
+        normalize_expert_weights=moe_normalize_expert_weights,
+        eom_prob=moe_eom_prob,
+        fom_prob=moe_fom_prob,
         z_loss_weight=moe_z_loss_weight,
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
     )
@@ -461,6 +469,10 @@ def main(args: argparse.Namespace, overrides: List[str]) -> None:
             moe_generalist_hidden_multiplier=float(args.moe_generalist_hidden_multiplier),
             moe_type=args.moe_type,
             moe_bias_gamma=args.moe_bias_gamma,
+            moe_jitter_eps=args.moe_jitter_eps,
+            moe_normalize_expert_weights=args.moe_normalize_expert_weights,
+            moe_eom_prob=args.moe_eom_prob,
+            moe_fom_prob=args.moe_fom_prob,
             moe_z_loss_weight=args.moe_z_loss_weight,
             moe_lb_loss_weight=args.moe_lb_loss_weight,
             unique_data_fraction=args.unique_data_fraction,
@@ -598,6 +610,35 @@ if __name__ == "__main__":
         "--moe_bias_gamma", type=float, default=None, help="Gamma value for MoE bias"
     )
     parser.add_argument(
+        "--moe_jitter_eps",
+        type=float,
+        default=None,
+        help="Router jitter epsilon for MoE. Multiplies router input by uniform noise in "
+        "[1 - eps, 1 + eps] during training. Default None (no jitter).",
+    )
+    parser.add_argument(
+        "--moe_normalize_expert_weights",
+        type=float,
+        default=None,
+        help="P-norm order used to normalize expert weights after top-k selection "
+        "(e.g. 1.0 for L1, 2.0 for L2). Default None (no normalization).",
+    )
+    parser.add_argument(
+        "--moe_eom_prob",
+        type=float,
+        default=None,
+        help="Expert Output Masking (EOM) probability. During training, each (token, top-k "
+        "expert) combination weight is independently zeroed with this probability. Does not "
+        "affect the load-balancing/z-losses. Default None (disabled).",
+    )
+    parser.add_argument(
+        "--moe_fom_prob",
+        type=float,
+        default=None,
+        help="Final Output Masking (FOM) probability. During training, the combined MoE output "
+        "for each token is independently zeroed with this probability. Default None (disabled).",
+    )
+    parser.add_argument(
         "--moe_z_loss_weight", type=float, default=0.001, help="Weight for the z-loss in MoE"
     )
     parser.add_argument(
@@ -618,7 +659,7 @@ if __name__ == "__main__":
     )
     args, overrides = parser.parse_known_args()
 
-    prepare_training_environment()
+    prepare_training_environment(timeout=timedelta(hours=3))
     try:
         main(args, overrides=overrides)
     except Exception as e:

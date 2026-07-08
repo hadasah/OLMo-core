@@ -60,7 +60,8 @@ site/
 /scratch/
 core
 /dataset-cache/
-
+data
+models
 
 # notebooks
 __marimo__

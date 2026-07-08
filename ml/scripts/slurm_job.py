@@ -43,6 +43,7 @@ SLRM_JOB_ARRAY_TEMPLATE = """
 {SBATCH_EXTRAS}
 
 source ~/.bashrc
+{init_command}
 {conda_command}
 
 echo "# -------- BEGIN CALL TO run.sh --------"
@@ -135,10 +136,12 @@ export NCCL_MIN_CHANNELS=32
 export OLMO_SHARED_FS=1
 export OLMO_CORE_FS_CACHE_DIR=/gscratch/zlab/atindra/fs_cache
 
+{conda_command}
+{init_command}
 cd {NEW_DIR_PATH}
 export PYTHONPATH={SAVE_ROOT}/{repo_name}:$PYTHONPATH
-if [[ "$SLURM_PROCID" == "0" ]]; then 
-    CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per-node=gpu --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT {cmd} 
+if [[ "$SLURM_PROCID" == "0" ]]; then
+    CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per-node=gpu --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT {cmd}
 fi
 echo "# -------- FINISHED CALL TO SRUN --------"
 echo
@@ -185,6 +188,7 @@ def run_grid(
     dependencies=[],
     repo_name="code",
     conda_env_name=None,
+    init_script_path=None,
     include_jobs_indices=None,
     filter_succeeded=True,
     filter_running=True,
@@ -220,6 +224,7 @@ def run_grid(
     dependencies -- (list) list of job ids that this job depends on
     repo_name -- (str) name of the repository to copy
     conda_env_name -- (str) name of the conda environment to activate
+    init_script -- (str) path to init script
     include_jobs_indices -- (list) list of job indices to include in the sweep
     filter_succeeded -- (bool) if True, filters out jobs that have already
         succeeded (i.e. have a log file with "got exitcode: 0")
@@ -253,7 +258,8 @@ def run_grid(
             name_list.append(subgrid_name)
         for key in name_keys_list:
             value = args_dict.get(key, None)
-            if value is None or isinstance(value, collections.abc.Mapping):
+            # if value is None or isinstance(value, collections.abc.Mapping):
+            if isinstance(value, collections.abc.Mapping):
                 continue
             short_key = key.replace("_", "").split(".")[-1] if "." in key else key
             if isinstance(value, str):
@@ -322,11 +328,43 @@ def run_grid(
 
     all_permutation_dicts = {}
     main_grid = dict_update(deepcopy(default_grid), grid["main_grid"])
-    for subgrid_name, subgrid in grid["subgrids"].items():
-        subgrid_merged = dict_update(deepcopy(main_grid), subgrid)
-        # print(subgrid_merged)
-        all_permutation_dicts[subgrid_name] = list(c_prod(subgrid_merged))
-        name_key_lists[subgrid_name] = get_name_keys(subgrid_merged, name_keys=name_keys)
+
+    def flatten_subgrids(subgrids, parent_config, name_prefix=""):
+        """
+        Recursively flatten nested subgrids into a flat dict of {name: config_dict}.
+
+        Each subgrid entry can contain:
+          - Config values (any key except "subgrids") — merged on top of the parent config.
+          - A "subgrids" key — a dict of child subgrids that inherit this level's config.
+
+        If a subgrid has no "subgrids" key, it's a leaf and produces a single job config.
+
+        Names are built by joining ancestor keys with "_", e.g. "moe64" -> "rep_1x"
+        becomes "moe64_rep_1x".
+        """
+        result = {}
+        for name, value in subgrids.items():
+            if not isinstance(value, dict):
+                continue
+            full_name = f"{name_prefix}_{name}" if name_prefix else name
+            # Separate config entries from nested subgrids.
+            config_entries = {k: v for k, v in value.items() if k != "subgrids"}
+            merged_config = dict_update(deepcopy(parent_config), config_entries)
+
+            if "subgrids" in value:
+                # Recurse into children, passing down the merged config and name prefix.
+                result.update(
+                    flatten_subgrids(value["subgrids"], merged_config, name_prefix=full_name)
+                )
+            else:
+                # Leaf subgrid — emit it.
+                result[full_name] = merged_config
+        return result
+
+    flat_subgrids = flatten_subgrids(grid["subgrids"], main_grid)
+    for subgrid_name, subgrid_config in flat_subgrids.items():
+        all_permutation_dicts[subgrid_name] = list(c_prod(subgrid_config))
+        name_key_lists[subgrid_name] = get_name_keys(subgrid_config, name_keys=name_keys)
 
     # shorten names if possible
     if hashname:
@@ -424,6 +462,8 @@ def run_grid(
                 NEW_DIR_PATH=NEW_DIR_PATH,
                 repo_name=repo_name,
                 job_port=sweep_port_start + i,
+                conda_env_name=conda_env_name,
+                init_script_path=init_script_path,
             )
         )
     submit_array_jobs(
@@ -445,6 +485,7 @@ def run_grid(
         jobs_path=jobs_path,
         dependencies=dependencies,
         conda_env_name=conda_env_name,
+        init_script_path=init_script_path,
     )
 
 
@@ -467,6 +508,8 @@ def create_job_files(
     NEW_DIR_PATH="",
     repo_name="",
     job_port=None,
+    conda_env_name=None,
+    init_script_path=None,
 ):
     """Creates job folders and scripts"""
 
@@ -478,6 +521,8 @@ def create_job_files(
     SCRIPTFILE = os.path.join(SAVE, "run.sh")
     ARGS_STR = " ".join(job_args)
     job_port = job_port or random.randint(RANDOM_PORT_MIN, RANDOM_PORT_MAX)
+    conda_command = f"conda activate {conda_env_name}" if conda_env_name else ""
+    init_command = f"source {init_script_path}" if init_script_path else ""
 
     if data_parallel or not gpus:
         ntasks_per_node = 1
@@ -510,6 +555,7 @@ def submit_array_jobs(
     jobs_path=[],
     dependencies=[],
     conda_env_name=None,
+    init_script_path=None,
     append_to_sbatch_str=None,
 ):
     """Submits the jobs as a SLURM job array."""
@@ -559,6 +605,7 @@ def submit_array_jobs(
         )
 
     conda_command = f"conda activate {conda_env_name}" if conda_env_name else ""
+    init_command = f"source {init_script_path}" if init_script_path else ""
 
     # make sure sbatch extras are a string
     SBATCH_EXTRAS = "\n".join(SBATCH_EXTRAS)

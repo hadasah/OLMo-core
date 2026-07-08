@@ -90,6 +90,7 @@ class MoERouterConfig(ModuleConfig):
     top_k: int = 1
     jitter_eps: Optional[float] = None
     normalize_expert_weights: Optional[float] = None
+    eom_prob: Optional[float] = None
     uniform_expert_assignment: bool = False
     bias_gamma: Optional[float] = None
     gating_function: MoERouterGatingFunction = MoERouterGatingFunction.softmax
@@ -163,6 +164,11 @@ class MoERouter(nn.Module):
     :param jitter_eps: Controls the amount of noise added to the input during training.
     :param normalize_expert_weights: The type of norm (e.g. ``2.0`` for L2 norm) to use to normalize
         the expert weights.
+    :param eom_prob: If set, applies Expert Output Masking (EOM): during training, each
+        (token, top-k expert) combination weight is independently zeroed with this probability.
+        This masks individual expert contributions without affecting the auxiliary load-balancing
+        or z-losses (which are computed from the full routing scores/logits). No rescaling is
+        applied to the surviving weights.
     :param uniform_expert_assignment: Force uniform assignment. Useful for benchmarking.
     :param bias_gamma: If set to a positive float, experts scores for top-k routing will be adjusted
         by a bias following the "auxiliary-loss-free load balancing" strategy from DeepSeek-v3.
@@ -177,6 +183,7 @@ class MoERouter(nn.Module):
         top_k: int = 1,
         jitter_eps: Optional[float] = None,
         normalize_expert_weights: Optional[float] = None,
+        eom_prob: Optional[float] = None,
         uniform_expert_assignment: bool = False,
         bias_gamma: Optional[float] = None,
         gating_function: MoERouterGatingFunction = MoERouterGatingFunction.softmax,
@@ -191,6 +198,7 @@ class MoERouter(nn.Module):
         self.top_k = top_k
         self.jitter_eps = jitter_eps
         self.normalize_expert_weights = normalize_expert_weights
+        self.eom_prob = eom_prob
         self.uniform_expert_assignment = uniform_expert_assignment
         self.bias_gamma = bias_gamma
         self.gating_function = gating_function
@@ -474,6 +482,14 @@ class MoERouter(nn.Module):
                     keepdim=True,
                 )
             )
+
+        # Expert Output Masking (EOM): independently zero each (token, top-k expert) combination
+        # weight with probability `eom_prob` during training. This only affects `expert_weights`
+        # (used to combine expert outputs); the load-balancing and z-losses are computed from
+        # `scores`/`logits`/`expert_indices`, so routing/balancing is unaffected. No rescaling.
+        if self.eom_prob is not None and self.training and torch.is_grad_enabled():
+            keep_mask = torch.empty_like(expert_weights).bernoulli_(1.0 - self.eom_prob)
+            expert_weights = expert_weights * keep_mask
 
         with torch.no_grad():
             # Histogram the expert ids to identify the number of items/tokens routed to each expert.
