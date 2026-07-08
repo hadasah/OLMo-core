@@ -25,8 +25,10 @@ def _(mo):
        runs on the `olmo_mix` mixture — one figure per model scale (80M, 200M).
     2. The same, repeated for each single-source data mixture: `dclm`,
        `starcoder`, `pes2o`, `wiki`.
-    3. Dense / MoE32 / MoE64 (line style) × baseline vs. regularizer value (color),
-       for **dropout** and **weight decay** — loss vs. repetition (log X).
+    3. Regularizer sweeps (**dropout**, **weight decay**, **max grad norm**) —
+       color = model type, line style = regularizer value; loss vs. repetition (log X).
+    3b. MoE-only regularizer sweeps (**jitter_eps**, **EOM**, **FOM**) — same encoding,
+       Dense excluded.
     4. All `famA` runs: loss vs. `%dclm` (0/25/50/75/100 from the run name).
     5. `famB` runs: single-source mixes into `olmo_mix` vs. repetition.
     """)
@@ -36,6 +38,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _():
     import glob
+    import json
     import os
     import re
 
@@ -49,7 +52,7 @@ def _():
     import seaborn as sns
 
     sns.set_theme(style="whitegrid", context="notebook")
-    return glob, os, pd, plt, re
+    return glob, json, os, pd, plt, re
 
 
 @app.cell(hide_code=True)
@@ -92,7 +95,7 @@ def _(DATA_FILE, mo, os, raw_df):
 
 
 @app.cell(hide_code=True)
-def _(pd):
+def _(json, pd):
     # ------------------------------------------------------------------
     # Data filtering + parsing helpers.
     # ------------------------------------------------------------------
@@ -102,7 +105,23 @@ def _(pd):
     DROPOUT_COL = "model.block.dropout"
     WD_COL = "train_module.optim.weight_decay"
     MGN_COL = "train_module.max_grad_norm"
+    FOM_COL = "model.block.feed_forward_moe.fom_prob"
+    ROUTERS_COL = "model.block.feed_forward_moe.routers_list"
     REPS_COL = "data_reps"
+
+    def router_field(row, field):
+        """Read a field (e.g. 'jitter_eps', 'eom_prob') from the first router in the
+        JSON-encoded ``routers_list`` column. Returns None if absent/unparseable."""
+        rl = row.get(ROUTERS_COL)
+        if not isinstance(rl, str):
+            return None
+        try:
+            routers = json.loads(rl)
+        except (ValueError, TypeError):
+            return None
+        if not routers:
+            return None
+        return routers[0].get(field)
 
     # Data-source tags (single-source mixes + the full olmo mix).
     DATA_TAGS = ["olmo_mix", "dclm", "starcoder", "pes2o", "wiki"]
@@ -224,6 +243,7 @@ def _(pd):
 
     return (
         DROPOUT_COL,
+        FOM_COL,
         MGN_COL,
         WD_COL,
         filter_finished,
@@ -234,6 +254,7 @@ def _(pd):
         has_tag,
         keep_arch,
         pow2_ticks,
+        router_field,
     )
 
 
@@ -476,9 +497,8 @@ def _(
         ax.set_title(title, fontsize=10)
         if any_data:
             # plt.rcParams['legend.numpoints'] = 1
-            ax.legend(fontsize=8)
-            from matplotlib.legend_handler import HandlerLine2D
-            # ax.legend(fontsize=8, handler_map={plt.Line2D: HandlerLine2D(numpoints=)})
+            # ax.legend(fontsize=8)
+            ax.legend(fontsize=8, markerscale=0.5)
         fig.tight_layout()
         return fig
 
@@ -654,24 +674,30 @@ def _(
         include_reps=None,
         exclude_reps=None,
         nan_label=None,
+        value_getter=None,
     ):
-        """model type -> line dash + shade; baseline vs each factor value -> base color.
-
-        Within a factor-value color, model type is distinguished by both dash style
-        and shade (dense darkest, moe64 lightest).
+        """color -> model type; line style -> baseline vs each factor value.
 
         `baseline_value` is the value that represents 'no regularization' for this
         column (e.g. dropout baseline = None/blank, weight-decay baseline = 0.1).
 
-        `nan_label`: when set, runs whose column value is NaN/blank are bucketed under
+        `nan_label`: when set, runs whose factor value is NaN/blank are bucketed under
         this label (a real setting, e.g. max_grad_norm=null -> "no clip") instead of
         being merged into "baseline". When None (the default), NaN counts as baseline.
+
+        `value_getter`: optional ``callable(row) -> raw value`` used to read the factor
+        value from a row. Defaults to ``row.get(factor_col)``. Use this for values
+        nested inside JSON columns (e.g. MoE ``jitter_eps`` / ``eom_prob`` inside
+        ``routers_list``).
 
         Filters (all default to no-op):
 
         - ``include_archs`` / ``exclude_archs``: keep/drop architectures.
         - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
+        if value_getter is None:
+            value_getter = lambda row: row.get(factor_col)
+
         # Gather points keyed by (model_type, factor_value) -> {reps: min_value}.
         series: dict = {}
         factor_values = set()
@@ -691,9 +717,12 @@ def _(
             if pd.isna(reps) or pd.isna(loss):
                 continue
 
-            raw_val = row.get(factor_col)
+            raw_val = value_getter(row)
             is_blank = pd.isna(raw_val) or str(raw_val).strip() == ""
-            fval = _factor_value(row, factor_col)
+            try:
+                fval = float(raw_val) if not is_blank else None
+            except (TypeError, ValueError):
+                fval = None
             # Bucket the run.
             if is_blank and nan_label is not None:
                 fval_key = nan_label
@@ -756,7 +785,7 @@ def _(
             fontsize=10,
         )
         if any_data:
-            ax.legend(fontsize=7)
+            ax.legend(fontsize=7, markerscale=0.5)
         fig.tight_layout()
         return fig
 
@@ -781,7 +810,7 @@ def _(
     # Dropout: baseline = no dropout set (blank).
     _out = render_side_by_side(
         sel_dropout.value,
-        lambda m: make_factor_figure(finished_df, DROPOUT_COL, "dropout", None, m),
+        lambda m: make_factor_figure(finished_df, DROPOUT_COL, "dropout", None, m, exclude_reps=[128,256]),
         "dropout",
     )
     _out
@@ -806,7 +835,7 @@ def _(
     # Weight decay: baseline = the default 0.1; swept values are 0.2 / 0.4.
     _out = render_side_by_side(
         sel_weight_decay.value,
-        lambda m: make_factor_figure(finished_df, WD_COL, "weight_decay", 0.1, m),
+        lambda m: make_factor_figure(finished_df, WD_COL, "weight_decay", 0.1, m, exclude_reps=[128,256]),
         "weight_decay",
     )
     _out
@@ -833,9 +862,117 @@ def _(
     _out = render_side_by_side(
         sel_max_grad_norm.value,
         lambda m: make_factor_figure(
-            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="no clip"
+            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="no clip", exclude_reps=[128,256]
         ),
         "max_grad_norm",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Group 3b — MoE-specific regularizer sweeps: jitter, EOM & FOM
+
+    Like Group 3, but for the **MoE-only** regularizers — router jitter
+    (`jitter_eps`), Expert Output Masking (`eom_prob`), and Final Output Masking
+    (`fom_prob`). Dense runs are excluded (these knobs only apply to MoE).
+
+    Color encodes model type; line style encodes the regularizer value (baseline =
+    no regularizer set). `olmo_mix`, 80M, log X with power-of-2 ticks.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_moe_jitter = metric_multiselect("MoE jitter_eps — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_moe_jitter
+    return (sel_moe_jitter,)
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_factor_figure,
+    render_side_by_side,
+    router_field,
+    sel_moe_jitter,
+):
+    # Router jitter: baseline = not set (blank); MoE only.
+    _out = render_side_by_side(
+        sel_moe_jitter.value,
+        lambda m: make_factor_figure(
+            finished_df,
+            None,
+            "jitter_eps",
+            None,
+            m,
+            exclude_archs=["dense"],
+            value_getter=lambda row: router_field(row, "jitter_eps"),
+        ),
+        "moe_jitter_eps",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_moe_eom = metric_multiselect("MoE eom_prob — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_moe_eom
+    return (sel_moe_eom,)
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_factor_figure,
+    render_side_by_side,
+    router_field,
+    sel_moe_eom,
+):
+    # Expert Output Masking: baseline = not set (blank); MoE only.
+    _out = render_side_by_side(
+        sel_moe_eom.value,
+        lambda m: make_factor_figure(
+            finished_df,
+            None,
+            "eom_prob",
+            None,
+            m,
+            exclude_archs=["dense"],
+            value_getter=lambda row: router_field(row, "eom_prob"),
+        ),
+        "moe_eom_prob",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_moe_fom = metric_multiselect("MoE fom_prob — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_moe_fom
+    return (sel_moe_fom,)
+
+
+@app.cell(hide_code=True)
+def _(
+    FOM_COL,
+    finished_df,
+    make_factor_figure,
+    render_side_by_side,
+    sel_moe_fom,
+):
+    # Final Output Masking: baseline = not set (blank); MoE only.
+    _out = render_side_by_side(
+        sel_moe_fom.value,
+        lambda m: make_factor_figure(
+            finished_df, FOM_COL, "fom_prob", None, m, exclude_archs=["dense"]
+        ),
+        "moe_fom_prob",
     )
     _out
     return
@@ -1020,8 +1157,8 @@ def _(
                     xs,
                     ys,
                     marker="o",
-                    markersize=5,
-                    linewidth=2,
+                    markersize=3,
+                    linewidth=1.2,
                     linestyle=source_dash[label],
                     color=color_map[model_type],
                     label=f"{label}, {model_type}",
@@ -1031,7 +1168,7 @@ def _(
         ax.set_ylabel(metric)
         ax.set_title(title, fontsize=10)
         if any_data:
-            ax.legend(fontsize=7)
+            ax.legend(fontsize=7, markerscale=0.5)
         fig.tight_layout()
         return fig
 
