@@ -240,7 +240,54 @@ def _(filter_finished, raw_df):
 
 
 @app.cell(hide_code=True)
-def _(mo, raw_df):
+def _(os):
+    # ------------------------------------------------------------------
+    # PDF export: every figure is written to ml/figures/ when generated.
+    # ------------------------------------------------------------------
+    def _figures_dir():
+        _this_dir = (
+            os.path.dirname(os.path.abspath(__file__))
+            if "__file__" in dir()
+            else os.getcwd()
+        )
+        _candidates = [
+            os.path.join(_this_dir, "..", "figures"),  # from ml/notebooks/
+            os.path.join(_this_dir, "ml", "figures"),  # from repo root
+        ]
+        for d in _candidates:
+            parent = os.path.dirname(os.path.normpath(d))
+            if os.path.isdir(parent):
+                return os.path.normpath(d)
+        return os.path.normpath(_candidates[0])
+
+    FIGURES_DIR = _figures_dir()
+
+    def _sanitize(name: str) -> str:
+        keep = []
+        for ch in name:
+            keep.append(ch if (ch.isalnum() or ch in "-_.") else "_")
+        return "".join(keep).strip("_")
+
+    def save_pdf(fig, plot_key: str, metric: str):
+        """Write `fig` to ml/figures/<plot_key>__<metric>.pdf.
+
+        Silently skips (with a printed note) if the static-image backend (kaleido)
+        is unavailable, so the notebook never fails just because PDFs can't render.
+        """
+        os.makedirs(FIGURES_DIR, exist_ok=True)
+        fname = f"{_sanitize(plot_key)}__{_sanitize(metric)}.pdf"
+        path = os.path.join(FIGURES_DIR, fname)
+        try:
+            fig.write_image(path)
+        except Exception as e:  # pragma: no cover - backend/env dependent
+            print(f"NOTE: could not save PDF '{fname}': {type(e).__name__}: {e}")
+        return fig
+
+    return (save_pdf,)
+
+
+@app.cell(hide_code=True)
+def _(mo, raw_df, save_pdf):
     # ------------------------------------------------------------------
     # Per-plot metric selection utilities.
     # ------------------------------------------------------------------
@@ -275,16 +322,20 @@ def _(mo, raw_df):
             # full_width=True,
         )
 
-    def render_side_by_side(metrics, build_fig):
+    def render_side_by_side(metrics, build_fig, plot_key):
         """Render one figure per selected metric, laid out side by side.
 
-        `build_fig(metric)` should return a plotly figure for a single metric.
+        `build_fig(metric)` should return a plotly figure for a single metric. Each
+        figure is also saved to ml/figures/ as `<plot_key>__<metric>.pdf`.
         """
         if not metrics:
             return mo.md("*Select at least one metric.*")
-        return mo.hstack(
-            [build_fig(m) for m in metrics], widths="equal", gap=1, wrap=True
-        )
+        figs = []
+        for m in metrics:
+            fig = build_fig(m)
+            save_pdf(fig, plot_key, m)
+            figs.append(fig)
+        return mo.hstack(figs, widths="equal", gap=1, wrap=True)
 
     return metric_multiselect, render_side_by_side
 
@@ -436,6 +487,7 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_olmo_80m):
     _out = render_side_by_side(
         sel_olmo_80m.value,
         lambda m: make_repetition_figure(finished_df, "olmo_mix", "80M", m),
+        "olmo_mix_80M",
     )
     _out
     return
@@ -453,6 +505,7 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_olmo_200m):
     _out = render_side_by_side(
         sel_olmo_200m.value,
         lambda m: make_repetition_figure(finished_df, "olmo_mix", "200M", m),
+        "olmo_mix_200M",
     )
     _out
     return
@@ -478,6 +531,7 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_dclm_80m):
     _out = render_side_by_side(
         sel_dclm_80m.value,
         lambda m: make_repetition_figure(finished_df, "dclm", "80M", m),
+        "dclm_80M",
     )
     _out
     return
@@ -500,6 +554,7 @@ def _(
     _out = render_side_by_side(
         sel_starcoder_80m.value,
         lambda m: make_repetition_figure(finished_df, "starcoder", "80M", m),
+        "starcoder_80M",
     )
     _out
     return
@@ -517,6 +572,7 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_pes2o_80m):
     _out = render_side_by_side(
         sel_pes2o_80m.value,
         lambda m: make_repetition_figure(finished_df, "pes2o", "80M", m),
+        "pes2o_80M",
     )
     _out
     return
@@ -534,6 +590,7 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_wiki_80m):
     _out = render_side_by_side(
         sel_wiki_80m.value,
         lambda m: make_repetition_figure(finished_df, "wiki", "80M", m),
+        "wiki_80M",
     )
     _out
     return
@@ -717,6 +774,7 @@ def _(
     _out = render_side_by_side(
         sel_dropout.value,
         lambda m: make_factor_figure(finished_df, DROPOUT_COL, "dropout", None, m),
+        "dropout",
     )
     _out
     return
@@ -741,6 +799,7 @@ def _(
     _out = render_side_by_side(
         sel_weight_decay.value,
         lambda m: make_factor_figure(finished_df, WD_COL, "weight_decay", 0.1, m),
+        "weight_decay",
     )
     _out
     return
@@ -768,6 +827,7 @@ def _(
         lambda m: make_factor_figure(
             finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="no clip"
         ),
+        "max_grad_norm",
     )
     _out
     return
@@ -851,7 +911,7 @@ def _(metric_multiselect):
 @app.cell(hide_code=True)
 def _(finished_df, make_famA_figure, render_side_by_side, sel_famA):
     _out = render_side_by_side(
-        sel_famA.value, lambda m: make_famA_figure(finished_df, m)
+        sel_famA.value, lambda m: make_famA_figure(finished_df, m), "famA"
     )
     _out
     return
@@ -996,6 +1056,7 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_sc):
         lambda m: make_famB_figure(
             finished_df, m, f"famB (starcoder): {m} vs. repetition", _sources
         ),
+        "famB_starcoder",
     )
     _out
     return
@@ -1022,6 +1083,7 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_p2o):
         lambda m: make_famB_figure(
             finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources
         ),
+        "famB_pes2o",
     )
     _out
     return
