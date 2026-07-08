@@ -745,9 +745,11 @@ def _(
             series[key][reps] = min(loss, prev) if prev is not None else float(loss)
 
         # Color encodes the model type; line style encodes the factor value.
-        # Within a model-type color, the factor value also sets the shade: baseline is
-        # the darkest, higher factor values are progressively lighter.
-        ordered_buckets = ["baseline"] + sorted(factor_values) + extra_buckets
+        # Within a model-type color, the factor value also sets the shade: the first
+        # bucket is the DARKEST + solid line, later buckets are lighter with other
+        # dashes. `extra_buckets` (e.g. max_grad_norm "no clip") come first so they
+        # get the solid line.
+        ordered_buckets = extra_buckets + ["baseline"] + sorted(factor_values)
         color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
         dash_cycle = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
         factor_dash = {
