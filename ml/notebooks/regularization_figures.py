@@ -233,7 +233,6 @@ def _(pd):
         get_scale,
         has_tag,
         keep_arch,
-        model_color,
         pow2_ticks,
     )
 
@@ -367,7 +366,6 @@ def _(
     get_scale,
     has_tag,
     keep_arch,
-    model_color,
     pd,
     plt,
     pow2_ticks,
@@ -434,8 +432,8 @@ def _(
     ):
         """One figure: Dense + MoE32 + MoE64 baseline, metric vs reps (log X).
 
-        Model type is distinguished by both line style and shade of a single base
-        color (dense darkest, moe64 lightest).
+        Model type is distinguished by both line style (dense solid, moe32 dotted,
+        moe64 dashed) and a distinct color.
 
         Filters (all default to no-op):
 
@@ -444,7 +442,7 @@ def _(
         - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
         fig, ax = plt.subplots(figsize=(5.0, 4.5))
-        base_color = "#1f77b4"
+        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
         dash_map = {"dense": "-", "moe32": ":", "moe64": "--"}
         any_data = False
         max_reps = 0
@@ -459,7 +457,6 @@ def _(
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             max_reps = max(max_reps, max(xs))
-            line_color = model_color(base_color, model_type)
             ax.plot(
                 xs,
                 ys,
@@ -467,7 +464,7 @@ def _(
                 markersize=6,
                 linewidth=2,
                 linestyle=dash_map[model_type],
-                color=line_color,
+                color=color_map[model_type],
                 label=model_type,
             )
         title = f"{data_tag} — {scale}\n{metric} vs. repetition (baseline)"
@@ -630,7 +627,6 @@ def _(
     get_scale,
     has_tag,
     keep_arch,
-    model_color,
     pd,
     plt,
 ):
@@ -711,7 +707,7 @@ def _(
             prev = series[key].get(reps)
             series[key][reps] = min(loss, prev) if prev is not None else float(loss)
 
-        # Base color per factor bucket; model type -> dash + shade of that color.
+        # Color encodes the factor value; line style encodes the model type.
         ordered_buckets = ["baseline"] + sorted(factor_values) + extra_buckets
         palette = ["#2ca02c", "#1f77b4", "#d62728", "#9467bd", "#ff7f0e", "#8c564b"]
         color_map = {b: palette[i % len(palette)] for i, b in enumerate(ordered_buckets)}
@@ -736,7 +732,7 @@ def _(
                 label_val = fval_key
             else:
                 label_val = f"{factor_label}={fval_key:g}"
-            line_color = model_color(color_map[fval_key], model_type)
+            line_color = color_map[fval_key]
             ax.plot(
                 xs,
                 ys,
@@ -951,7 +947,6 @@ def _(
     get_model_type,
     get_reps,
     keep_arch,
-    model_color,
     pd,
     plt,
 ):
@@ -1012,7 +1007,6 @@ def _(
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
                 max_reps = max(max_reps, max(xs))
-                line_color = model_color(color, model_type)
                 ax.plot(
                     xs,
                     ys,
@@ -1020,7 +1014,7 @@ def _(
                     markersize=5,
                     linewidth=2,
                     linestyle=dash_map[model_type],
-                    color=line_color,
+                    color=color,
                     label=f"{label}, {model_type}",
                 )
         apply_pow2_xaxis(ax, max_reps, any_data)
