@@ -750,6 +750,11 @@ def _(
         fig, ax = plt.subplots(figsize=(6.5, 4.5))
         any_data = False
         max_reps = 0
+        # The factor value the baseline actually takes (dropout/jitter/eom/fom -> 0.0,
+        # weight_decay -> 0.1, max_grad_norm -> 1.0). Its legend entry is shown with
+        # this value (not the word "baseline") and rendered in bold.
+        baseline_display = baseline_value if baseline_value is not None else 0.0
+        baseline_labels = set()
         for (model_type, fval_key), pts in sorted(
             series.items(), key=lambda kv: (str(kv[0][1]), kv[0][0])
         ):
@@ -761,11 +766,18 @@ def _(
             ys = [p[1] for p in points]
             max_reps = max(max_reps, max(xs))
             if fval_key == "baseline":
-                label_val = "baseline"
+                # Show the baseline's actual factor value (with a trailing decimal,
+                # e.g. "dropout=0.0") rather than the word "baseline".
+                label_val = f"{factor_label}={baseline_display:.10g}"
+                if "." not in label_val.split("=", 1)[1]:
+                    label_val = f"{factor_label}={baseline_display:.1f}"
             elif isinstance(fval_key, str):
                 label_val = fval_key
             else:
                 label_val = f"{factor_label}={fval_key:g}"
+            full_label = f"{model_type}, {label_val}"
+            if fval_key == "baseline":
+                baseline_labels.add(full_label)
             ax.plot(
                 xs,
                 ys,
@@ -774,7 +786,7 @@ def _(
                 linewidth=1.2,
                 linestyle=factor_dash[fval_key],
                 color=color_map[model_type],
-                label=f"{model_type}, {label_val}",
+                label=full_label,
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
@@ -785,7 +797,11 @@ def _(
             fontsize=10,
         )
         if any_data:
-            ax.legend(fontsize=7, markerscale=0.5)
+            legend = ax.legend(fontsize=7, markerscale=0.5)
+            # Bold the baseline entries (which now show the baseline's factor value).
+            for text in legend.get_texts():
+                if text.get_text() in baseline_labels:
+                    text.set_fontweight("bold")
         fig.tight_layout()
         return fig
 
