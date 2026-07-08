@@ -768,10 +768,19 @@ def _(
         any_data = False
         max_reps = 0
         # The factor value the baseline actually takes (dropout/jitter/eom/fom -> 0.0,
-        # weight_decay -> 0.1, max_grad_norm -> 1.0). Its legend entry is shown with
-        # this value (not the word "baseline") and rendered in bold.
+        # weight_decay -> 0.1, max_grad_norm -> 1.0). Shown as its numeric value.
         baseline_display = baseline_value if baseline_value is not None else 0.0
-        baseline_labels = set()
+
+        def _bucket_label(fval_key):
+            if fval_key == "baseline":
+                lbl = f"{baseline_display:.10g}"
+                return lbl if "." in lbl else f"{baseline_display:.1f}"
+            if isinstance(fval_key, str):
+                return fval_key
+            return f"{fval_key:g}"
+
+        shown_models = []  # model types actually plotted, in canonical order
+        shown_buckets = []  # factor buckets actually plotted, in ordered_buckets order
         for (model_type, fval_key), pts in sorted(
             series.items(), key=lambda kv: (str(kv[0][1]), kv[0][0])
         ):
@@ -782,19 +791,10 @@ def _(
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             max_reps = max(max_reps, max(xs))
-            if fval_key == "baseline":
-                # Show the baseline's actual factor value (with a trailing decimal,
-                # e.g. "dropout=0.0") rather than the word "baseline".
-                label_val = f"{factor_label}={baseline_display:.10g}"
-                if "." not in label_val.split("=", 1)[1]:
-                    label_val = f"{factor_label}={baseline_display:.1f}"
-            elif isinstance(fval_key, str):
-                label_val = fval_key
-            else:
-                label_val = f"{factor_label}={fval_key:g}"
-            full_label = f"{model_type}, {label_val}"
-            if fval_key == "baseline":
-                baseline_labels.add(full_label)
+            if model_type not in shown_models:
+                shown_models.append(model_type)
+            if fval_key not in shown_buckets:
+                shown_buckets.append(fval_key)
             ax.plot(
                 xs,
                 ys,
@@ -803,22 +803,53 @@ def _(
                 linewidth=1.2,
                 linestyle=factor_dash[fval_key],
                 color=shade_color(color_map[model_type], bucket_shade[fval_key]),
-                label=full_label,
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
         ax.set_ylabel(metric)
-        ax.set_title(
-            f"{factor_label} — {metric} (olmo_mix, 80M)\n"
-            f"color=arch (blue=dense/green=moe32/red=moe64); line style=value",
-            fontsize=10,
-        )
+        ax.set_title(f"{factor_label} — {metric} (olmo_mix, 80M)", fontsize=10)
         if any_data:
-            legend = ax.legend(fontsize=7, markerscale=0.5)
-            # Bold the baseline entries (which now show the baseline's factor value).
-            for text in legend.get_texts():
-                if text.get_text() in baseline_labels:
-                    text.set_fontweight("bold")
+            from matplotlib.lines import Line2D
+
+            # Section 1: color -> model type (solid lines in each model's color).
+            model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
+            model_handles = [
+                Line2D([0], [0], color=color_map[m], linewidth=2, linestyle="-")
+                for m in model_order
+            ]
+            # Section 2: line style -> factor value (black/grey lines).
+            bucket_order = [b for b in ordered_buckets if b in shown_buckets]
+            bucket_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    color="#333333",
+                    linewidth=1.5,
+                    linestyle=factor_dash[b],
+                )
+                for b in bucket_order
+            ]
+            leg1 = ax.legend(
+                model_handles,
+                model_order,
+                title="Model type",
+                fontsize=7,
+                title_fontsize=8,
+                loc="upper left",
+                bbox_to_anchor=(1.02, 1.0),
+                borderaxespad=0.0,
+            )
+            leg2 = ax.legend(
+                bucket_handles,
+                [_bucket_label(b) for b in bucket_order],
+                title=factor_label,
+                fontsize=7,
+                title_fontsize=8,
+                loc="upper left",
+                bbox_to_anchor=(1.02, 0.55),
+                borderaxespad=0.0,
+            )
+            ax.add_artist(leg1)
         fig.tight_layout()
         return fig
 
@@ -1171,6 +1202,8 @@ def _(
         fig, ax = plt.subplots(figsize=(6.0, 5.0))
         max_reps = 0
         any_data = False
+        shown_models = []
+        shown_sources = []
         for label, color, kind, key in sources:
             for model_type in ["dense", "moe32", "moe64"]:
                 if not keep_arch(model_type, include_archs, exclude_archs):
@@ -1186,6 +1219,10 @@ def _(
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
                 max_reps = max(max_reps, max(xs))
+                if model_type not in shown_models:
+                    shown_models.append(model_type)
+                if label not in shown_sources:
+                    shown_sources.append(label)
                 ax.plot(
                     xs,
                     ys,
@@ -1194,14 +1231,47 @@ def _(
                     linewidth=1.2,
                     linestyle=source_dash[label],
                     color=color_map[model_type],
-                    label=f"{label}, {model_type}",
                 )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
         ax.set_ylabel(metric)
         ax.set_title(title, fontsize=10)
         if any_data:
-            ax.legend(fontsize=7, markerscale=0.5)
+            from matplotlib.lines import Line2D
+
+            # Section 1: color -> model type.
+            model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
+            model_handles = [
+                Line2D([0], [0], color=color_map[m], linewidth=2, linestyle="-")
+                for m in model_order
+            ]
+            # Section 2: line style -> data source (black/grey).
+            source_order = [s[0] for s in sources if s[0] in shown_sources]
+            source_handles = [
+                Line2D([0], [0], color="#333333", linewidth=1.5, linestyle=source_dash[s])
+                for s in source_order
+            ]
+            leg1 = ax.legend(
+                model_handles,
+                model_order,
+                title="Model type",
+                fontsize=7,
+                title_fontsize=8,
+                loc="upper left",
+                bbox_to_anchor=(1.02, 1.0),
+                borderaxespad=0.0,
+            )
+            leg2 = ax.legend(
+                source_handles,
+                source_order,
+                title="Data source",
+                fontsize=7,
+                title_fontsize=8,
+                loc="upper left",
+                bbox_to_anchor=(1.02, 0.55),
+                borderaxespad=0.0,
+            )
+            ax.add_artist(leg1)
         fig.tight_layout()
         return fig
 
