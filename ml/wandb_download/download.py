@@ -118,15 +118,29 @@ def _to_plain(value: Any) -> Any:
         return [_to_plain(v) for v in value]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
-    # numpy scalars, wandb summary objects, etc.
+    # Dict-like objects that aren't real dicts (e.g. wandb SummarySubDict, whose
+    # __getattr__ raises KeyError on missing attrs). Iterate via items().
+    if hasattr(value, "keys") and callable(getattr(value, "items", None)):
+        try:
+            return {str(k): _to_plain(v) for k, v in value.items()}
+        except Exception:  # noqa: BLE001 - fall through to other strategies
+            pass
+    # numpy scalars, wandb summary leaves, etc. Guard getattr itself, since some
+    # objects raise (not return None) for unknown attributes.
     for attr in ("item", "tolist"):
-        fn = getattr(value, attr, None)
+        try:
+            fn = getattr(value, attr, None)
+        except Exception:  # noqa: BLE001 - unknown-attr access may raise
+            fn = None
         if callable(fn):
             try:
                 return _to_plain(fn())
             except Exception:  # noqa: BLE001 - best-effort coercion
                 pass
-    return str(value)
+    try:
+        return str(value)
+    except Exception:  # noqa: BLE001 - last-resort
+        return None
 
 
 def _find_recursive(config: Any, key: str) -> Any:
