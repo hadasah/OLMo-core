@@ -25,6 +25,12 @@ Typical usage::
     # restrict to the current regularizer sweep by tag / name
     python -m ml.wandb_download.download --tag MoE64 --name-regex data_rep_AC
 
+Metadata (``wandb_export.csv`` / ``runs.jsonl``) is always rebuilt from scratch
+so the snapshot is current. History download is partially incremental: history
+for terminal runs (finished/failed/crashed) that already have a non-empty file
+on disk is skipped, since it can no longer change. Pass ``--refresh-history`` to
+force a full re-fetch. History for still-running runs is always re-downloaded.
+
 The output directory (default ``ml/runs_data``) will contain:
 
     wandb_export.csv        wide, web-export-compatible run table (read by the
@@ -61,6 +67,11 @@ DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent / "runs_data"
 # the directory, so overwriting this on each run keeps it the "latest".
 WIDE_CSV_NAME = "wandb_export.csv"
 
+# Run states whose history is final and will never change again. History for
+# runs in one of these states can be skipped on re-download if it already exists
+# on disk (see --refresh-history to force a full re-fetch anyway).
+TERMINAL_STATES = frozenset({"finished", "failed", "crashed", "killed"})
+
 # Config fields worth surfacing as extra flat columns in the JSONL (searched for
 # recursively, so we don't hardcode the deep path to the MoE router knobs). The
 # wide CSV already flattens the whole config; these just make the JSONL handy.
@@ -88,6 +99,7 @@ class DownloadConfig:
     output_dir: Path
     include_history: bool
     history_table: bool
+    refresh_history: bool
     workers: int
     timeout: int
     tags: list[str] = field(default_factory=list)
@@ -260,6 +272,27 @@ def _history_path(output_dir: Path, run_id: str) -> Path:
     return output_dir / "history" / f"{run_id}.jsonl"
 
 
+def _has_cached_history(output_dir: Path, run_id: str) -> bool:
+    """True if a non-empty history file already exists for this run."""
+    path = _history_path(output_dir, run_id)
+    try:
+        return path.exists() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _should_skip_history(run: Any, output_dir: Path, refresh: bool) -> bool:
+    """Skip re-downloading history for a terminal run that's already cached.
+
+    Terminal runs (finished/failed/crashed/killed) never produce new steps, so
+    an existing non-empty history file is complete. ``refresh`` forces a full
+    re-fetch regardless.
+    """
+    if refresh:
+        return False
+    return (run.state in TERMINAL_STATES) and _has_cached_history(output_dir, run.id)
+
+
 def fetch_history(run: Any, output_dir: Path) -> tuple[str, int]:
     """Stream one run's full per-step history to history/<run_id>.jsonl."""
     path = _history_path(output_dir, run.id)
@@ -341,12 +374,27 @@ def download(cfg: DownloadConfig) -> dict[str, Any]:
     run_count = _write_runs(runs, cfg.output_dir)
 
     history_rows = 0
+    skipped = 0
     if cfg.include_history:
-        logger.info("Downloading history for %s run(s) with %s worker(s)", len(runs), cfg.workers)
+        to_fetch = [
+            run
+            for run in runs
+            if not _should_skip_history(run, cfg.output_dir, cfg.refresh_history)
+        ]
+        skipped = len(runs) - len(to_fetch)
+        if skipped:
+            logger.info(
+                "Skipping history for %s terminal run(s) already cached "
+                "(use --refresh-history to force)",
+                skipped,
+            )
+        logger.info(
+            "Downloading history for %s run(s) with %s worker(s)", len(to_fetch), cfg.workers
+        )
         completed = 0
         with ThreadPoolExecutor(max_workers=max(1, cfg.workers)) as executor:
             futures = {
-                executor.submit(fetch_history, run, cfg.output_dir): run.id for run in runs
+                executor.submit(fetch_history, run, cfg.output_dir): run.id for run in to_fetch
             }
             for future in as_completed(futures):
                 run_id = futures[future]
@@ -357,8 +405,8 @@ def download(cfg: DownloadConfig) -> dict[str, Any]:
                     continue
                 history_rows += rows
                 completed += 1
-                if completed == 1 or completed % 10 == 0 or completed == len(runs):
-                    logger.info("History: %s/%s runs", completed, len(runs))
+                if completed == 1 or completed % 10 == 0 or completed == len(to_fetch):
+                    logger.info("History: %s/%s runs", completed, len(to_fetch))
         if cfg.history_table:
             _write_history_table([run.id for run in runs], cfg.output_dir)
 
@@ -370,6 +418,7 @@ def download(cfg: DownloadConfig) -> dict[str, Any]:
         "run_count": run_count,
         "include_history": cfg.include_history,
         "history_row_count": history_rows if cfg.include_history else None,
+        "history_skipped_cached": skipped if cfg.include_history else None,
     }
     return summary
 
@@ -393,6 +442,15 @@ def _parse_args(argv: list[str] | None = None) -> DownloadConfig:
         "--history-table",
         action="store_true",
         help="Concatenate per-run history into a single history.csv.",
+    )
+    parser.add_argument(
+        "--refresh-history",
+        action="store_true",
+        help=(
+            "Re-download history even for terminal runs already cached on disk. "
+            "By default, finished/failed/crashed runs with an existing history "
+            "file are skipped (their history is final)."
+        ),
     )
     parser.add_argument("--workers", type=int, default=min(32, (os.cpu_count() or 8) + 4))
     parser.add_argument("--timeout", type=int, default=120)
@@ -419,6 +477,7 @@ def _parse_args(argv: list[str] | None = None) -> DownloadConfig:
         output_dir=args.output_dir,
         include_history=args.include_history,
         history_table=args.history_table,
+        refresh_history=args.refresh_history,
         workers=args.workers,
         timeout=args.timeout,
         tags=args.tags,
