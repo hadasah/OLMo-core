@@ -9,8 +9,10 @@ def _(mo):
     mo.md(r"""
     # Regularization & Data-Repetition Figures
 
-    Figures built from the most recent Weights & Biases CSV export in
-    `ml/notebooks/data/`.
+    Figures built from the most recent Weights & Biases CSV export. The notebook
+    reads the automated export in `ml/runs_data/` (written by
+    `ml/wandb_download/download.py`) if present, falling back to the
+    hand-downloaded CSVs in `ml/notebooks/data/` otherwise.
 
     Only runs with `State == "finished"` are plotted, and any run tagged `_HIDE`
     is dropped (see the data filtering function below).
@@ -58,22 +60,41 @@ def _():
 @app.cell(hide_code=True)
 def _(glob, os, pd):
     def find_latest_data_file() -> str:
-        """Return the path to the most recently modified CSV in ml/notebooks/data/."""
+        """Return the path to the most recently modified CSV to plot.
+
+        Prefers the automated export written by ``ml/wandb_download/download.py``
+        into ``ml/runs_data/``; falls back to the hand-downloaded W&B CSVs in
+        ``ml/notebooks/data/`` only when ``ml/runs_data/`` has no CSV yet.
+        """
         _this_dir = (
             os.path.dirname(os.path.abspath(__file__))
             if "__file__" in dir()
             else os.getcwd()
         )
-        # Handle being run from the repo root or from ml/notebooks/.
-        _candidates = [
+        # Handle being run from the repo root or from ml/notebooks/. The primary
+        # location (ml/runs_data) is tried first; the legacy location is the
+        # fallback. First directory that actually contains a CSV wins.
+        _dir_candidates = [
+            # ml/runs_data relative to ml/notebooks/ (this file's dir).
+            os.path.join(_this_dir, "..", "runs_data"),
+            # ml/runs_data relative to the repo root.
+            os.path.join(_this_dir, "ml", "runs_data"),
+            # Legacy hand-download location(s).
             os.path.join(_this_dir, "data"),
             os.path.join(_this_dir, "ml", "notebooks", "data"),
         ]
-        _data_dir = next((d for d in _candidates if os.path.isdir(d)), _candidates[0])
-        _csvs = glob.glob(os.path.join(_data_dir, "*.csv"))
-        if not _csvs:
-            raise FileNotFoundError(f"No CSV files found in {_data_dir}")
-        return max(_csvs, key=os.path.getmtime)
+        _searched = []
+        for _d in _dir_candidates:
+            _d = os.path.normpath(_d)
+            _searched.append(_d)
+            if not os.path.isdir(_d):
+                continue
+            _csvs = glob.glob(os.path.join(_d, "*.csv"))
+            if _csvs:
+                return max(_csvs, key=os.path.getmtime)
+        raise FileNotFoundError(
+            "No CSV files found in any data directory: " + ", ".join(_searched)
+        )
 
     DATA_FILE = find_latest_data_file()
 
