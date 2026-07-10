@@ -1,10 +1,10 @@
 import marimo
 
 __generated_with = "0.23.9"
-app = marimo.App(width="full")
+app = marimo.App(width="columns")
 
 
-@app.cell(hide_code=True)
+@app.cell(column=0, hide_code=True)
 def _(mo):
     mo.md(r"""
     # Regularization & Data-Repetition Figures
@@ -291,6 +291,72 @@ def _(filter_finished, raw_df):
 
 
 @app.cell(hide_code=True)
+def _(json, os):
+    # ------------------------------------------------------------------
+    # Per-step training history (for the training-curve column).
+    #
+    # ml/wandb_download/download.py --include-history writes one JSONL per run to
+    # ml/runs_data/history/<run Name>.jsonl, each line a logged step with a "_step"
+    # field plus whatever metrics were logged that step (train/CE loss is dense;
+    # eval metrics are sparse). We load a run's (step, value) series on demand.
+    # ------------------------------------------------------------------
+    def _history_dir():
+        _this_dir = (
+            os.path.dirname(os.path.abspath(__file__))
+            if "__file__" in dir()
+            else os.getcwd()
+        )
+        _candidates = [
+            os.path.join(_this_dir, "..", "runs_data", "history"),
+            os.path.join(_this_dir, "ml", "runs_data", "history"),
+        ]
+        for d in _candidates:
+            if os.path.isdir(os.path.normpath(d)):
+                return os.path.normpath(d)
+        return os.path.normpath(_candidates[0])
+
+    HISTORY_DIR = _history_dir()
+
+    _history_cache: dict = {}
+
+    def load_history_series(run_name: str, metric: str):
+        """Return sorted [(step, value), ...] for `metric` in run `run_name`'s history.
+
+        Reads ml/runs_data/history/<run_name>.jsonl, keeping only rows where both
+        ``_step`` and the metric are present. Results are cached per (run, metric).
+        Returns [] if the history file is missing.
+        """
+        cache_key = (run_name, metric)
+        if cache_key in _history_cache:
+            return _history_cache[cache_key]
+        path = os.path.join(HISTORY_DIR, f"{run_name}.jsonl")
+        series = []
+        if os.path.isfile(path):
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    step = row.get("_step")
+                    val = row.get(metric)
+                    if step is None or val is None:
+                        continue
+                    try:
+                        series.append((float(step), float(val)))
+                    except (TypeError, ValueError):
+                        continue
+            series.sort()
+        _history_cache[cache_key] = series
+        return series
+
+    return (load_history_series,)
+
+
+@app.cell(hide_code=True)
 def _(os):
     # ------------------------------------------------------------------
     # PDF export: every figure is written to ml/figures/ when generated.
@@ -391,7 +457,7 @@ def _(mo, raw_df, save_pdf):
     return metric_multiselect, render_side_by_side
 
 
-@app.cell(hide_code=True)
+@app.cell(column=1, hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Group 1 & 2 — Final loss vs. repetition (baseline runs)
@@ -1316,6 +1382,152 @@ def _(
 
 
 @app.cell(hide_code=True)
+def _(
+    get_model_type,
+    get_reps,
+    get_scale,
+    has_tag,
+    keep_arch,
+    load_history_series,
+    pd,
+    plt,
+    shade_color,
+):
+    def make_training_curve_figure(
+        df,
+        data_tag,
+        scale,
+        metric,
+        include_archs=None,
+        exclude_archs=None,
+        include_reps=None,
+        exclude_reps=None,
+    ):
+        """Training curves (metric vs. train step) for baseline runs of one
+        data mixture + model scale.
+
+        One line per run. Color encodes architecture; repetition count sets both
+        the shade (baseline/lowest-rep darkest -> highest-rep lightest) and the
+        line style. Reads per-step values from the downloaded W&B history.
+        """
+        # Collect baseline runs: {(model_type, reps): run_name} (keep last seen).
+        runs: dict = {}
+        rep_set = set()
+        for _, row in df.iterrows():
+            if get_scale(row) != scale:
+                continue
+            if not has_tag(row, "baseline"):
+                continue
+            if not has_tag(row, data_tag):
+                continue
+            model_type = get_model_type(row)
+            if model_type not in ("dense", "moe32", "moe64"):
+                continue
+            if not keep_arch(model_type, include_archs, exclude_archs):
+                continue
+            reps = get_reps(row)
+            if pd.isna(reps):
+                continue
+            reps = float(reps)
+            if include_reps is not None and reps not in {float(r) for r in include_reps}:
+                continue
+            if exclude_reps and reps in {float(r) for r in exclude_reps}:
+                continue
+            runs[(model_type, reps)] = str(row.get("Name", ""))
+            rep_set.add(reps)
+
+        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
+        dash_cycle = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
+        rep_order = sorted(rep_set)
+        # Shade + dash per repetition (lowest rep darkest, highest lightest).
+        _DARKEST, _LIGHTEST = -0.45, 0.4
+        _nr = len(rep_order)
+        rep_shade = {
+            r: (_DARKEST + (_LIGHTEST - _DARKEST) * i / (_nr - 1) if _nr > 1 else _DARKEST)
+            for i, r in enumerate(rep_order)
+        }
+        rep_dash = {r: dash_cycle[i % len(dash_cycle)] for i, r in enumerate(rep_order)}
+
+        fig, ax = plt.subplots(figsize=(6.5, 4.5))
+        any_data = False
+        shown_models, shown_reps = [], []
+        for (model_type, reps), run_name in sorted(
+            runs.items(), key=lambda kv: (kv[0][0], kv[0][1])
+        ):
+            series = load_history_series(run_name, metric)
+            if not series:
+                continue
+            any_data = True
+            xs = [p[0] for p in series]
+            ys = [p[1] for p in series]
+            if model_type not in shown_models:
+                shown_models.append(model_type)
+            if reps not in shown_reps:
+                shown_reps.append(reps)
+            ax.plot(
+                xs,
+                ys,
+                linewidth=1.0,
+                linestyle=rep_dash[reps],
+                color=shade_color(color_map[model_type], rep_shade[reps]),
+            )
+        ax.set_xlabel("train step")
+        ax.set_ylabel(metric)
+        title = f"{data_tag} — {scale}: {metric} vs. train step (baseline)"
+        if not any_data:
+            title += "  [no history found]"
+        ax.set_title(title, fontsize=10)
+
+        if any_data:
+            from matplotlib.lines import Line2D
+
+            def _header():
+                return Line2D([0], [0], linestyle="none", marker="", label="")
+
+            model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
+            model_handles = [
+                Line2D([0], [0], color=color_map[m], linewidth=2, linestyle="-")
+                for m in model_order
+            ]
+            rep_shown = [r for r in rep_order if r in shown_reps]
+            _ng = len(rep_shown)
+            _grey_top = 0.7
+            rep_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    color=shade_color("#000000", _grey_top * i / (_ng - 1) if _ng > 1 else 0.0),
+                    linewidth=1.5,
+                    linestyle=rep_dash[r],
+                )
+                for i, r in enumerate(rep_shown)
+            ]
+            handles = [_header()] + model_handles + [_header()] + rep_handles
+            labels = (
+                ["Model type"]
+                + model_order
+                + ["Repetitions"]
+                + [f"{r:g}x" for r in rep_shown]
+            )
+            legend = ax.legend(
+                handles,
+                labels,
+                fontsize=7,
+                loc="upper left",
+                bbox_to_anchor=(1.02, 1.0),
+                borderaxespad=0.0,
+                handlelength=2.2,
+            )
+            for text in legend.get_texts():
+                if text.get_text() in ("Model type", "Repetitions"):
+                    text.set_fontweight("bold")
+        fig.tight_layout()
+        return fig
+
+    return (make_training_curve_figure,)
+
+
+@app.cell(hide_code=True)
 def _(metric_multiselect):
     sel_famB_sc = metric_multiselect("famB starcoder — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
     sel_famB_sc
@@ -1364,6 +1576,177 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_p2o):
             finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources
         ),
         "famB_pes2o",
+    )
+    _out
+    return
+
+
+@app.cell(column=2, hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Training curves — metric vs. train step (baseline runs)
+
+    Per-step training curves from the downloaded W&B history
+    (`ml/runs_data/history/`). Baseline `olmo_mix` runs (and the single-source
+    mixtures) at 80M / 200M. Color = architecture; repetition count sets the shade
+    (lowest rep darkest → highest lightest) and the line style.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_curve_olmo_80m = metric_multiselect(
+        "curves: olmo_mix 80M — metrics", chosen_values=["train/CE loss"]
+    )
+    sel_curve_olmo_80m
+    return (sel_curve_olmo_80m,)
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_side_by_side,
+    sel_curve_olmo_80m,
+):
+    _out = render_side_by_side(
+        sel_curve_olmo_80m.value,
+        lambda m: make_training_curve_figure(finished_df, "olmo_mix", "80M", m),
+        "curve_olmo_mix_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_curve_olmo_200m = metric_multiselect(
+        "curves: olmo_mix 200M — metrics", chosen_values=["train/CE loss"]
+    )
+    sel_curve_olmo_200m
+    return (sel_curve_olmo_200m,)
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_side_by_side,
+    sel_curve_olmo_200m,
+):
+    _out = render_side_by_side(
+        sel_curve_olmo_200m.value,
+        lambda m: make_training_curve_figure(finished_df, "olmo_mix", "200M", m),
+        "curve_olmo_mix_200M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Single-source mixtures (80M): `dclm`, `starcoder`, `pes2o`, `wiki`
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_curve_dclm_80m = metric_multiselect(
+        "curves: dclm 80M — metrics", chosen_values=["train/CE loss"]
+    )
+    sel_curve_dclm_80m
+    return (sel_curve_dclm_80m,)
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_side_by_side,
+    sel_curve_dclm_80m,
+):
+    _out = render_side_by_side(
+        sel_curve_dclm_80m.value,
+        lambda m: make_training_curve_figure(finished_df, "dclm", "80M", m),
+        "curve_dclm_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_curve_starcoder_80m = metric_multiselect(
+        "curves: starcoder 80M — metrics", chosen_values=["train/CE loss"]
+    )
+    sel_curve_starcoder_80m
+    return (sel_curve_starcoder_80m,)
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_side_by_side,
+    sel_curve_starcoder_80m,
+):
+    _out = render_side_by_side(
+        sel_curve_starcoder_80m.value,
+        lambda m: make_training_curve_figure(finished_df, "starcoder", "80M", m),
+        "curve_starcoder_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_curve_pes2o_80m = metric_multiselect(
+        "curves: pes2o 80M — metrics", chosen_values=["train/CE loss"]
+    )
+    sel_curve_pes2o_80m
+    return (sel_curve_pes2o_80m,)
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_side_by_side,
+    sel_curve_pes2o_80m,
+):
+    _out = render_side_by_side(
+        sel_curve_pes2o_80m.value,
+        lambda m: make_training_curve_figure(finished_df, "pes2o", "80M", m),
+        "curve_pes2o_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_curve_wiki_80m = metric_multiselect(
+        "curves: wiki 80M — metrics", chosen_values=["train/CE loss"]
+    )
+    sel_curve_wiki_80m
+    return (sel_curve_wiki_80m,)
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_side_by_side,
+    sel_curve_wiki_80m,
+):
+    _out = render_side_by_side(
+        sel_curve_wiki_80m.value,
+        lambda m: make_training_curve_figure(finished_df, "wiki", "80M", m),
+        "curve_wiki_80M",
     )
     _out
     return
