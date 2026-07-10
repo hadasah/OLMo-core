@@ -11,8 +11,11 @@ script verifies the size/feasibility preconditions.)
 
   --family b (default): specialist injection -- generalist primary (dclm) + repeated minority
     specialist (starcoder/pes2o) over the rep ladder {1,2,4,8,16,32}.
-  --family a: DCLM<->Dolma1.7 interpolation at rep=1. Only the interior blends are mixtures and
+  --family a: DCLM<->Dolma3 interpolation at rep=1. Only the interior blends are mixtures and
     need checking; the 100/0 and 0/100 endpoints are single-source and trivially feasible.
+  --family ar: DCLM<->Dolma3 interpolation crossed with repetition {1,2,4,8,16,32}. BOTH sources
+    repeat at the same R, so both unique pools shrink as fraction*T/R and must both nest; the
+    DCLM:Dolma3 ratio must be identical at every R.
 
 Optionally (--check-paths) it fetches the real per-source token counts to confirm each cell is
 feasible -- the lowest-R unique pool must fit inside the source. That requires olmo_core and
@@ -40,6 +43,8 @@ FAMILY_A_CELLS = [
     ("dclm25", "dclm_only", "dolma3", 0.75),
 ]
 FAMILY_A_REPS = [1]
+# Family A + repetition: the same interior blends, but swept over the rep ladder (both sources repeat).
+FAMILY_AR_REPS = [1, 2, 4, 8, 16, 32]
 
 
 def _fetch_populations(data_root, tokenizer_name, cells):
@@ -80,8 +85,8 @@ def _fetch_populations(data_root, tokenizer_name, cells):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--family", choices=["a", "b"], default="b",
-                    help="Which family's cells to validate (default b).")
+    ap.add_argument("--family", choices=["a", "ar", "b"], default="b",
+                    help="Which family's cells to validate (default b). 'ar' = Family A + repetition.")
     ap.add_argument("--budget", type=int, default=1_600_000_000,
                     help="Total training token budget T (default 1.6B, the olmo2_ml_80M budget).")
     ap.add_argument("--seq-length", type=int, default=2048,
@@ -95,28 +100,41 @@ def main():
 
     if args.family == "a":
         CELLS, REPS = FAMILY_A_CELLS, FAMILY_A_REPS
+    elif args.family == "ar":
+        CELLS, REPS = FAMILY_A_CELLS, FAMILY_AR_REPS
     else:
         CELLS, REPS = FAMILY_B_CELLS, FAMILY_B_REPS
+    both_repeat = args.family == "ar"  # Family A+rep: BOTH sources repeat and must nest across R.
 
     populations = _fetch_populations(args.data_root, args.tokenizer, CELLS) if args.check_paths else {}
 
     ok = True
     for cell, primary, minority, f in CELLS:
-        print(f"\n=== cell {cell}: primary={primary} ({1 - f:.0%}) + minority={minority} ({f:.0%}); T={T:,} ===")
-        print(f"{'rep':>5} {'minority_unique':>16} {'primary_unique':>15} {'realized_rep':>13}")
-        prev_unique = None
+        mode = "both sources repeat & nest" if both_repeat else "minority repeats; primary fixed 1x"
+        print(f"\n=== cell {cell}: primary={primary} ({1 - f:.0%}) + minority={minority} ({f:.0%}); T={T:,} [{mode}] ===")
+        print(f"{'rep':>5} {'minority_unique':>16} {'primary_unique':>15} {'total_unique':>14} {'ratio min:pri':>15}")
+        prev_min = prev_pri = None
+        target_ratio = f / (1 - f)  # the fixed minority:primary ratio the mixture must preserve
         for r in REPS:
             min_unique = int(f * T / r)
-            pri_unique = int((1 - f) * T)  # primary is always 1x in Families A and B
-            realized = (f * T) / min_unique if min_unique else float("inf")
-            print(f"{r:>5} {min_unique:>16,} {pri_unique:>15,} {realized:>13.2f}")
-            if min_unique <= 0:
-                print(f"   !! EMPTY minority unique pool at rep {r}")
+            # In Family A+rep BOTH sources repeat at R (pool = fraction*T/R); in A/B the primary is fixed 1x.
+            pri_unique = int((1 - f) * T / r) if both_repeat else int((1 - f) * T)
+            total_unique = min_unique + pri_unique
+            ratio = (min_unique / pri_unique) if pri_unique else float("inf")
+            print(f"{r:>5} {min_unique:>16,} {pri_unique:>15,} {total_unique:>14,} {ratio:>15.4f}")
+            if min_unique <= 0 or pri_unique <= 0:
+                print(f"   !! EMPTY unique pool at rep {r} (minority={min_unique:,}, primary={pri_unique:,})")
                 ok = False
-            if prev_unique is not None and min_unique > prev_unique:
-                print(f"   !! NESTING PRECONDITION VIOLATED: pool grew {prev_unique:,} -> {min_unique:,}")
+            if prev_min is not None and min_unique > prev_min:
+                print(f"   !! MINORITY NESTING VIOLATED: pool grew {prev_min:,} -> {min_unique:,}")
                 ok = False
-            prev_unique = min_unique
+            if both_repeat and prev_pri is not None and pri_unique > prev_pri:
+                print(f"   !! PRIMARY NESTING VIOLATED: pool grew {prev_pri:,} -> {pri_unique:,}")
+                ok = False
+            if both_repeat and pri_unique and abs(ratio - target_ratio) > 1e-3:
+                print(f"   !! RATIO DRIFT at rep {r}: {ratio:.4f} != target {target_ratio:.4f}")
+                ok = False
+            prev_min, prev_pri = min_unique, pri_unique
 
         if args.check_paths and minority not in populations:
             print(f"   !! could not size minority '{minority}' (fetch failed above); feasibility UNVERIFIED")
@@ -128,13 +146,14 @@ def main():
             if largest_needed > P:
                 ok = False
             print(f"   feasibility: minority population={P:,}; largest pool (rep {REPS[0]}x)={largest_needed:,} -> {status}")
-            # Also confirm the primary unique pool fits inside the primary source.
+            # Confirm the largest primary pool (rep REPS[0]) fits inside the primary source.
             if primary in populations:
                 Pp = populations[primary]
-                pstatus = "OK" if pri_unique <= Pp else "INFEASIBLE"
-                if pri_unique > Pp:
+                largest_primary = int((1 - f) * T / REPS[0])
+                pstatus = "OK" if largest_primary <= Pp else "INFEASIBLE"
+                if largest_primary > Pp:
                     ok = False
-                print(f"   feasibility: primary population={Pp:,}; primary pool={pri_unique:,} -> {pstatus}")
+                print(f"   feasibility: primary population={Pp:,}; largest primary pool (rep {REPS[0]}x)={largest_primary:,} -> {pstatus}")
             # Flag shards too small to yield an instance at the highest repetition.
             n_shards_paths = None
             try:
