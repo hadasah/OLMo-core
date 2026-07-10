@@ -70,7 +70,7 @@ WIDE_CSV_NAME = "wandb_export.csv"
 # Run states whose history is final and will never change again. History for
 # runs in one of these states can be skipped on re-download if it already exists
 # on disk (see --refresh-history to force a full re-fetch anyway).
-TERMINAL_STATES = frozenset({"finished", "failed", "crashed", "killed"})
+TERMINAL_STATES = frozenset({"finished"})
 
 # Config fields worth surfacing as extra flat columns in the JSONL (searched for
 # recursively, so we don't hardcode the deep path to the MoE router knobs). The
@@ -176,7 +176,9 @@ def _flatten_selected(config: dict[str, Any]) -> dict[str, Any]:
     return {key: _to_plain(_find_recursive(config, key)) for key in FLATTEN_KEYS}
 
 
-def _flatten_dotted(obj: Any, prefix: str = "", out: dict[str, Any] | None = None) -> dict[str, Any]:
+def _flatten_dotted(
+    obj: Any, prefix: str = "", out: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Flatten a nested config into dotted keys, matching the W&B web export.
 
     - dict -> recurse, joining keys with '.'
@@ -461,7 +463,9 @@ def _parse_args(argv: list[str] | None = None) -> DownloadConfig:
         dest="tags",
         help="Only runs with this tag (repeatable; all must match).",
     )
-    parser.add_argument("--name-regex", default=None, help="Only runs whose name matches this regex.")
+    parser.add_argument(
+        "--name-regex", default=None, help="Only runs whose name matches this regex."
+    )
     parser.add_argument(
         "--state",
         action="append",

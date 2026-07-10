@@ -1597,8 +1597,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(metric_multiselect):
     sel_curve_olmo_80m = metric_multiselect(
-        "curves: olmo_mix 80M — metrics", chosen_values=["train/CE loss"]
-    )
+        "curves: olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_curve_olmo_80m
     return (sel_curve_olmo_80m,)
 
@@ -1622,8 +1621,7 @@ def _(
 @app.cell(hide_code=True)
 def _(metric_multiselect):
     sel_curve_olmo_200m = metric_multiselect(
-        "curves: olmo_mix 200M — metrics", chosen_values=["train/CE loss"]
-    )
+        "curves: olmo_mix 200M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_curve_olmo_200m
     return (sel_curve_olmo_200m,)
 
@@ -1655,8 +1653,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(metric_multiselect):
     sel_curve_dclm_80m = metric_multiselect(
-        "curves: dclm 80M — metrics", chosen_values=["train/CE loss"]
-    )
+        "curves: dclm 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_curve_dclm_80m
     return (sel_curve_dclm_80m,)
 
@@ -1680,8 +1677,7 @@ def _(
 @app.cell(hide_code=True)
 def _(metric_multiselect):
     sel_curve_starcoder_80m = metric_multiselect(
-        "curves: starcoder 80M — metrics", chosen_values=["train/CE loss"]
-    )
+        "curves: starcoder 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
     sel_curve_starcoder_80m
     return (sel_curve_starcoder_80m,)
 
@@ -1705,8 +1701,7 @@ def _(
 @app.cell(hide_code=True)
 def _(metric_multiselect):
     sel_curve_pes2o_80m = metric_multiselect(
-        "curves: pes2o 80M — metrics", chosen_values=["train/CE loss"]
-    )
+        "curves: pes2o 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
     sel_curve_pes2o_80m
     return (sel_curve_pes2o_80m,)
 
@@ -1730,7 +1725,7 @@ def _(
 @app.cell(hide_code=True)
 def _(metric_multiselect):
     sel_curve_wiki_80m = metric_multiselect(
-        "curves: wiki 80M — metrics", chosen_values=["train/CE loss"]
+        "curves: wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss"]
     )
     sel_curve_wiki_80m
     return (sel_curve_wiki_80m,)
