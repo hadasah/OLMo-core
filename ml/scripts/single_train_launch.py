@@ -194,6 +194,7 @@ def build_config(
     minority_fraction: float = 0.0,
     minority_repetition: int = 1,
     primary_repetition: int = 1,
+    mix_unique_fraction: Optional[float] = None,
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS["WANDB_ENTITY"],
     wandb_project: str = USER_PROJECT_SPECS["WANDB_PROJECT"],
@@ -214,7 +215,113 @@ def build_config(
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
     )
 
-    if mix_primary is not None and mix_minority is not None:
+    if mix_primary is not None and mix_minority is not None and mix_unique_fraction is not None:
+        # === Family A + repetition: DCLM<->Dolma interpolation at a fixed ratio, repeated R times ===
+        # Build the two-source mixture (primary at (1-f), minority at f) at the UNIQUE token budget
+        # T * mix_unique_fraction (with mix_unique_fraction = 1/R), using NO in-mixture tiling. The
+        # trainer's max_duration stays at T, so the data loader re-epochs the unique pool
+        # R = 1/mix_unique_fraction times to fill the budget -- the same repetition mechanism as the
+        # single-source `unique_data_fraction` path, but for an explicit two-source ratio.
+        #
+        # Nesting: with unique_tokens unset, each source's take_ratio = num_selected / population < 1
+        # (no tiling), so it contributes a file-order head prefix of size proportional to the
+        # requested tokens (num_selected = requested_unique_tokens * target_ratio). A higher-R pool
+        # (smaller T/R) is therefore a strict prefix-subset of a lower-R pool, for BOTH sources. The
+        # (1-f):f ratio is the target_ratio, preserved at every R. Reads are fixed-stride head-of-
+        # shard, so this head-prefix nesting is exactly what training consumes.
+        actual_train_tokens = train_tokens
+        for ov in overrides:
+            if ov.startswith("--trainer.max_duration.value="):
+                actual_train_tokens = int(ov.split("=")[1])
+            elif ov.startswith("trainer.max_duration.value="):
+                actual_train_tokens = int(ov.split("=")[1])
+        train_tokens = actual_train_tokens
+        total_budget = train_tokens
+
+        f = float(minority_fraction)
+        if not 0.0 < f < 1.0:
+            raise ValueError(f"minority_fraction must be in (0, 1), got {f}")
+        frac = float(mix_unique_fraction)
+        if not 0.0 < frac <= 1.0:
+            raise ValueError(f"mix_unique_fraction must be in (0, 1], got {frac}")
+        requested_unique_tokens = int(total_budget * frac)
+
+        primary_paths, _ = DATAMIX_LOOKUP[mix_primary].build(data_root, tokenizer_config.identifier)
+        minority_paths, _ = DATAMIX_LOOKUP[mix_minority].build(data_root, tokenizer_config.identifier)
+
+        # Infer dtype itemsize (same logic as NumpyDatasetConfig.get_dtype).
+        npdtype = np.uint32
+        for dt in (np.uint8, np.uint16, np.uint32, np.uint64):
+            if (tokenizer_config.vocab_size - 1) <= np.iinfo(dt).max:
+                npdtype = dt
+                break
+        itemsize = npdtype(0).itemsize
+        primary_population = sum(get_file_size(p) // itemsize for p in primary_paths)
+        minority_population = sum(get_file_size(p) // itemsize for p in minority_paths)
+
+        # Distinct pool each source contributes at this repetition level (both shrink with R => nested).
+        primary_unique = int((1.0 - f) * requested_unique_tokens)
+        minority_unique = int(f * requested_unique_tokens)
+        if primary_unique > primary_population:
+            raise ValueError(
+                f"Primary source '{mix_primary}' has only {primary_population} tokens, but the requested "
+                f"unique pool is {primary_unique} (mix_unique_fraction={frac}, ratio={1.0 - f})."
+            )
+        if minority_unique > minority_population:
+            raise ValueError(
+                f"Minority source '{mix_minority}' has only {minority_population} tokens, but the requested "
+                f"unique pool is {minority_unique} (mix_unique_fraction={frac}, minority_fraction={f})."
+            )
+
+        source_configs = [
+            SourceMixtureConfig(
+                source_name="primary",
+                target_ratio=(1.0 - f),
+                paths=primary_paths,
+            ),
+            SourceMixtureConfig(
+                source_name="minority",
+                target_ratio=f,
+                paths=minority_paths,
+            ),
+        ]
+
+        if requested_unique_tokens < 4096 * 1000:
+            src_mix_batch_size = max(
+                sequence_length,
+                ((requested_unique_tokens + sequence_length - 1) // sequence_length) * sequence_length,
+            )
+        else:
+            src_mix_batch_size = global_batch_size * sequence_length
+
+        src_mix_config = SourceMixtureDatasetConfig(
+            source_list=SourceMixtureList(sources=source_configs),
+            requested_tokens=requested_unique_tokens,
+            global_batch_size=src_mix_batch_size,
+            seed=DATA_SEED,
+        )
+
+        # Namespace the instance-index cache by the data-defining params (ratio + unique fraction),
+        # so different rep levels / ratios do not collide on the shared cache; architectures share.
+        fam_ar_tag = f"famAr_{mix_primary}_{mix_minority}_f{f}_uf{frac}"
+        fam_ar_work_dir = os.path.join(data_work_dir, fam_ar_tag)
+
+        dataset_config = NumpyFSLDatasetConfig.from_src_mix(
+            src_mix_config,
+            tokenizer=tokenizer_config,
+            sequence_length=sequence_length,
+            max_target_sequence_length=sequence_length,
+            work_dir=fam_ar_work_dir,
+            mixture_sample_mode="prefix",
+        )
+
+        log.info(
+            f"Family A+rep mixture: primary={mix_primary} ({1.0 - f:.2f}) + minority={mix_minority} "
+            f"({f:.2f}); unique budget={requested_unique_tokens:,} (mix_unique_fraction={frac}, "
+            f"~{num_repetitions}x re-epoch); primary_unique={primary_unique:,}, "
+            f"minority_unique={minority_unique:,}; total budget={total_budget:,}"
+        )
+    elif mix_primary is not None and mix_minority is not None:
         # === Family B: two-domain mixture with differential per-source repetition ===
         # A generalist "primary" source (e.g. dclm_only) at primary_repetition (usually 1x) is
         # blended with a specialist "minority" source (e.g. starcoder_only/pes2o_only) repeated
@@ -578,6 +685,7 @@ def main(args: argparse.Namespace, overrides: List[str]) -> None:
             minority_fraction=args.minority_fraction,
             minority_repetition=args.minority_repetition,
             primary_repetition=args.primary_repetition,
+            mix_unique_fraction=args.mix_unique_fraction,
             overrides=overrides,
         )
         logger.info("Config built successfully")
@@ -734,7 +842,10 @@ if __name__ == "__main__":
         help="Family B: number of times the minority unique pool is repeated (its pool shrinks as this grows).")
     parser.add_argument("--primary_repetition", type=int, default=1,
         help="Family B: number of times the primary unique pool is repeated (usually 1).")
-    )
+    parser.add_argument("--mix_unique_fraction", type=float, default=None,
+        help="Family A+rep: with --mix_primary/--mix_minority, build the two-source ratio mixture at "
+             "this fraction of the token budget (=1/R) as the unique pool and re-epoch to fill the "
+             "budget. Both sources' pools shrink with R and stay strictly nested; the ratio is fixed.")
     args, overrides = parser.parse_known_args()
 
     # Data prep for large multi-source mixtures (e.g. Family A's ~950-shard, ~6.2B-tokens/shard
