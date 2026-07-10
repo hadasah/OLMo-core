@@ -16,15 +16,18 @@ MODELS = [
     # 'olmo2_ml_200M',
 ]
 
-# === Family A / B: two-domain data-mixing sweeps (additive) ===
-# When RUN_FAMILY_A or RUN_FAMILY_B is True, the sweep's subgrids are replaced (per model) by
-# the corresponding grid produced below; set both False to run the original single-source
-# repetition subgrids defined inline in the grid literal. The two families are mutually
-# exclusive (each replaces the whole subgrid set). INCLUDE_GRANULARITY additionally sweeps 16-
-# and 128-expert variants (fixed active params: top_k=4, hidden_mult=0.25).
-#   Family A: DCLM<->Dolma1.7 interpolation (composition ratios x architecture, rep=1).
-#   Family B: generalist primary + repeated specialist minority (rep ladder x architecture).
-RUN_FAMILY_A = True
+# === Family A / A+rep / B: two-domain data-mixing sweeps (additive) ===
+# When one of the RUN_FAMILY_* toggles is True, the sweep's subgrids are replaced (per model) by
+# the corresponding grid produced below; set all False to run the original single-source
+# repetition subgrids defined inline in the grid literal. The families are mutually exclusive
+# (each replaces the whole subgrid set). INCLUDE_GRANULARITY additionally sweeps 16- and
+# 128-expert variants (fixed active params: top_k=4, hidden_mult=0.25).
+#   Family A:     DCLM<->Dolma3 interpolation (composition ratios x architecture, rep=1).
+#   Family A+rep: the same 5 interpolation ratios x repetition {1,2,4,8,16,32} x architecture,
+#                 unique pool nested across rep (higher R => smaller head-prefix), ratio fixed.
+#   Family B:     generalist primary + repeated specialist minority (rep ladder x architecture).
+RUN_FAMILY_A = False
+RUN_FAMILY_A_REP = True
 RUN_FAMILY_B = False
 INCLUDE_GRANULARITY = False
 
@@ -114,6 +117,63 @@ def build_family_a_subgrids():
                 }
             sg.update(arch)
             subgrids[f"famA_dclm{pct}_{arch_name}"] = sg
+    return subgrids
+
+
+def build_family_a_rep_subgrids():
+    """Family A + repetition: the DCLM<->Dolma3 interpolation crossed with the data-repetition
+    axis. Each of the 5 interpolation ratios {100/0, 75/25, 50/50, 25/75, 0/100} is run at
+    repetition {1,2,4,8,16,32}x, with the *unique* pool strictly nested across rep levels (higher
+    R => smaller file-order head-prefix) and the DCLM:Dolma3 ratio held constant at every R.
+
+    Interiors (75/25, 50/50, 25/75) use the two-source re-epoch path (mix_unique_fraction=1/R): the
+    mixture is built at the unique budget T/R with take_ratio<1 (no in-mixture tiling) and the data
+    loader re-epochs R times to fill the budget T. Endpoints (100/0 = dclm_only, 0/100 = dolma3) use
+    the single-source repetition path (unique_data_fraction=1/R), matching the original single-
+    dataset repetition experiment (and, at rep=1, the plain single-source full run).
+    """
+    arches = [
+        ("dense", {"moe_num_experts_list": ["1"]}),
+        ("moe32", {"moe_num_experts_list": ["32"], "moe_hidden_multipliers_list": ["0.25"],
+                   "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+        ("moe64", {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"],
+                   "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+    ]
+    if INCLUDE_GRANULARITY:
+        arches += [
+            ("moe16", {"moe_num_experts_list": ["16"], "moe_hidden_multipliers_list": ["0.25"],
+                       "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+            ("moe128", {"moe_num_experts_list": ["128"], "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+        ]
+    # repetition R -> unique fraction 1/R of the token budget (both as strings for the CLI).
+    reps = [("1", "1.0"), ("2", "0.5"), ("4", "0.25"), ("8", "0.125"), ("16", "0.0625"), ("32", "0.03125")]
+    # interior blends: (cell label, dolma3 minority fraction)
+    interiors = [("dclm75", "0.25"), ("dclm50", "0.50"), ("dclm25", "0.75")]
+    # endpoints: (cell label, single-source datamix name)
+    endpoints = [("dclm100", "dclm_only"), ("dclm0", "dolma3")]
+    subgrids = {}
+    for rep, frac in reps:
+        for cell, minority_frac in interiors:
+            for arch_name, arch in arches:
+                sg = {
+                    "mix_primary": ["dclm_only"],
+                    "mix_minority": ["dolma3"],
+                    "minority_fraction": [minority_frac],
+                    "mix_unique_fraction": [frac],
+                    "num_repetitions": [rep],
+                }
+                sg.update(arch)
+                subgrids[f"famAr_{cell}_rep{rep}x_{arch_name}"] = sg
+        for cell, datamix in endpoints:
+            for arch_name, arch in arches:
+                sg = {
+                    "train_datamix_name": [datamix],
+                    "unique_data_fraction": [frac],
+                    "num_repetitions": [rep],
+                }
+                sg.update(arch)
+                subgrids[f"famAr_{cell}_rep{rep}x_{arch_name}"] = sg
     return subgrids
 
 
@@ -471,15 +531,19 @@ def main(
                 },
             }
 
-            if RUN_FAMILY_A and RUN_FAMILY_B:
-                raise ValueError("RUN_FAMILY_A and RUN_FAMILY_B are mutually exclusive; enable only one.")
+            if sum([RUN_FAMILY_A, RUN_FAMILY_A_REP, RUN_FAMILY_B]) > 1:
+                raise ValueError(
+                    "RUN_FAMILY_A / RUN_FAMILY_A_REP / RUN_FAMILY_B are mutually exclusive; enable only one."
+                )
             if RUN_FAMILY_A:
-                # Replace the single-source repetition subgrids above with the additive
-                # Family A (DCLM<->Dolma1.7 interpolation) grid.
+                # DCLM<->Dolma3 interpolation (composition, rep=1).
                 grid["subgrids"] = build_family_a_subgrids()
+            elif RUN_FAMILY_A_REP:
+                # DCLM<->Dolma3 interpolation crossed with the repetition axis {1,2,4,8,16,32}x.
+                grid["subgrids"] = build_family_a_rep_subgrids()
             elif RUN_FAMILY_B:
-                # Replace them with the additive Family B (specialist-injection) grid instead.
-                # Set both toggles False to restore the original single-source repetition sweep.
+                # Generalist primary + repeated specialist minority. Set all toggles False to
+                # restore the original single-source repetition sweep defined in the grid literal.
                 grid["subgrids"] = build_family_b_subgrids()
 
             run_grid(
