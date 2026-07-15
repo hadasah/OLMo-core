@@ -375,6 +375,7 @@ def _(json, pd):
         DROPOUT_COL,
         FOM_COL,
         MGN_COL,
+        MODEL_SHADE,
         WD_COL,
         dedupe_runs,
         filter_finished,
@@ -1750,6 +1751,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    MODEL_SHADE,
     get_model_type,
     get_reps,
     get_scale,
@@ -1773,9 +1775,9 @@ def _(
         """Training curves (metric vs. train step) for baseline runs of one
         data mixture + model scale.
 
-        One line per run. Color encodes architecture; repetition count sets both
-        the shade (baseline/lowest-rep darkest -> highest-rep lightest) and the
-        line style. Reads per-step values from the downloaded W&B history.
+        One line per run. Color encodes repetition count; architecture sets both
+        the line style and the shade (dense darkest/solid -> moe64 lightest).
+        Reads per-step values from the downloaded W&B history.
         """
         # Collect baseline runs: {(model_type, reps): run_name} (keep last seen).
         runs: dict = {}
@@ -1803,17 +1805,19 @@ def _(
             runs[(model_type, reps)] = str(row.get("Name", ""))
             rep_set.add(reps)
 
-        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
-        dash_cycle = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
+        from matplotlib.colors import to_hex
+
         rep_order = sorted(rep_set)
-        # Shade + dash per repetition (lowest rep darkest, highest lightest).
-        _DARKEST, _LIGHTEST = -0.45, 0.4
+        # Color per repetition count (spread across a perceptual colormap).
         _nr = len(rep_order)
-        rep_shade = {
-            r: (_DARKEST + (_LIGHTEST - _DARKEST) * i / (_nr - 1) if _nr > 1 else _DARKEST)
+        _cmap = plt.get_cmap("viridis")
+        rep_color = {
+            r: to_hex(_cmap(i / (_nr - 1) if _nr > 1 else 0.0))
             for i, r in enumerate(rep_order)
         }
-        rep_dash = {r: dash_cycle[i % len(dash_cycle)] for i, r in enumerate(rep_order)}
+        # Architecture -> line style + shade (dense darkest/solid, moe64 lightest).
+        arch_dash = {"dense": "-", "moe32": "--", "moe64": ":"}
+        arch_shade = MODEL_SHADE  # {"dense": 0.0, "moe32": 0.35, "moe64": 0.65}
 
         fig, ax = plt.subplots(figsize=(6.5, 4.5))
         any_data = False
@@ -1835,8 +1839,8 @@ def _(
                 xs,
                 ys,
                 linewidth=1.0,
-                linestyle=rep_dash[reps],
-                color=shade_color(color_map[model_type], rep_shade[reps]),
+                linestyle=arch_dash.get(model_type, "-"),
+                color=shade_color(rep_color[reps], arch_shade.get(model_type, 0.0)),
             )
         ax.set_xlabel("train step")
         ax.set_ylabel(metric)
@@ -1851,23 +1855,23 @@ def _(
             def _header():
                 return Line2D([0], [0], linestyle="none", marker="", label="")
 
+            # Model type -> line style + shade (shown in grey so style/shade read clearly).
             model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
             model_handles = [
-                Line2D([0], [0], color=color_map[m], linewidth=2, linestyle="-")
-                for m in model_order
-            ]
-            rep_shown = [r for r in rep_order if r in shown_reps]
-            _ng = len(rep_shown)
-            _grey_top = 0.7
-            rep_handles = [
                 Line2D(
                     [0],
                     [0],
-                    color=shade_color("#000000", _grey_top * i / (_ng - 1) if _ng > 1 else 0.0),
+                    color=shade_color("#000000", arch_shade.get(m, 0.0) + 0.2),
                     linewidth=1.5,
-                    linestyle=rep_dash[r],
+                    linestyle=arch_dash.get(m, "-"),
                 )
-                for i, r in enumerate(rep_shown)
+                for m in model_order
+            ]
+            # Repetitions -> color.
+            rep_shown = [r for r in rep_order if r in shown_reps]
+            rep_handles = [
+                Line2D([0], [0], color=rep_color[r], linewidth=2, linestyle="-")
+                for r in rep_shown
             ]
             handles = [_header()] + model_handles + [_header()] + rep_handles
             labels = (
