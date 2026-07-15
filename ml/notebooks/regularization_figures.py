@@ -622,6 +622,20 @@ def _(mo, raw_df, save_pdf):
             # full_width=True,
         )
 
+    _ARCH_OPTIONS = ["dense", "moe32", "moe64"]
+
+    def arch_multiselect(label, chosen_values=None):
+        """A per-plot multi-select over the architectures (dense/moe32/moe64).
+
+        Its ``.value`` is a list suitable to pass as ``include_archs``. Defaults to
+        all architectures selected.
+        """
+        return mo.ui.multiselect(
+            options=_ARCH_OPTIONS,
+            value=chosen_values if chosen_values is not None else list(_ARCH_OPTIONS),
+            label=label,
+        )
+
     def render_side_by_side(metrics, build_fig, plot_key):
         """Render one figure per selected metric, laid out side by side.
 
@@ -637,7 +651,7 @@ def _(mo, raw_df, save_pdf):
             figs.append(fig)
         return mo.hstack(figs, widths="equal", gap=1, wrap=True)
 
-    return metric_multiselect, render_side_by_side
+    return arch_multiselect, metric_multiselect, render_side_by_side
 
 
 @app.cell(column=1, hide_code=True)
@@ -1948,11 +1962,12 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_curve_olmo_80m = metric_multiselect(
         "curves: olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_curve_olmo_80m
-    return (sel_curve_olmo_80m,)
+    sel_curve_olmo_80m_arch = arch_multiselect("curves: olmo_mix 80M — architectures")
+    mo.vstack([sel_curve_olmo_80m, sel_curve_olmo_80m_arch])
+    return sel_curve_olmo_80m, sel_curve_olmo_80m_arch
 
 
 @app.cell(hide_code=True)
@@ -1961,10 +1976,13 @@ def _(
     make_training_curve_figure,
     render_side_by_side,
     sel_curve_olmo_80m,
+    sel_curve_olmo_80m_arch,
 ):
     _out = render_side_by_side(
         sel_curve_olmo_80m.value,
-        lambda m: make_training_curve_figure(finished_df, "olmo_mix", "80M", m),
+        lambda m: make_training_curve_figure(
+            finished_df, "olmo_mix", "80M", m, include_archs=sel_curve_olmo_80m_arch.value
+        ),
         "curve_olmo_mix_80M",
     )
     _out
@@ -1972,11 +1990,12 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_curve_olmo_200m = metric_multiselect(
         "curves: olmo_mix 200M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_curve_olmo_200m
-    return (sel_curve_olmo_200m,)
+    sel_curve_olmo_200m_arch = arch_multiselect("curves: olmo_mix 200M — architectures")
+    mo.vstack([sel_curve_olmo_200m, sel_curve_olmo_200m_arch])
+    return sel_curve_olmo_200m, sel_curve_olmo_200m_arch
 
 
 @app.cell(hide_code=True)
@@ -1985,10 +2004,13 @@ def _(
     make_training_curve_figure,
     render_side_by_side,
     sel_curve_olmo_200m,
+    sel_curve_olmo_200m_arch,
 ):
     _out = render_side_by_side(
         sel_curve_olmo_200m.value,
-        lambda m: make_training_curve_figure(finished_df, "olmo_mix", "200M", m),
+        lambda m: make_training_curve_figure(
+            finished_df, "olmo_mix", "200M", m, include_archs=sel_curve_olmo_200m_arch.value
+        ),
         "curve_olmo_mix_200M",
     )
     _out
@@ -2004,11 +2026,12 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_curve_dclm_80m = metric_multiselect(
         "curves: dclm 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_curve_dclm_80m
-    return (sel_curve_dclm_80m,)
+    sel_curve_dclm_80m_arch = arch_multiselect("curves: dclm 80M — architectures")
+    mo.vstack([sel_curve_dclm_80m, sel_curve_dclm_80m_arch])
+    return sel_curve_dclm_80m, sel_curve_dclm_80m_arch
 
 
 @app.cell(hide_code=True)
@@ -2017,10 +2040,13 @@ def _(
     make_training_curve_figure,
     render_side_by_side,
     sel_curve_dclm_80m,
+    sel_curve_dclm_80m_arch,
 ):
     _out = render_side_by_side(
         sel_curve_dclm_80m.value,
-        lambda m: make_training_curve_figure(finished_df, "dclm", "80M", m),
+        lambda m: make_training_curve_figure(
+            finished_df, "dclm", "80M", m, include_archs=sel_curve_dclm_80m_arch.value
+        ),
         "curve_dclm_80M",
     )
     _out
@@ -2028,11 +2054,12 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_curve_starcoder_80m = metric_multiselect(
         "curves: starcoder 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
-    sel_curve_starcoder_80m
-    return (sel_curve_starcoder_80m,)
+    sel_curve_starcoder_80m_arch = arch_multiselect("curves: starcoder 80M — architectures")
+    mo.vstack([sel_curve_starcoder_80m, sel_curve_starcoder_80m_arch])
+    return sel_curve_starcoder_80m, sel_curve_starcoder_80m_arch
 
 
 @app.cell(hide_code=True)
@@ -2041,10 +2068,13 @@ def _(
     make_training_curve_figure,
     render_side_by_side,
     sel_curve_starcoder_80m,
+    sel_curve_starcoder_80m_arch,
 ):
     _out = render_side_by_side(
         sel_curve_starcoder_80m.value,
-        lambda m: make_training_curve_figure(finished_df, "starcoder", "80M", m),
+        lambda m: make_training_curve_figure(
+            finished_df, "starcoder", "80M", m, include_archs=sel_curve_starcoder_80m_arch.value
+        ),
         "curve_starcoder_80M",
     )
     _out
@@ -2052,11 +2082,12 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_curve_pes2o_80m = metric_multiselect(
         "curves: pes2o 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
-    sel_curve_pes2o_80m
-    return (sel_curve_pes2o_80m,)
+    sel_curve_pes2o_80m_arch = arch_multiselect("curves: pes2o 80M — architectures")
+    mo.vstack([sel_curve_pes2o_80m, sel_curve_pes2o_80m_arch])
+    return sel_curve_pes2o_80m, sel_curve_pes2o_80m_arch
 
 
 @app.cell(hide_code=True)
@@ -2065,10 +2096,13 @@ def _(
     make_training_curve_figure,
     render_side_by_side,
     sel_curve_pes2o_80m,
+    sel_curve_pes2o_80m_arch,
 ):
     _out = render_side_by_side(
         sel_curve_pes2o_80m.value,
-        lambda m: make_training_curve_figure(finished_df, "pes2o", "80M", m),
+        lambda m: make_training_curve_figure(
+            finished_df, "pes2o", "80M", m, include_archs=sel_curve_pes2o_80m_arch.value
+        ),
         "curve_pes2o_80M",
     )
     _out
@@ -2076,12 +2110,13 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_curve_wiki_80m = metric_multiselect(
         "curves: wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss"]
     )
-    sel_curve_wiki_80m
-    return (sel_curve_wiki_80m,)
+    sel_curve_wiki_80m_arch = arch_multiselect("curves: wiki 80M — architectures")
+    mo.vstack([sel_curve_wiki_80m, sel_curve_wiki_80m_arch])
+    return sel_curve_wiki_80m, sel_curve_wiki_80m_arch
 
 
 @app.cell(hide_code=True)
@@ -2090,10 +2125,13 @@ def _(
     make_training_curve_figure,
     render_side_by_side,
     sel_curve_wiki_80m,
+    sel_curve_wiki_80m_arch,
 ):
     _out = render_side_by_side(
         sel_curve_wiki_80m.value,
-        lambda m: make_training_curve_figure(finished_df, "wiki", "80M", m),
+        lambda m: make_training_curve_figure(
+            finished_df, "wiki", "80M", m, include_archs=sel_curve_wiki_80m_arch.value
+        ),
         "curve_wiki_80M",
     )
     _out
