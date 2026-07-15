@@ -449,6 +449,10 @@ def _(MODEL_SHADE, plt, shade_color):
     from matplotlib.lines import Line2D
 
     ARCH_DASH = {"dense": "-", "moe32": "--", "moe64": ":"}
+    # Per-architecture base color, used only by plots where architecture is the sole
+    # variable (Groups 1 & 2). Elsewhere color encodes the factor and architecture is
+    # carried by line style + shade.
+    ARCH_COLOR = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
 
     def arch_dash(model_type):
         return ARCH_DASH.get(model_type, "-")
@@ -474,10 +478,18 @@ def _(MODEL_SHADE, plt, shade_color):
         return {k: to_hex(cmap(i / (n - 1))) for i, k in enumerate(keys)}
 
     def arch_factor_legend(
-        ax, shown_archs, factor_title=None, factor_keys=(), factor_color=None, key_fmt=str
+        ax,
+        shown_archs,
+        factor_title=None,
+        factor_keys=(),
+        factor_color=None,
+        key_fmt=str,
+        arch_colored=False,
     ):
-        """Single-box legend. Section 1: line style + shade -> architecture (drawn in
-        grey so only style/shade read). Section 2 (optional): color -> factor."""
+        """Single-box legend. Section 1: line style + shade -> architecture. When
+        ``arch_colored`` is set, the architecture swatches also use each arch's base
+        color (for Groups 1 & 2, where color encodes architecture); otherwise they are
+        drawn in grey so only style/shade read. Section 2 (optional): color -> factor."""
 
         def _header():
             return Line2D([0], [0], linestyle="none", marker="", label="")
@@ -487,7 +499,11 @@ def _(MODEL_SHADE, plt, shade_color):
             Line2D(
                 [0],
                 [0],
-                color=shade_color("#000000", arch_shade(a) + 0.2),
+                color=(
+                    arch_color(ARCH_COLOR[a], a)
+                    if arch_colored
+                    else shade_color("#000000", arch_shade(a) + 0.2)
+                ),
                 linewidth=1.5,
                 linestyle=arch_dash(a),
             )
@@ -516,7 +532,13 @@ def _(MODEL_SHADE, plt, shade_color):
             if text.get_text() in ("Model type", factor_title):
                 text.set_fontweight("bold")
 
-    return arch_color, arch_dash, arch_factor_legend, factor_palette
+    return (
+        ARCH_COLOR,
+        arch_color,
+        arch_dash,
+        arch_factor_legend,
+        factor_palette,
+    )
 
 
 @app.cell(hide_code=True)
@@ -790,6 +812,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    ARCH_COLOR,
     arch_color,
     arch_dash,
     arch_factor_legend,
@@ -867,9 +890,9 @@ def _(
     ):
         """One figure: Dense + MoE32 + MoE64 baseline, metric vs reps (log X).
 
-        Architecture is distinguished by line style + shade (dense solid/darkest,
-        moe32 dashed, moe64 dotted/lightest). There is no second factor here, so
-        color is not used (each series is a shade of grey).
+        Architecture is the only variable here, so it drives all three encodings:
+        color (dense blue, moe32 green, moe64 red), line style (solid/dashed/dotted)
+        and shade (dense darkest -> moe64 lightest).
 
         Filters (all default to no-op):
 
@@ -900,7 +923,7 @@ def _(
                 markersize=4,
                 linewidth=1.2,
                 linestyle=arch_dash(model_type),
-                color=arch_color("#000000", model_type),
+                color=arch_color(ARCH_COLOR[model_type], model_type),
             )
         title = f"{data_tag} — {scale}\n{metric} vs. repetition (baseline)"
         if not any_data:
@@ -910,7 +933,7 @@ def _(
         ax.set_ylabel(axis_label(metric))
         ax.set_title(title, fontsize=10)
         if any_data:
-            arch_factor_legend(ax, shown_archs)
+            arch_factor_legend(ax, shown_archs, arch_colored=True)
         fig.tight_layout()
         return fig
 
