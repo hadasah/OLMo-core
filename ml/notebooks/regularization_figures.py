@@ -1181,17 +1181,27 @@ def _(
             series[key][reps] = min(loss, prev) if prev is not None else float(loss)
 
         # Color encodes the factor value; architecture sets the line style + shade.
-        # `extra_buckets` (e.g. max_grad_norm "no clip") come first, then baseline,
-        # then the swept values in ascending order.
-        ordered_buckets = extra_buckets + ["baseline"] + sorted(factor_values)
+        # Buckets are ordered by their numeric value: extra buckets (e.g. max_grad_norm
+        # "no clip") sort first (treated as 0), then the baseline and swept values are
+        # interleaved by magnitude. This puts e.g. max_grad_norm at "0 (no clip)", 0.2,
+        # 1.0 rather than grouping the baseline right after the extra bucket.
+        baseline_display = baseline_value if baseline_value is not None else 0.0
+
+        def _bucket_sort_key(b):
+            if b == "baseline":
+                return baseline_display
+            if isinstance(b, str):  # extra bucket (e.g. "no clip") -> first
+                return float("-inf")
+            return b
+
+        ordered_buckets = sorted(
+            extra_buckets + ["baseline"] + list(factor_values), key=_bucket_sort_key
+        )
         bucket_color = factor_palette(ordered_buckets)
 
         fig, ax = plt.subplots(figsize=(6.5, 4.5))
         any_data = False
         max_reps = 0
-        # The factor value the baseline actually takes (dropout/jitter/eom/fom -> 0.0,
-        # weight_decay -> 0.1, max_grad_norm -> 1.0). Shown as its numeric value.
-        baseline_display = baseline_value if baseline_value is not None else 0.0
 
         def _bucket_label(fval_key):
             if fval_key == "baseline":
@@ -1312,11 +1322,11 @@ def _(
     sel_max_grad_norm,
 ):
     # Max grad norm: baseline = the default 1.0; swept value is 0.2; a `null` (no
-    # clipping) setting is bucketed separately via nan_label.
+    # clipping) setting is bucketed separately via nan_label and sorts first as 0.
     _out = render_side_by_side(
         sel_max_grad_norm.value,
         lambda m: make_factor_figure(
-            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="no clip", exclude_reps=[128,256]
+            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="0 (no clip)", exclude_reps=[128,256]
         ),
         "max_grad_norm",
     )
