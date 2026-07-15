@@ -31,6 +31,12 @@ for terminal runs (finished/failed/crashed) that already have a non-empty file
 on disk is skipped, since it can no longer change. Pass ``--refresh-history`` to
 force a full re-fetch. History for still-running runs is always re-downloaded.
 
+wandb serves history from a server-side parquet cache that can lag for recently
+finished runs and return a *truncated* history. Each run's downloaded history is
+checked against its reported ``lastHistoryStep`` and, if short, automatically
+re-fetched with the cache bypassed. Pass ``--no-history-cache`` to bypass the
+cache for every run up front.
+
 The output directory (default ``ml/runs_data``) will contain:
 
     wandb_export.csv        wide, web-export-compatible run table (read by the
@@ -100,6 +106,7 @@ class DownloadConfig:
     include_history: bool
     history_table: bool
     refresh_history: bool
+    history_use_cache: bool
     workers: int
     timeout: int
     tags: list[str] = field(default_factory=list)
@@ -295,17 +302,78 @@ def _should_skip_history(run: Any, output_dir: Path, refresh: bool) -> bool:
     return (run.state in TERMINAL_STATES) and _has_cached_history(output_dir, run.id)
 
 
-def fetch_history(run: Any, output_dir: Path) -> tuple[str, int]:
-    """Stream one run's full per-step history to history/<run_id>.jsonl."""
-    path = _history_path(output_dir, run.id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+def _expected_last_step(run: Any) -> int | None:
+    """The run's true final history step, if wandb reports it.
+
+    ``lastHistoryStep`` is 0-indexed, so a complete history has
+    ``lastHistoryStep + 1`` rows. Returns None when unavailable.
+    """
+    for source in (getattr(run, "lastHistoryStep", None), lambda: run._attrs.get("lastHistoryStep")):
+        try:
+            val = source() if callable(source) else source
+        except Exception:  # noqa: BLE001 - attr access may raise
+            val = None
+        if isinstance(val, int) and val >= 0:
+            return val
+    return None
+
+
+def _scan_to_file(run: Any, tmp: Path, *, use_cache: bool) -> tuple[int, int | None]:
+    """Stream scan_history to ``tmp``; return (row_count, max_step_seen)."""
     rows = 0
+    max_step: int | None = None
     with tmp.open("w", encoding="utf-8") as handle:
-        for entry in run.scan_history():
+        for entry in run.scan_history(use_cache=use_cache):
             handle.write(json.dumps(_to_plain(entry)))
             handle.write("\n")
             rows += 1
+            step = entry.get("_step") if isinstance(entry, dict) else None
+            if isinstance(step, int) and (max_step is None or step > max_step):
+                max_step = step
+    return rows, max_step
+
+
+def fetch_history(run: Any, output_dir: Path, *, use_cache: bool = True) -> tuple[str, int]:
+    """Stream one run's full per-step history to history/<run_id>.jsonl.
+
+    wandb's ``scan_history`` reads a server-generated parquet cache by default
+    (``use_cache=True``). For recently-finished runs that export can lag and
+    serve a *truncated* history (fewer rows than the run actually logged). We
+    detect that by comparing the max ``_step`` written against the run's
+    ``lastHistoryStep`` and, if short, transparently re-fetch with the cache
+    bypassed. Pass ``use_cache=False`` to skip the cache on the first attempt.
+    """
+    path = _history_path(output_dir, run.id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+
+    expected_last = _expected_last_step(run)
+    rows, max_step = _scan_to_file(run, tmp, use_cache=use_cache)
+
+    # Cached parquet can lag for recent runs -> retry uncached if truncated.
+    truncated = (
+        use_cache
+        and expected_last is not None
+        and (max_step is None or max_step < expected_last)
+    )
+    if truncated:
+        logger.warning(
+            "History for %s looks truncated (max step %s < expected %s); "
+            "re-fetching with cache bypassed",
+            run.id,
+            max_step,
+            expected_last,
+        )
+        rows, max_step = _scan_to_file(run, tmp, use_cache=False)
+        if expected_last is not None and (max_step is None or max_step < expected_last):
+            logger.warning(
+                "History for %s still short after uncached fetch "
+                "(max step %s < expected %s); wandb may not have this data yet",
+                run.id,
+                max_step,
+                expected_last,
+            )
+
     tmp.replace(path)
     return run.id, rows
 
@@ -396,7 +464,10 @@ def download(cfg: DownloadConfig) -> dict[str, Any]:
         completed = 0
         with ThreadPoolExecutor(max_workers=max(1, cfg.workers)) as executor:
             futures = {
-                executor.submit(fetch_history, run, cfg.output_dir): run.id for run in to_fetch
+                executor.submit(
+                    fetch_history, run, cfg.output_dir, use_cache=cfg.history_use_cache
+                ): run.id
+                for run in to_fetch
             }
             for future in as_completed(futures):
                 run_id = futures[future]
@@ -454,6 +525,17 @@ def _parse_args(argv: list[str] | None = None) -> DownloadConfig:
             "file are skipped (their history is final)."
         ),
     )
+    parser.add_argument(
+        "--no-history-cache",
+        dest="history_use_cache",
+        action="store_false",
+        help=(
+            "Bypass wandb's server-side parquet cache when downloading history. "
+            "By default the cache is used (faster), and any run whose history "
+            "comes back truncated is automatically re-fetched uncached; this flag "
+            "forces the uncached path for every run up front."
+        ),
+    )
     parser.add_argument("--workers", type=int, default=min(32, (os.cpu_count() or 8) + 4))
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument(
@@ -482,6 +564,7 @@ def _parse_args(argv: list[str] | None = None) -> DownloadConfig:
         include_history=args.include_history,
         history_table=args.history_table,
         refresh_history=args.refresh_history,
+        history_use_cache=args.history_use_cache,
         workers=args.workers,
         timeout=args.timeout,
         tags=args.tags,
