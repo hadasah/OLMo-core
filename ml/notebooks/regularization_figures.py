@@ -457,6 +457,27 @@ def _(mo, raw_df, save_pdf):
     return metric_multiselect, render_side_by_side
 
 
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_famA_rep = metric_multiselect(
+        "famA (vs reps) — metrics",
+        chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"],
+    )
+    sel_famA_rep
+    return (sel_famA_rep,)
+
+
+@app.cell(hide_code=True)
+def _(finished_df, make_famA_rep_figure, render_side_by_side, sel_famA_rep):
+    _out = render_side_by_side(
+        sel_famA_rep.value,
+        lambda m: make_famA_rep_figure(finished_df, m),
+        "famA_rep",
+    )
+    _out
+    return
+
+
 @app.cell(column=1, hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -1146,31 +1167,102 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Group 4 — `famA` runs: metric vs. %dclm
+    ## Group 4 — `famA` runs
 
-    Every finished run whose name contains `famA`. The X axis is the DCLM
-    percentage parsed from `dclm{N}` in the run name (0, 25, 50, 75, 100);
-    Y is the chosen metric. Lines are colored by model type.
+    Every finished run whose name contains `famA`. Color = model type (parsed from
+    the run-name suffix, since the newer `famAr` rep-sweep runs are only tagged
+    `MoE`). Two plots:
+
+    1. **metric vs. %dclm** (0/25/50/75/100 from `dclm{N}` in the name) — line style
+       + shade encode the repetition count.
+    2. **metric vs. repetition count** (log X; `rep{N}x` in the name, original famA
+       runs are rep 1) — line style + shade encode %dclm.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(get_model_type, keep_arch, pd, plt, re):
+def _(apply_pow2_xaxis, keep_arch, pd, plt, re, shade_color):
     def parse_dclm_pct(name: str):
         """Extract the DCLM percentage from a 'dclm{N}' token in the run name."""
         m = re.search(r"dclm(\d+)", str(name))
         return int(m.group(1)) if m else None
 
-    def make_famA_figure(df, metric, include_archs=None, exclude_archs=None):
-        """famA: metric vs. %dclm, one line per architecture.
+    def famA_model_type(name: str):
+        """Model type from the run-name suffix (famAr runs aren't tagged MoE32/64)."""
+        m = re.search(r"_(dense|moe32|moe64)$", str(name))
+        return m.group(1) if m else None
 
-        ``include_archs`` / ``exclude_archs`` keep/drop architectures. (There is no
-        repetition axis here, so rep filters do not apply.)
-        """
-        colors = {"dense": "#1f77b4", "moe64": "#d62728", "moe32": "#2ca02c"}
-        # Collect points per model type.
-        per_type: dict = {}
+    def famA_reps(name: str) -> float:
+        """Repetition count from a 'rep{N}x' token; original famA runs (no token)
+        are single-pass, i.e. rep 1."""
+        m = re.search(r"rep(\d+)x", str(name))
+        return float(m.group(1)) if m else 1.0
+
+    _DASH_CYCLE = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
+    _COLORS = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
+
+    def _style_maps(keys):
+        """Given ordered numeric keys, return {key: dash} and {key: shade level}
+        (first darkest -> last lightest)."""
+        _DARKEST, _LIGHTEST = -0.45, 0.4
+        n = len(keys)
+        dash = {k: _DASH_CYCLE[i % len(_DASH_CYCLE)] for i, k in enumerate(keys)}
+        shade = {
+            k: (_DARKEST + (_LIGHTEST - _DARKEST) * i / (n - 1) if n > 1 else _DARKEST)
+            for i, k in enumerate(keys)
+        }
+        return dash, shade
+
+    def _famA_legend(ax, shown_models, style_title, style_keys, style_dash, key_fmt):
+        """Single-box legend: color -> model type, line style -> the other factor."""
+        from matplotlib.lines import Line2D
+
+        def header():
+            return Line2D([0], [0], linestyle="none", marker="", label="")
+
+        model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
+        model_handles = [
+            Line2D([0], [0], color=_COLORS[m], linewidth=2, linestyle="-")
+            for m in model_order
+        ]
+        ng = len(style_keys)
+        grey_top = 0.7
+        style_handles = [
+            Line2D(
+                [0],
+                [0],
+                color=shade_color("#000000", grey_top * i / (ng - 1) if ng > 1 else 0.0),
+                linewidth=1.5,
+                linestyle=style_dash[k],
+            )
+            for i, k in enumerate(style_keys)
+        ]
+        handles = [header()] + model_handles + [header()] + style_handles
+        labels = (
+            ["Model type"]
+            + model_order
+            + [style_title]
+            + [key_fmt(k) for k in style_keys]
+        )
+        legend = ax.legend(
+            handles,
+            labels,
+            fontsize=7,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0.0,
+            handlelength=2.2,
+        )
+        for text in legend.get_texts():
+            if text.get_text() in ("Model type", style_title):
+                text.set_fontweight("bold")
+
+    def make_famA_figure(df, metric, include_archs=None, exclude_archs=None):
+        """famA: metric vs. %dclm. Color = model type; line style + shade = rep count."""
+        # Collect: {(model_type, reps): [(pct, value), ...]}
+        series: dict = {}
+        rep_set = set()
         for _, row in df.iterrows():
             name = str(row.get("Name", ""))
             if "famA" not in name:
@@ -1179,33 +1271,101 @@ def _(get_model_type, keep_arch, pd, plt, re):
             loss = row.get(metric)
             if pct is None or pd.isna(loss):
                 continue
-            mt = get_model_type(row)
-            if not keep_arch(mt, include_archs, exclude_archs):
+            mt = famA_model_type(name)
+            if mt is None or not keep_arch(mt, include_archs, exclude_archs):
                 continue
-            per_type.setdefault(mt, []).append((pct, float(loss)))
+            reps = famA_reps(name)
+            series.setdefault((mt, reps), []).append((pct, float(loss)))
+            rep_set.add(reps)
 
+        rep_order = sorted(rep_set)
+        rep_dash, rep_shade = _style_maps(rep_order)
         fig, ax = plt.subplots(figsize=(5.5, 4.5))
-        for mt in sorted(per_type):
-            pts = sorted(per_type[mt])
+        shown_models = []
+        for (mt, reps), pts in sorted(series.items()):
+            pts = sorted(pts)
+            if mt not in shown_models:
+                shown_models.append(mt)
             ax.plot(
                 [p[0] for p in pts],
                 [p[1] for p in pts],
                 marker="o",
-                markersize=7,
-                linewidth=2,
-                color=colors.get(mt, "#7f7f7f"),
-                label=mt,
+                markersize=5,
+                linewidth=1.5,
+                linestyle=rep_dash[reps],
+                color=shade_color(_COLORS[mt], rep_shade[reps]),
             )
         ax.set_xticks([0, 25, 50, 75, 100])
         ax.set_xlabel("% dclm")
         ax.set_ylabel(metric)
         ax.set_title(f"famA runs: {metric} vs. %dclm", fontsize=10)
-        if per_type:
-            ax.legend(fontsize=8)
+        if series:
+            _famA_legend(
+                ax, shown_models, "Repetitions", rep_order, rep_dash, lambda r: f"{r:g}x"
+            )
         fig.tight_layout()
         return fig
 
-    return (make_famA_figure,)
+    def make_famA_rep_figure(df, metric, include_archs=None, exclude_archs=None):
+        """famA: metric vs. repetition count (log X). Color = model type; line style +
+        shade = %dclm."""
+        # Collect: {(model_type, pct): [(reps, value), ...]}
+        series: dict = {}
+        pct_set = set()
+        for _, row in df.iterrows():
+            name = str(row.get("Name", ""))
+            if "famA" not in name:
+                continue
+            pct = parse_dclm_pct(name)
+            loss = row.get(metric)
+            if pct is None or pd.isna(loss):
+                continue
+            mt = famA_model_type(name)
+            if mt is None or not keep_arch(mt, include_archs, exclude_archs):
+                continue
+            reps = famA_reps(name)
+            series.setdefault((mt, pct), []).append((reps, float(loss)))
+            pct_set.add(pct)
+
+        pct_order = sorted(pct_set)
+        pct_dash, pct_shade = _style_maps(pct_order)
+        fig, ax = plt.subplots(figsize=(5.5, 4.5))
+        shown_models = []
+        max_reps = 0
+        any_data = False
+        for (mt, pct), pts in sorted(series.items()):
+            # Collapse duplicate rep counts (keep min).
+            by_reps: dict = {}
+            for reps, val in pts:
+                by_reps[reps] = min(val, by_reps.get(reps, val))
+            xy = sorted(by_reps.items())
+            if not xy:
+                continue
+            any_data = True
+            if mt not in shown_models:
+                shown_models.append(mt)
+            max_reps = max(max_reps, max(r for r, _ in xy))
+            ax.plot(
+                [r for r, _ in xy],
+                [v for _, v in xy],
+                marker="o",
+                markersize=5,
+                linewidth=1.5,
+                linestyle=pct_dash[pct],
+                color=shade_color(_COLORS[mt], pct_shade[pct]),
+            )
+        apply_pow2_xaxis(ax, max_reps, any_data)
+        ax.set_xlabel("repetition count")
+        ax.set_ylabel(metric)
+        ax.set_title(f"famA runs: {metric} vs. repetition", fontsize=10)
+        if any_data:
+            _famA_legend(
+                ax, shown_models, "% dclm", pct_order, pct_dash, lambda p: f"{p:g}%"
+            )
+        fig.tight_layout()
+        return fig
+
+    return make_famA_figure, make_famA_rep_figure
 
 
 @app.cell(hide_code=True)
