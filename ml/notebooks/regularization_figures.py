@@ -450,9 +450,15 @@ def _(MODEL_SHADE, plt, shade_color):
 
     ARCH_DASH = {"dense": "-", "moe32": "--", "moe64": ":"}
     # Per-architecture base color, used only by plots where architecture is the sole
-    # variable (Groups 1 & 2). Elsewhere color encodes the factor and architecture is
-    # carried by line style + shade.
-    ARCH_COLOR = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
+    # variable (Groups 1 & 2). These are the viridis endpoints (purple / greenish-blue
+    # / yellow) so they match the factor palette used everywhere else. Elsewhere color
+    # encodes the factor and architecture is carried by line style + shade.
+    _viridis = plt.get_cmap("viridis")
+    ARCH_COLOR = {
+        "dense": to_hex(_viridis(0.0)),
+        "moe32": to_hex(_viridis(0.5)),
+        "moe64": to_hex(_viridis(1.0)),
+    }
 
     def arch_dash(model_type):
         return ARCH_DASH.get(model_type, "-")
@@ -500,7 +506,7 @@ def _(MODEL_SHADE, plt, shade_color):
                 [0],
                 [0],
                 color=(
-                    arch_color(ARCH_COLOR[a], a)
+                    ARCH_COLOR[a]
                     if arch_colored
                     else shade_color("#000000", arch_shade(a) + 0.2)
                 ),
@@ -813,7 +819,6 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     ARCH_COLOR,
-    arch_color,
     arch_dash,
     arch_factor_legend,
     axis_label,
@@ -890,9 +895,9 @@ def _(
     ):
         """One figure: Dense + MoE32 + MoE64 baseline, metric vs reps (log X).
 
-        Architecture is the only variable here, so it drives all three encodings:
-        color (dense blue, moe32 green, moe64 red), line style (solid/dashed/dotted)
-        and shade (dense darkest -> moe64 lightest).
+        Architecture is the only variable here, so it drives color (dense = purple,
+        moe32 = greenish-blue, moe64 = yellow, i.e. the viridis palette used by the
+        factor plots) as well as line style (solid/dashed/dotted).
 
         Filters (all default to no-op):
 
@@ -923,7 +928,7 @@ def _(
                 markersize=4,
                 linewidth=1.2,
                 linestyle=arch_dash(model_type),
-                color=arch_color(ARCH_COLOR[model_type], model_type),
+                color=ARCH_COLOR[model_type],
             )
         title = f"{data_tag} — {scale}\n{metric} vs. repetition (baseline)"
         if not any_data:
