@@ -353,7 +353,44 @@ def _(json, os):
         _history_cache[cache_key] = series
         return series
 
-    return (load_history_series,)
+    # Metric that gets smoothed for the column-1 (final-value) plots, and how the
+    # smoothed axis is labeled.
+    SMOOTHED_METRIC = "train/CE loss"
+    SMOOTH_WINDOW = 100
+    SMOOTHED_LABEL = f"{SMOOTHED_METRIC} (last-{SMOOTH_WINDOW}-step avg)"
+
+    def smoothed_train_loss(run_name: str, window: int = SMOOTH_WINDOW):
+        """Mean of ``train/CE loss`` over the last `window` logged steps of a run.
+
+        train/CE loss is logged every step, so the last `window` logged points are
+        the last `window` steps. Returns None if the run has no usable history.
+        """
+        series = load_history_series(run_name, SMOOTHED_METRIC)
+        if not series:
+            return None
+        tail = series[-window:]
+        if not tail:
+            return None
+        return sum(v for _, v in tail) / len(tail)
+
+    def metric_value(row, metric):
+        """Value to plot for `metric` in the column-1 (final-value) figures.
+
+        For ``train/CE loss`` this is the mean over the last SMOOTH_WINDOW steps from
+        the run's history; every other metric uses its raw final value from the CSV.
+        Falls back to the raw CSV value if a run has no history.
+        """
+        if metric == SMOOTHED_METRIC:
+            sm = smoothed_train_loss(str(row.get("Name", "")))
+            if sm is not None:
+                return sm
+        return row.get(metric)
+
+    def axis_label(metric):
+        """Y-axis / legend label for a metric (annotates the smoothed train loss)."""
+        return SMOOTHED_LABEL if metric == SMOOTHED_METRIC else metric
+
+    return axis_label, load_history_series, metric_value
 
 
 @app.cell(hide_code=True)
@@ -472,12 +509,14 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    axis_label,
     filter_rep_points,
     get_model_type,
     get_reps,
     get_scale,
     has_tag,
     keep_arch,
+    metric_value,
     pd,
     plt,
     pow2_ticks,
@@ -501,7 +540,7 @@ def _(
             if not has_tag(row, data_tag):
                 continue
             reps = get_reps(row)
-            loss = row.get(metric)
+            loss = metric_value(row, metric)
             if pd.isna(reps) or pd.isna(loss):
                 continue
             rows.append((reps, float(loss), str(row.get("Name", ""))))
@@ -584,7 +623,7 @@ def _(
             title += "  [no finished baseline runs]"
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
-        ax.set_ylabel(metric)
+        ax.set_ylabel(axis_label(metric))
         ax.set_title(title, fontsize=10)
         if any_data:
             # plt.rcParams['legend.numpoints'] = 1
@@ -735,12 +774,14 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     apply_pow2_xaxis,
+    axis_label,
     filter_rep_points,
     get_model_type,
     get_reps,
     get_scale,
     has_tag,
     keep_arch,
+    metric_value,
     pd,
     plt,
     shade_color,
@@ -805,7 +846,7 @@ def _(
             if not keep_arch(model_type, include_archs, exclude_archs):
                 continue
             reps = get_reps(row)
-            loss = row.get(metric)
+            loss = metric_value(row, metric)
             if pd.isna(reps) or pd.isna(loss):
                 continue
 
@@ -895,7 +936,7 @@ def _(
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
-        ax.set_ylabel(metric)
+        ax.set_ylabel(axis_label(metric))
         ax.set_title(f"{factor_label} — {metric} (olmo_mix, 80M)", fontsize=10)
         if any_data:
             from matplotlib.lines import Line2D
@@ -1161,7 +1202,16 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(apply_pow2_xaxis, keep_arch, pd, plt, re, shade_color):
+def _(
+    apply_pow2_xaxis,
+    axis_label,
+    keep_arch,
+    metric_value,
+    pd,
+    plt,
+    re,
+    shade_color,
+):
     def parse_dclm_pct(name: str):
         """Extract the DCLM percentage from a 'dclm{N}' token in the run name."""
         m = re.search(r"dclm(\d+)", str(name))
@@ -1247,7 +1297,7 @@ def _(apply_pow2_xaxis, keep_arch, pd, plt, re, shade_color):
             if "famA" not in name:
                 continue
             pct = parse_dclm_pct(name)
-            loss = row.get(metric)
+            loss = metric_value(row, metric)
             if pct is None or pd.isna(loss):
                 continue
             mt = famA_model_type(name)
@@ -1276,7 +1326,7 @@ def _(apply_pow2_xaxis, keep_arch, pd, plt, re, shade_color):
             )
         ax.set_xticks([0, 25, 50, 75, 100])
         ax.set_xlabel("% dclm")
-        ax.set_ylabel(metric)
+        ax.set_ylabel(axis_label(metric))
         ax.set_title(f"famA runs: {metric} vs. %dclm", fontsize=10)
         if series:
             _famA_legend(
@@ -1296,7 +1346,7 @@ def _(apply_pow2_xaxis, keep_arch, pd, plt, re, shade_color):
             if "famA" not in name:
                 continue
             pct = parse_dclm_pct(name)
-            loss = row.get(metric)
+            loss = metric_value(row, metric)
             if pct is None or pd.isna(loss):
                 continue
             mt = famA_model_type(name)
@@ -1335,7 +1385,7 @@ def _(apply_pow2_xaxis, keep_arch, pd, plt, re, shade_color):
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
-        ax.set_ylabel(metric)
+        ax.set_ylabel(axis_label(metric))
         ax.set_title(f"famA runs: {metric} vs. repetition", fontsize=10)
         if any_data:
             _famA_legend(
@@ -1408,11 +1458,13 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     apply_pow2_xaxis,
+    axis_label,
     collect_baseline_points,
     filter_rep_points,
     get_model_type,
     get_reps,
     keep_arch,
+    metric_value,
     pd,
     plt,
 ):
@@ -1426,7 +1478,7 @@ def _(
             if get_model_type(row) != model_type:
                 continue
             reps = get_reps(row)
-            loss = row.get(metric)
+            loss = metric_value(row, metric)
             if pd.isna(reps) or pd.isna(loss):
                 continue
             prev = by_reps.get(reps)
@@ -1495,7 +1547,7 @@ def _(
                 )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
-        ax.set_ylabel(metric)
+        ax.set_ylabel(axis_label(metric))
         ax.set_title(title, fontsize=10)
         if any_data:
             from matplotlib.lines import Line2D
