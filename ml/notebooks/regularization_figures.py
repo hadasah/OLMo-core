@@ -435,6 +435,89 @@ def _(dedupe_runs, filter_finished, raw_df):
 
 
 @app.cell(hide_code=True)
+def _(MODEL_SHADE, plt, shade_color):
+    # ------------------------------------------------------------------
+    # Shared visual encoding used by EVERY figure:
+    #   - architecture -> line style + shade (dense solid/darkest,
+    #     moe32 dashed, moe64 dotted/lightest)
+    #   - color -> the plot's factor (regularizer value, data source,
+    #     rep count, or %dclm), assigned from a perceptual colormap.
+    # ------------------------------------------------------------------
+    from matplotlib.colors import to_hex
+    from matplotlib.lines import Line2D
+
+    ARCH_DASH = {"dense": "-", "moe32": "--", "moe64": ":"}
+
+    def arch_dash(model_type):
+        return ARCH_DASH.get(model_type, "-")
+
+    def arch_shade(model_type):
+        return MODEL_SHADE.get(model_type, 0.0)
+
+    def arch_color(base_color, model_type):
+        """Shade a per-factor base color by architecture."""
+        return shade_color(base_color, arch_shade(model_type))
+
+    def factor_palette(keys):
+        """Distinct color per factor key (in the given order), spread across viridis.
+
+        A single key gets a fixed mid-palette color so lone-series plots stay
+        readable rather than collapsing to an extreme of the colormap.
+        """
+        keys = list(keys)
+        n = len(keys)
+        cmap = plt.get_cmap("viridis")
+        if n == 1:
+            return {keys[0]: to_hex(cmap(0.35))}
+        return {k: to_hex(cmap(i / (n - 1))) for i, k in enumerate(keys)}
+
+    def arch_factor_legend(
+        ax, shown_archs, factor_title=None, factor_keys=(), factor_color=None, key_fmt=str
+    ):
+        """Single-box legend. Section 1: line style + shade -> architecture (drawn in
+        grey so only style/shade read). Section 2 (optional): color -> factor."""
+
+        def _header():
+            return Line2D([0], [0], linestyle="none", marker="", label="")
+
+        arch_order = [a for a in ["dense", "moe32", "moe64"] if a in shown_archs]
+        arch_handles = [
+            Line2D(
+                [0],
+                [0],
+                color=shade_color("#000000", arch_shade(a) + 0.2),
+                linewidth=1.5,
+                linestyle=arch_dash(a),
+            )
+            for a in arch_order
+        ]
+        handles = [_header()] + arch_handles
+        labels = ["Model type"] + arch_order
+        factor_keys = list(factor_keys)
+        if factor_keys and factor_color is not None:
+            factor_handles = [
+                Line2D([0], [0], color=factor_color[k], linewidth=2, linestyle="-")
+                for k in factor_keys
+            ]
+            handles += [_header()] + factor_handles
+            labels += [factor_title] + [key_fmt(k) for k in factor_keys]
+        legend = ax.legend(
+            handles,
+            labels,
+            fontsize=7,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0.0,
+            handlelength=2.2,
+        )
+        for text in legend.get_texts():
+            if text.get_text() in ("Model type", factor_title):
+                text.set_fontweight("bold")
+
+    return arch_color, arch_dash, arch_factor_legend, factor_palette
+
+
+@app.cell(hide_code=True)
 def _(json, os):
     # ------------------------------------------------------------------
     # Per-step training history (for the training-curve column, and for the
@@ -705,6 +788,9 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    arch_color,
+    arch_dash,
+    arch_factor_legend,
     axis_label,
     filter_rep_points,
     get_model_type,
@@ -779,8 +865,9 @@ def _(
     ):
         """One figure: Dense + MoE32 + MoE64 baseline, metric vs reps (log X).
 
-        Model type is distinguished by both line style (dense solid, moe32 dotted,
-        moe64 dashed) and a distinct color.
+        Architecture is distinguished by line style + shade (dense solid/darkest,
+        moe32 dashed, moe64 dotted/lightest). There is no second factor here, so
+        color is not used (each series is a shade of grey).
 
         Filters (all default to no-op):
 
@@ -789,10 +876,9 @@ def _(
         - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
         fig, ax = plt.subplots(figsize=(5.0, 4.5))
-        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
-        dash_map = {"dense": "-", "moe32": ":", "moe64": "--"}
         any_data = False
         max_reps = 0
+        shown_archs = []
         for model_type in ["dense", "moe32", "moe64"]:
             if not keep_arch(model_type, include_archs, exclude_archs):
                 continue
@@ -801,6 +887,7 @@ def _(
             if not points:
                 continue
             any_data = True
+            shown_archs.append(model_type)
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             max_reps = max(max_reps, max(xs))
@@ -810,9 +897,8 @@ def _(
                 marker="o",
                 markersize=4,
                 linewidth=1.2,
-                linestyle=dash_map[model_type],
-                color=color_map[model_type],
-                label=model_type,
+                linestyle=arch_dash(model_type),
+                color=arch_color("#000000", model_type),
             )
         title = f"{data_tag} — {scale}\n{metric} vs. repetition (baseline)"
         if not any_data:
@@ -822,9 +908,7 @@ def _(
         ax.set_ylabel(axis_label(metric))
         ax.set_title(title, fontsize=10)
         if any_data:
-            # plt.rcParams['legend.numpoints'] = 1
-            # ax.legend(fontsize=8)
-            ax.legend(fontsize=8, markerscale=0.5)
+            arch_factor_legend(ax, shown_archs)
         fig.tight_layout()
         return fig
 
@@ -970,7 +1054,11 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     apply_pow2_xaxis,
+    arch_color,
+    arch_dash,
+    arch_factor_legend,
     axis_label,
+    factor_palette,
     filter_rep_points,
     get_model_type,
     get_reps,
@@ -980,7 +1068,6 @@ def _(
     metric_value,
     pd,
     plt,
-    shade_color,
 ):
     def _factor_value(row, col):
         """Read a regularizer column as a float; blank/NaN means 'baseline'."""
@@ -1005,7 +1092,7 @@ def _(
         nan_label=None,
         value_getter=None,
     ):
-        """color -> model type; line style -> baseline vs each factor value.
+        """color -> factor value; line style + shade -> architecture.
 
         `baseline_value` is the value that represents 'no regularization' for this
         column (e.g. dropout baseline = None/blank, weight-decay baseline = 0.1).
@@ -1068,27 +1155,11 @@ def _(
             prev = series[key].get(reps)
             series[key][reps] = min(loss, prev) if prev is not None else float(loss)
 
-        # Color encodes the model type; line style encodes the factor value.
-        # Within a model-type color, the factor value also sets the shade: the first
-        # bucket is the DARKEST + solid line, later buckets are lighter with other
-        # dashes. `extra_buckets` (e.g. max_grad_norm "no clip") come first so they
-        # get the solid line.
+        # Color encodes the factor value; architecture sets the line style + shade.
+        # `extra_buckets` (e.g. max_grad_norm "no clip") come first, then baseline,
+        # then the swept values in ascending order.
         ordered_buckets = extra_buckets + ["baseline"] + sorted(factor_values)
-        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
-        dash_cycle = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
-        factor_dash = {
-            b: dash_cycle[i % len(dash_cycle)] for i, b in enumerate(ordered_buckets)
-        }
-        # Shade level per bucket: baseline is the DARKEST (blended toward black),
-        # higher factor values get progressively lighter up to LIGHTEST. Spread
-        # evenly; with a single bucket everything sits at DARKEST.
-        _DARKEST = -0.45
-        _LIGHTEST = 0.4
-        _n = len(ordered_buckets)
-        bucket_shade = {
-            b: (_DARKEST + (_LIGHTEST - _DARKEST) * i / (_n - 1) if _n > 1 else _DARKEST)
-            for i, b in enumerate(ordered_buckets)
-        }
+        bucket_color = factor_palette(ordered_buckets)
 
         fig, ax = plt.subplots(figsize=(6.5, 4.5))
         any_data = False
@@ -1105,7 +1176,7 @@ def _(
                 return fval_key
             return f"{fval_key:g}"
 
-        shown_models = []  # model types actually plotted, in canonical order
+        shown_archs = []  # architectures actually plotted, in canonical order
         shown_buckets = []  # factor buckets actually plotted, in ordered_buckets order
         for (model_type, fval_key), pts in sorted(
             series.items(), key=lambda kv: (str(kv[0][1]), kv[0][0])
@@ -1117,8 +1188,8 @@ def _(
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             max_reps = max(max_reps, max(xs))
-            if model_type not in shown_models:
-                shown_models.append(model_type)
+            if model_type not in shown_archs:
+                shown_archs.append(model_type)
             if fval_key not in shown_buckets:
                 shown_buckets.append(fval_key)
             ax.plot(
@@ -1127,67 +1198,23 @@ def _(
                 marker="o",
                 markersize=3,
                 linewidth=1.2,
-                linestyle=factor_dash[fval_key],
-                color=shade_color(color_map[model_type], bucket_shade[fval_key]),
+                linestyle=arch_dash(model_type),
+                color=arch_color(bucket_color[fval_key], model_type),
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
         ax.set_ylabel(axis_label(metric))
         ax.set_title(f"{factor_label} — {metric} (olmo_mix, 80M)", fontsize=10)
         if any_data:
-            from matplotlib.lines import Line2D
-
-            def _header():
-                # Invisible handle used to render a section-title row in the legend.
-                return Line2D([0], [0], linestyle="none", marker="", label="")
-
-            # Section 1: color -> model type (solid lines in each model's color).
-            model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
-            model_handles = [
-                Line2D([0], [0], color=color_map[m], linewidth=2, linestyle="-")
-                for m in model_order
-            ]
-            # Section 2: line style -> factor value. Shade the key from black (first
-            # bucket, solid) to light grey (last bucket), mirroring the data lines.
             bucket_order = [b for b in ordered_buckets if b in shown_buckets]
-            _nb = len(bucket_order)
-            _grey_top = 0.7  # lightest grey level for the last bucket
-            bucket_handles = [
-                Line2D(
-                    [0],
-                    [0],
-                    color=shade_color("#000000", _grey_top * i / (_nb - 1) if _nb > 1 else 0.0),
-                    linewidth=1.5,
-                    linestyle=factor_dash[b],
-                )
-                for i, b in enumerate(bucket_order)
-            ]
-            # Combine both sections into one legend box with bold section headers.
-            handles = (
-                [_header()]
-                + model_handles
-                + [_header()]
-                + bucket_handles
+            arch_factor_legend(
+                ax,
+                shown_archs,
+                factor_label,
+                bucket_order,
+                bucket_color,
+                _bucket_label,
             )
-            labels = (
-                ["Model type"]
-                + model_order
-                + [factor_label]
-                + [_bucket_label(b) for b in bucket_order]
-            )
-            legend = ax.legend(
-                handles,
-                labels,
-                fontsize=7,
-                loc="upper left",
-                bbox_to_anchor=(1.02, 1.0),
-                borderaxespad=0.0,
-                handlelength=2.2,
-            )
-            # Bold + left-align the section-header rows.
-            for text in legend.get_texts():
-                if text.get_text() in ("Model type", factor_label):
-                    text.set_fontweight("bold")
         fig.tight_layout()
         return fig
 
@@ -1400,14 +1427,17 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     apply_pow2_xaxis,
+    arch_color,
+    arch_dash,
+    arch_factor_legend,
     axis_label,
+    factor_palette,
     get_reps,
     keep_arch,
     metric_value,
     pd,
     plt,
     re,
-    shade_color,
 ):
     def parse_dclm_pct(name: str):
         """Extract the DCLM percentage from a 'dclm{N}' token in the run name."""
@@ -1419,67 +1449,8 @@ def _(
         m = re.search(r"_(dense|moe32|moe64)$", str(name))
         return m.group(1) if m else None
 
-    _DASH_CYCLE = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
-    _COLORS = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
-
-    def _style_maps(keys):
-        """Given ordered numeric keys, return {key: dash} and {key: shade level}
-        (first darkest -> last lightest)."""
-        _DARKEST, _LIGHTEST = -0.45, 0.4
-        n = len(keys)
-        dash = {k: _DASH_CYCLE[i % len(_DASH_CYCLE)] for i, k in enumerate(keys)}
-        shade = {
-            k: (_DARKEST + (_LIGHTEST - _DARKEST) * i / (n - 1) if n > 1 else _DARKEST)
-            for i, k in enumerate(keys)
-        }
-        return dash, shade
-
-    def _famA_legend(ax, shown_models, style_title, style_keys, style_dash, key_fmt):
-        """Single-box legend: color -> model type, line style -> the other factor."""
-        from matplotlib.lines import Line2D
-
-        def header():
-            return Line2D([0], [0], linestyle="none", marker="", label="")
-
-        model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
-        model_handles = [
-            Line2D([0], [0], color=_COLORS[m], linewidth=2, linestyle="-")
-            for m in model_order
-        ]
-        ng = len(style_keys)
-        grey_top = 0.7
-        style_handles = [
-            Line2D(
-                [0],
-                [0],
-                color=shade_color("#000000", grey_top * i / (ng - 1) if ng > 1 else 0.0),
-                linewidth=1.5,
-                linestyle=style_dash[k],
-            )
-            for i, k in enumerate(style_keys)
-        ]
-        handles = [header()] + model_handles + [header()] + style_handles
-        labels = (
-            ["Model type"]
-            + model_order
-            + [style_title]
-            + [key_fmt(k) for k in style_keys]
-        )
-        legend = ax.legend(
-            handles,
-            labels,
-            fontsize=7,
-            loc="upper left",
-            bbox_to_anchor=(1.02, 1.0),
-            borderaxespad=0.0,
-            handlelength=2.2,
-        )
-        for text in legend.get_texts():
-            if text.get_text() in ("Model type", style_title):
-                text.set_fontweight("bold")
-
     def make_famA_figure(df, metric, include_archs=None, exclude_archs=None):
-        """famA: metric vs. %dclm. Color = model type; line style + shade = rep count."""
+        """famA: metric vs. %dclm. Color = rep count; line style + shade = architecture."""
         # Collect: {(model_type, reps): [(pct, value), ...]}
         series: dict = {}
         rep_set = set()
@@ -1499,36 +1470,36 @@ def _(
             rep_set.add(reps)
 
         rep_order = sorted(rep_set)
-        rep_dash, rep_shade = _style_maps(rep_order)
+        rep_color = factor_palette(rep_order)
         fig, ax = plt.subplots(figsize=(5.5, 4.5))
-        shown_models = []
+        shown_archs = []
         for (mt, reps), pts in sorted(series.items()):
             pts = sorted(pts)
-            if mt not in shown_models:
-                shown_models.append(mt)
+            if mt not in shown_archs:
+                shown_archs.append(mt)
             ax.plot(
                 [p[0] for p in pts],
                 [p[1] for p in pts],
                 marker="o",
                 markersize=5,
                 linewidth=1.5,
-                linestyle=rep_dash[reps],
-                color=shade_color(_COLORS[mt], rep_shade[reps]),
+                linestyle=arch_dash(mt),
+                color=arch_color(rep_color[reps], mt),
             )
         ax.set_xticks([0, 25, 50, 75, 100])
         ax.set_xlabel("% dclm")
         ax.set_ylabel(axis_label(metric))
         ax.set_title(f"famA runs: {metric} vs. %dclm", fontsize=10)
         if series:
-            _famA_legend(
-                ax, shown_models, "Repetitions", rep_order, rep_dash, lambda r: f"{r:g}x"
+            arch_factor_legend(
+                ax, shown_archs, "Repetitions", rep_order, rep_color, lambda r: f"{r:g}x"
             )
         fig.tight_layout()
         return fig
 
     def make_famA_rep_figure(df, metric, include_archs=None, exclude_archs=None):
-        """famA: metric vs. repetition count (log X). Color = model type; line style +
-        shade = %dclm."""
+        """famA: metric vs. repetition count (log X). Color = %dclm; line style +
+        shade = architecture."""
         # Collect: {(model_type, pct): [(reps, value), ...]}
         series: dict = {}
         pct_set = set()
@@ -1548,9 +1519,9 @@ def _(
             pct_set.add(pct)
 
         pct_order = sorted(pct_set)
-        pct_dash, pct_shade = _style_maps(pct_order)
+        pct_color = factor_palette(pct_order)
         fig, ax = plt.subplots(figsize=(5.5, 4.5))
-        shown_models = []
+        shown_archs = []
         max_reps = 0
         any_data = False
         for (mt, pct), pts in sorted(series.items()):
@@ -1562,8 +1533,8 @@ def _(
             if not xy:
                 continue
             any_data = True
-            if mt not in shown_models:
-                shown_models.append(mt)
+            if mt not in shown_archs:
+                shown_archs.append(mt)
             max_reps = max(max_reps, max(r for r, _ in xy))
             ax.plot(
                 [r for r, _ in xy],
@@ -1571,16 +1542,16 @@ def _(
                 marker="o",
                 markersize=5,
                 linewidth=1.5,
-                linestyle=pct_dash[pct],
-                color=shade_color(_COLORS[mt], pct_shade[pct]),
+                linestyle=arch_dash(mt),
+                color=arch_color(pct_color[pct], mt),
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
         ax.set_ylabel(axis_label(metric))
         ax.set_title(f"famA runs: {metric} vs. repetition", fontsize=10)
         if any_data:
-            _famA_legend(
-                ax, shown_models, "% dclm", pct_order, pct_dash, lambda p: f"{p:g}%"
+            arch_factor_legend(
+                ax, shown_archs, "% dclm", pct_order, pct_color, lambda p: f"{p:g}%"
             )
         fig.tight_layout()
         return fig
@@ -1649,8 +1620,12 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     apply_pow2_xaxis,
+    arch_color,
+    arch_dash,
+    arch_factor_legend,
     axis_label,
     collect_baseline_points,
+    factor_palette,
     filter_rep_points,
     get_model_type,
     get_reps,
@@ -1691,22 +1666,19 @@ def _(
         `sources` is an ordered list of (label, color, kind, key) tuples where kind is
         either "baseline" (key = data tag, uses baseline runs at 80M) or "famB"
         (key = run-name substring). The per-source color is ignored: color now encodes
-        the model type and line style encodes the source.
+        the data source and line style + shade encode the architecture.
 
         Filters (all default to no-op):
 
         - ``include_archs`` / ``exclude_archs``: keep/drop architectures.
         - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
-        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
-        dash_cycle = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
-        source_dash = {
-            src[0]: dash_cycle[i % len(dash_cycle)] for i, src in enumerate(sources)
-        }
+        source_labels = [src[0] for src in sources]
+        source_color = factor_palette(source_labels)
         fig, ax = plt.subplots(figsize=(6.0, 5.0))
         max_reps = 0
         any_data = False
-        shown_models = []
+        shown_archs = []
         shown_sources = []
         for label, color, kind, key in sources:
             for model_type in ["dense", "moe32", "moe64"]:
@@ -1723,8 +1695,8 @@ def _(
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
                 max_reps = max(max_reps, max(xs))
-                if model_type not in shown_models:
-                    shown_models.append(model_type)
+                if model_type not in shown_archs:
+                    shown_archs.append(model_type)
                 if label not in shown_sources:
                     shown_sources.append(label)
                 ax.plot(
@@ -1733,51 +1705,18 @@ def _(
                     marker="o",
                     markersize=3,
                     linewidth=1.2,
-                    linestyle=source_dash[label],
-                    color=color_map[model_type],
+                    linestyle=arch_dash(model_type),
+                    color=arch_color(source_color[label], model_type),
                 )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
         ax.set_ylabel(axis_label(metric))
         ax.set_title(title, fontsize=10)
         if any_data:
-            from matplotlib.lines import Line2D
-
-            def _header():
-                return Line2D([0], [0], linestyle="none", marker="", label="")
-
-            # Section 1: color -> model type.
-            model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
-            model_handles = [
-                Line2D([0], [0], color=color_map[m], linewidth=2, linestyle="-")
-                for m in model_order
-            ]
-            # Section 2: line style -> data source (black/grey).
-            source_order = [s[0] for s in sources if s[0] in shown_sources]
-            source_handles = [
-                Line2D([0], [0], color="#333333", linewidth=1.5, linestyle=source_dash[s])
-                for s in source_order
-            ]
-            # Combine both sections into one legend box with bold section headers.
-            handles = [_header()] + model_handles + [_header()] + source_handles
-            labels = (
-                ["Model type"]
-                + model_order
-                + ["Data source"]
-                + source_order
+            source_order = [s for s in source_labels if s in shown_sources]
+            arch_factor_legend(
+                ax, shown_archs, "Data source", source_order, source_color, str
             )
-            legend = ax.legend(
-                handles,
-                labels,
-                fontsize=7,
-                loc="upper left",
-                bbox_to_anchor=(1.02, 1.0),
-                borderaxespad=0.0,
-                handlelength=2.2,
-            )
-            for text in legend.get_texts():
-                if text.get_text() in ("Model type", "Data source"):
-                    text.set_fontweight("bold")
         fig.tight_layout()
         return fig
 
@@ -1786,7 +1725,10 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
-    MODEL_SHADE,
+    arch_color,
+    arch_dash,
+    arch_factor_legend,
+    factor_palette,
     get_model_type,
     get_reps,
     get_scale,
@@ -1795,7 +1737,6 @@ def _(
     load_history_series,
     pd,
     plt,
-    shade_color,
 ):
     def make_training_curve_figure(
         df,
@@ -1840,23 +1781,13 @@ def _(
             runs[(model_type, reps)] = str(row.get("Name", ""))
             rep_set.add(reps)
 
-        from matplotlib.colors import to_hex
-
         rep_order = sorted(rep_set)
-        # Color per repetition count (spread across a perceptual colormap).
-        _nr = len(rep_order)
-        _cmap = plt.get_cmap("viridis")
-        rep_color = {
-            r: to_hex(_cmap(i / (_nr - 1) if _nr > 1 else 0.0))
-            for i, r in enumerate(rep_order)
-        }
-        # Architecture -> line style + shade (dense darkest/solid, moe64 lightest).
-        arch_dash = {"dense": "-", "moe32": "--", "moe64": ":"}
-        arch_shade = MODEL_SHADE  # {"dense": 0.0, "moe32": 0.35, "moe64": 0.65}
+        # Color per repetition count; architecture -> line style + shade.
+        rep_color = factor_palette(rep_order)
 
         fig, ax = plt.subplots(figsize=(6.5, 4.5))
         any_data = False
-        shown_models, shown_reps = [], []
+        shown_archs, shown_reps = [], []
         for (model_type, reps), run_name in sorted(
             runs.items(), key=lambda kv: (kv[0][0], kv[0][1])
         ):
@@ -1866,16 +1797,16 @@ def _(
             any_data = True
             xs = [p[0] for p in series]
             ys = [p[1] for p in series]
-            if model_type not in shown_models:
-                shown_models.append(model_type)
+            if model_type not in shown_archs:
+                shown_archs.append(model_type)
             if reps not in shown_reps:
                 shown_reps.append(reps)
             ax.plot(
                 xs,
                 ys,
                 linewidth=1.0,
-                linestyle=arch_dash.get(model_type, "-"),
-                color=shade_color(rep_color[reps], arch_shade.get(model_type, 0.0)),
+                linestyle=arch_dash(model_type),
+                color=arch_color(rep_color[reps], model_type),
             )
         ax.set_xlabel("train step")
         ax.set_ylabel(metric)
@@ -1885,48 +1816,10 @@ def _(
         ax.set_title(title, fontsize=10)
 
         if any_data:
-            from matplotlib.lines import Line2D
-
-            def _header():
-                return Line2D([0], [0], linestyle="none", marker="", label="")
-
-            # Model type -> line style + shade (shown in grey so style/shade read clearly).
-            model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
-            model_handles = [
-                Line2D(
-                    [0],
-                    [0],
-                    color=shade_color("#000000", arch_shade.get(m, 0.0) + 0.2),
-                    linewidth=1.5,
-                    linestyle=arch_dash.get(m, "-"),
-                )
-                for m in model_order
-            ]
-            # Repetitions -> color.
             rep_shown = [r for r in rep_order if r in shown_reps]
-            rep_handles = [
-                Line2D([0], [0], color=rep_color[r], linewidth=2, linestyle="-")
-                for r in rep_shown
-            ]
-            handles = [_header()] + model_handles + [_header()] + rep_handles
-            labels = (
-                ["Model type"]
-                + model_order
-                + ["Repetitions"]
-                + [f"{r:g}x" for r in rep_shown]
+            arch_factor_legend(
+                ax, shown_archs, "Repetitions", rep_shown, rep_color, lambda r: f"{r:g}x"
             )
-            legend = ax.legend(
-                handles,
-                labels,
-                fontsize=7,
-                loc="upper left",
-                bbox_to_anchor=(1.02, 1.0),
-                borderaxespad=0.0,
-                handlelength=2.2,
-            )
-            for text in legend.get_texts():
-                if text.get_text() in ("Model type", "Repetitions"):
-                    text.set_fontweight("bold")
         fig.tight_layout()
         return fig
 
