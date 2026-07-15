@@ -268,7 +268,7 @@ def _(json, pd):
     # Per-model-type lightening: dense = darkest, moe64 = lightest. Positive values
     # blend toward white; negative toward black. moe64 now sits at the old moe32
     # level and dense goes slightly below pure base color.
-    MODEL_SHADE = {"dense": -0.1, "moe32": 0.15, "moe64": 0.35}
+    MODEL_SHADE = {"dense": -0.2, "moe32": -0.1, "moe64": 0.05}
 
     def shade_color(hex_color: str, lighten: float) -> str:
         """Shade a hex color. Positive `lighten` blends toward white, negative blends
@@ -456,8 +456,8 @@ def _(MODEL_SHADE, plt, shade_color):
     _viridis = plt.get_cmap("viridis")
     ARCH_COLOR = {
         "dense": to_hex(_viridis(0.0)),
-        "moe32": to_hex(_viridis(0.5)),
-        "moe64": to_hex(_viridis(1.0)),
+        "moe32": to_hex(_viridis(0.3)),
+        "moe64": to_hex(_viridis(0.75)),
     }
 
     def arch_dash(model_type):
@@ -470,7 +470,7 @@ def _(MODEL_SHADE, plt, shade_color):
         """Shade a per-factor base color by architecture."""
         return shade_color(base_color, arch_shade(model_type))
 
-    def factor_palette(keys):
+    def factor_palette(keys, high_end=0.8):
         """Distinct color per factor key (in the given order), spread across viridis.
 
         A single key gets a fixed mid-palette color so lone-series plots stay
@@ -481,7 +481,7 @@ def _(MODEL_SHADE, plt, shade_color):
         cmap = plt.get_cmap("viridis")
         if n == 1:
             return {keys[0]: to_hex(cmap(0.35))}
-        return {k: to_hex(cmap(i / (n - 1))) for i, k in enumerate(keys)}
+        return {k: to_hex(cmap(i * high_end / (n - 1))) for i, k in enumerate(keys)}
 
     def arch_factor_legend(
         ax,
@@ -773,15 +773,17 @@ def _(mo, raw_df, save_pdf):
 
     _ARCH_OPTIONS = ["dense", "moe32", "moe64"]
 
-    def arch_multiselect(label, chosen_values=None):
+    def arch_multiselect(label, chosen_values=None, options=None):
         """A per-plot multi-select over the architectures (dense/moe32/moe64).
 
         Its ``.value`` is a list suitable to pass as ``include_archs``. Defaults to
-        all architectures selected.
+        all architectures selected. Pass ``options`` to restrict the choices (e.g.
+        MoE-only plots offer just ``["moe32", "moe64"]``).
         """
+        opts = list(options) if options is not None else list(_ARCH_OPTIONS)
         return mo.ui.multiselect(
-            options=_ARCH_OPTIONS,
-            value=chosen_values if chosen_values is not None else list(_ARCH_OPTIONS),
+            options=opts,
+            value=chosen_values if chosen_values is not None else list(opts),
             label=label,
         )
 
@@ -926,7 +928,7 @@ def _(
                 ys,
                 marker="o",
                 markersize=4,
-                linewidth=1.2,
+                linewidth=1.5,
                 linestyle=arch_dash(model_type),
                 color=ARCH_COLOR[model_type],
             )
@@ -946,17 +948,26 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_olmo_80m = metric_multiselect("olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_olmo_80m
-    return (sel_olmo_80m,)
+    sel_olmo_80m_arch = arch_multiselect("olmo_mix 80M — architectures")
+    mo.vstack([sel_olmo_80m, sel_olmo_80m_arch])
+    return sel_olmo_80m, sel_olmo_80m_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_olmo_80m):
+def _(
+    finished_df,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_olmo_80m,
+    sel_olmo_80m_arch,
+):
     _out = render_side_by_side(
         sel_olmo_80m.value,
-        lambda m: make_repetition_figure(finished_df, "olmo_mix", "80M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "olmo_mix", "80M", m, include_archs=sel_olmo_80m_arch.value
+        ),
         "olmo_mix_80M",
     )
     _out
@@ -964,17 +975,26 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_olmo_80m):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_olmo_200m = metric_multiselect("olmo_mix 200M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_olmo_200m
-    return (sel_olmo_200m,)
+    sel_olmo_200m_arch = arch_multiselect("olmo_mix 200M — architectures")
+    mo.vstack([sel_olmo_200m, sel_olmo_200m_arch])
+    return sel_olmo_200m, sel_olmo_200m_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_olmo_200m):
+def _(
+    finished_df,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_olmo_200m,
+    sel_olmo_200m_arch,
+):
     _out = render_side_by_side(
         sel_olmo_200m.value,
-        lambda m: make_repetition_figure(finished_df, "olmo_mix", "200M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "olmo_mix", "200M", m, include_archs=sel_olmo_200m_arch.value
+        ),
         "olmo_mix_200M",
     )
     _out
@@ -990,17 +1010,26 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_dclm_80m = metric_multiselect("dclm 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_dclm_80m
-    return (sel_dclm_80m,)
+    sel_dclm_80m_arch = arch_multiselect("dclm 80M — architectures")
+    mo.vstack([sel_dclm_80m, sel_dclm_80m_arch])
+    return sel_dclm_80m, sel_dclm_80m_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_dclm_80m):
+def _(
+    finished_df,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_dclm_80m,
+    sel_dclm_80m_arch,
+):
     _out = render_side_by_side(
         sel_dclm_80m.value,
-        lambda m: make_repetition_figure(finished_df, "dclm", "80M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "dclm", "80M", m, include_archs=sel_dclm_80m_arch.value
+        ),
         "dclm_80M",
     )
     _out
@@ -1008,10 +1037,11 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_dclm_80m):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_starcoder_80m = metric_multiselect("starcoder 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
-    sel_starcoder_80m
-    return (sel_starcoder_80m,)
+    sel_starcoder_80m_arch = arch_multiselect("starcoder 80M — architectures")
+    mo.vstack([sel_starcoder_80m, sel_starcoder_80m_arch])
+    return sel_starcoder_80m, sel_starcoder_80m_arch
 
 
 @app.cell(hide_code=True)
@@ -1020,10 +1050,13 @@ def _(
     make_repetition_figure,
     render_side_by_side,
     sel_starcoder_80m,
+    sel_starcoder_80m_arch,
 ):
     _out = render_side_by_side(
         sel_starcoder_80m.value,
-        lambda m: make_repetition_figure(finished_df, "starcoder", "80M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "starcoder", "80M", m, include_archs=sel_starcoder_80m_arch.value
+        ),
         "starcoder_80M",
     )
     _out
@@ -1031,17 +1064,26 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_pes2o_80m = metric_multiselect("pes2o 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
-    sel_pes2o_80m
-    return (sel_pes2o_80m,)
+    sel_pes2o_80m_arch = arch_multiselect("pes2o 80M — architectures")
+    mo.vstack([sel_pes2o_80m, sel_pes2o_80m_arch])
+    return sel_pes2o_80m, sel_pes2o_80m_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_pes2o_80m):
+def _(
+    finished_df,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_pes2o_80m,
+    sel_pes2o_80m_arch,
+):
     _out = render_side_by_side(
         sel_pes2o_80m.value,
-        lambda m: make_repetition_figure(finished_df, "pes2o", "80M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "pes2o", "80M", m, include_archs=sel_pes2o_80m_arch.value
+        ),
         "pes2o_80M",
     )
     _out
@@ -1049,17 +1091,26 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_pes2o_80m):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_wiki_80m = metric_multiselect("wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss"])
-    sel_wiki_80m
-    return (sel_wiki_80m,)
+    sel_wiki_80m_arch = arch_multiselect("wiki 80M — architectures")
+    mo.vstack([sel_wiki_80m, sel_wiki_80m_arch])
+    return sel_wiki_80m, sel_wiki_80m_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_wiki_80m):
+def _(
+    finished_df,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_wiki_80m,
+    sel_wiki_80m_arch,
+):
     _out = render_side_by_side(
         sel_wiki_80m.value,
-        lambda m: make_repetition_figure(finished_df, "wiki", "80M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "wiki", "80M", m, include_archs=sel_wiki_80m_arch.value
+        ),
         "wiki_80M",
     )
     _out
@@ -1237,7 +1288,7 @@ def _(
                 ys,
                 marker="o",
                 markersize=3,
-                linewidth=1.2,
+                linewidth=1.8,
                 linestyle=arch_dash(model_type),
                 color=arch_color(bucket_color[fval_key], model_type),
             )
@@ -1262,10 +1313,11 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_dropout = metric_multiselect("dropout — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_dropout
-    return (sel_dropout,)
+    sel_dropout_arch = arch_multiselect("dropout — architectures")
+    mo.vstack([sel_dropout, sel_dropout_arch])
+    return sel_dropout, sel_dropout_arch
 
 
 @app.cell(hide_code=True)
@@ -1275,11 +1327,15 @@ def _(
     make_factor_figure,
     render_side_by_side,
     sel_dropout,
+    sel_dropout_arch,
 ):
     # Dropout: baseline = no dropout set (blank).
     _out = render_side_by_side(
         sel_dropout.value,
-        lambda m: make_factor_figure(finished_df, DROPOUT_COL, "dropout", None, m, exclude_reps=[128,256]),
+        lambda m: make_factor_figure(
+            finished_df, DROPOUT_COL, "dropout", None, m,
+            include_archs=sel_dropout_arch.value, exclude_reps=[128,256],
+        ),
         "dropout",
     )
     _out
@@ -1287,10 +1343,11 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_weight_decay = metric_multiselect("weight decay — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_weight_decay
-    return (sel_weight_decay,)
+    sel_weight_decay_arch = arch_multiselect("weight decay — architectures")
+    mo.vstack([sel_weight_decay, sel_weight_decay_arch])
+    return sel_weight_decay, sel_weight_decay_arch
 
 
 @app.cell(hide_code=True)
@@ -1300,11 +1357,15 @@ def _(
     make_factor_figure,
     render_side_by_side,
     sel_weight_decay,
+    sel_weight_decay_arch,
 ):
     # Weight decay: baseline = the default 0.1; swept values are 0.2 / 0.4.
     _out = render_side_by_side(
         sel_weight_decay.value,
-        lambda m: make_factor_figure(finished_df, WD_COL, "weight_decay", 0.1, m, exclude_reps=[128,256]),
+        lambda m: make_factor_figure(
+            finished_df, WD_COL, "weight_decay", 0.1, m,
+            include_archs=sel_weight_decay_arch.value, exclude_reps=[128,256],
+        ),
         "weight_decay",
     )
     _out
@@ -1312,10 +1373,11 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_max_grad_norm = metric_multiselect("max grad norm — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_max_grad_norm
-    return (sel_max_grad_norm,)
+    sel_max_grad_norm_arch = arch_multiselect("max grad norm — architectures")
+    mo.vstack([sel_max_grad_norm, sel_max_grad_norm_arch])
+    return sel_max_grad_norm, sel_max_grad_norm_arch
 
 
 @app.cell(hide_code=True)
@@ -1325,13 +1387,15 @@ def _(
     make_factor_figure,
     render_side_by_side,
     sel_max_grad_norm,
+    sel_max_grad_norm_arch,
 ):
     # Max grad norm: baseline = the default 1.0; swept value is 0.2; a `null` (no
     # clipping) setting is bucketed separately via nan_label and sorts first as 0.
     _out = render_side_by_side(
         sel_max_grad_norm.value,
         lambda m: make_factor_figure(
-            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="0 (no clip)", exclude_reps=[128,256]
+            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="0 (no clip)",
+            include_archs=sel_max_grad_norm_arch.value, exclude_reps=[128,256],
         ),
         "max_grad_norm",
     )
@@ -1355,10 +1419,13 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_jitter = metric_multiselect("MoE jitter_eps — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_moe_jitter
-    return (sel_moe_jitter,)
+    sel_moe_jitter_arch = arch_multiselect(
+        "MoE jitter_eps — architectures", options=["moe32", "moe64"]
+    )
+    mo.vstack([sel_moe_jitter, sel_moe_jitter_arch])
+    return sel_moe_jitter, sel_moe_jitter_arch
 
 
 @app.cell(hide_code=True)
@@ -1368,6 +1435,7 @@ def _(
     render_side_by_side,
     router_field,
     sel_moe_jitter,
+    sel_moe_jitter_arch,
 ):
     # Router jitter: baseline = not set (blank); MoE only.
     _out = render_side_by_side(
@@ -1378,7 +1446,7 @@ def _(
             "jitter_eps",
             None,
             m,
-            exclude_archs=["dense"],
+            include_archs=sel_moe_jitter_arch.value,
             value_getter=lambda row: router_field(row, "jitter_eps"),
         ),
         "moe_jitter_eps",
@@ -1388,10 +1456,13 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_eom = metric_multiselect("MoE eom_prob — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_moe_eom
-    return (sel_moe_eom,)
+    sel_moe_eom_arch = arch_multiselect(
+        "MoE eom_prob — architectures", options=["moe32", "moe64"]
+    )
+    mo.vstack([sel_moe_eom, sel_moe_eom_arch])
+    return sel_moe_eom, sel_moe_eom_arch
 
 
 @app.cell(hide_code=True)
@@ -1401,6 +1472,7 @@ def _(
     render_side_by_side,
     router_field,
     sel_moe_eom,
+    sel_moe_eom_arch,
 ):
     # Expert Output Masking: baseline = not set (blank); MoE only.
     _out = render_side_by_side(
@@ -1411,7 +1483,7 @@ def _(
             "eom_prob",
             None,
             m,
-            exclude_archs=["dense"],
+            include_archs=sel_moe_eom_arch.value,
             value_getter=lambda row: router_field(row, "eom_prob"),
         ),
         "moe_eom_prob",
@@ -1421,10 +1493,13 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_fom = metric_multiselect("MoE fom_prob — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_moe_fom
-    return (sel_moe_fom,)
+    sel_moe_fom_arch = arch_multiselect(
+        "MoE fom_prob — architectures", options=["moe32", "moe64"]
+    )
+    mo.vstack([sel_moe_fom, sel_moe_fom_arch])
+    return sel_moe_fom, sel_moe_fom_arch
 
 
 @app.cell(hide_code=True)
@@ -1434,12 +1509,13 @@ def _(
     make_factor_figure,
     render_side_by_side,
     sel_moe_fom,
+    sel_moe_fom_arch,
 ):
     # Final Output Masking: baseline = not set (blank); MoE only.
     _out = render_side_by_side(
         sel_moe_fom.value,
         lambda m: make_factor_figure(
-            finished_df, FOM_COL, "fom_prob", None, m, exclude_archs=["dense"]
+            finished_df, FOM_COL, "fom_prob", None, m, include_archs=sel_moe_fom_arch.value
         ),
         "moe_fom_prob",
     )
@@ -1600,36 +1676,54 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_famA = metric_multiselect("famA — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_famA
-    return (sel_famA,)
+    sel_famA_arch = arch_multiselect("famA — architectures")
+    mo.vstack([sel_famA, sel_famA_arch])
+    return sel_famA, sel_famA_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_famA_figure, render_side_by_side, sel_famA):
+def _(
+    finished_df,
+    make_famA_figure,
+    render_side_by_side,
+    sel_famA,
+    sel_famA_arch,
+):
     _out = render_side_by_side(
-        sel_famA.value, lambda m: make_famA_figure(finished_df, m), "famA"
+        sel_famA.value,
+        lambda m: make_famA_figure(finished_df, m, include_archs=sel_famA_arch.value),
+        "famA",
     )
     _out
     return
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_famA_rep = metric_multiselect(
         "famA (vs reps) — metrics",
         chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"],
     )
-    sel_famA_rep
-    return (sel_famA_rep,)
+    sel_famA_rep_arch = arch_multiselect("famA (vs reps) — architectures")
+    mo.vstack([sel_famA_rep, sel_famA_rep_arch])
+    return sel_famA_rep, sel_famA_rep_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_famA_rep_figure, render_side_by_side, sel_famA_rep):
+def _(
+    finished_df,
+    make_famA_rep_figure,
+    render_side_by_side,
+    sel_famA_rep,
+    sel_famA_rep_arch,
+):
     _out = render_side_by_side(
         sel_famA_rep.value,
-        lambda m: make_famA_rep_figure(finished_df, m),
+        lambda m: make_famA_rep_figure(
+            finished_df, m, include_archs=sel_famA_rep_arch.value
+        ),
         "famA_rep",
     )
     _out
@@ -1744,7 +1838,7 @@ def _(
                     ys,
                     marker="o",
                     markersize=3,
-                    linewidth=1.2,
+                    linewidth=1.5,
                     linestyle=arch_dash(model_type),
                     color=arch_color(source_color[label], model_type),
                 )
@@ -1867,15 +1961,22 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_famB_sc = metric_multiselect("famB starcoder — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
-    sel_famB_sc
-    return (sel_famB_sc,)
+    sel_famB_sc_arch = arch_multiselect("famB starcoder — architectures")
+    mo.vstack([sel_famB_sc, sel_famB_sc_arch])
+    return sel_famB_sc, sel_famB_sc_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_sc):
-    # Plot 1: starcoder family. Color = model type; line style = source.
+def _(
+    finished_df,
+    make_famB_figure,
+    render_side_by_side,
+    sel_famB_sc,
+    sel_famB_sc_arch,
+):
+    # Plot 1: starcoder family. Color = source; line style + shade = architecture.
     _sources = [
         ("olmo_mix", "#1f77b4", "baseline", "olmo_mix"),
         ("starcoder", "#2ca02c", "baseline", "starcoder"),
@@ -1885,7 +1986,8 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_sc):
     _out = render_side_by_side(
         sel_famB_sc.value,
         lambda m: make_famB_figure(
-            finished_df, m, f"famB (starcoder): {m} vs. repetition", _sources, exclude_reps=[128,256]
+            finished_df, m, f"famB (starcoder): {m} vs. repetition", _sources,
+            include_archs=sel_famB_sc_arch.value, exclude_reps=[128,256],
         ),
         "famB_starcoder",
     )
@@ -1894,15 +1996,22 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_sc):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_famB_p2o = metric_multiselect("famB pes2o — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
-    sel_famB_p2o
-    return (sel_famB_p2o,)
+    sel_famB_p2o_arch = arch_multiselect("famB pes2o — architectures")
+    mo.vstack([sel_famB_p2o, sel_famB_p2o_arch])
+    return sel_famB_p2o, sel_famB_p2o_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_p2o):
-    # Plot 2: pes2o family. Color = model type; line style = source.
+def _(
+    finished_df,
+    make_famB_figure,
+    render_side_by_side,
+    sel_famB_p2o,
+    sel_famB_p2o_arch,
+):
+    # Plot 2: pes2o family. Color = source; line style + shade = architecture.
     _sources = [
         ("olmo_mix", "#1f77b4", "baseline", "olmo_mix"),
         ("pes2o", "#2ca02c", "baseline", "pes2o"),
@@ -1912,7 +2021,8 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_p2o):
     _out = render_side_by_side(
         sel_famB_p2o.value,
         lambda m: make_famB_figure(
-            finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources, exclude_reps=[128,256]
+            finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources,
+            include_archs=sel_famB_p2o_arch.value, exclude_reps=[128,256],
         ),
         "famB_pes2o",
     )
