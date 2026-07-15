@@ -401,43 +401,81 @@ def _(dedupe_runs, filter_finished, raw_df):
 @app.cell(hide_code=True)
 def _(json, os):
     # ------------------------------------------------------------------
-    # Per-step training history (for the training-curve column).
+    # Per-step training history (for the training-curve column, and for the
+    # smoothed train loss in the column-1 plots).
     #
     # ml/wandb_download/download.py --include-history writes one JSONL per run to
-    # ml/runs_data/history/<run Name>.jsonl, each line a logged step with a "_step"
+    # ml/runs_data/history/<run_id>.jsonl, each line a logged step with a "_step"
     # field plus whatever metrics were logged that step (train/CE loss is dense;
-    # eval metrics are sparse). We load a run's (step, value) series on demand.
+    # eval metrics are sparse).
+    #
+    # IMPORTANT: history files are named by *run_id*, but everywhere else the
+    # notebook identifies a run by the CSV ``Name`` column, which is the *corrected*
+    # run ``name``. For the early (pre-2026-04-10) runs the run_id carries a wrong
+    # rep label while the name is corrected, so name != run_id. We therefore
+    # translate name -> run_id (via runs.jsonl) before opening a history file, or
+    # the smoothed train loss / training curves would be cross-wired (e.g. the
+    # rep-16 run would load the rep-128 run's history).
     # ------------------------------------------------------------------
-    def _history_dir():
+    def _runs_data_dir():
         _this_dir = (
             os.path.dirname(os.path.abspath(__file__))
             if "__file__" in dir()
             else os.getcwd()
         )
         _candidates = [
-            os.path.join(_this_dir, "..", "runs_data", "history"),
-            os.path.join(_this_dir, "ml", "runs_data", "history"),
+            os.path.join(_this_dir, "..", "runs_data"),
+            os.path.join(_this_dir, "ml", "runs_data"),
         ]
         for d in _candidates:
             if os.path.isdir(os.path.normpath(d)):
                 return os.path.normpath(d)
         return os.path.normpath(_candidates[0])
 
-    HISTORY_DIR = _history_dir()
+    RUNS_DATA_DIR = _runs_data_dir()
+    HISTORY_DIR = os.path.join(RUNS_DATA_DIR, "history")
+
+    def _load_name_to_run_id():
+        """Map corrected run ``name`` -> ``run_id`` from runs.jsonl. History files
+        are named by run_id, but the CSV/plots key on name."""
+        path = os.path.join(RUNS_DATA_DIR, "runs.jsonl")
+        mapping: dict = {}
+        if not os.path.isfile(path):
+            return mapping
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                name = d.get("name")
+                rid = d.get("run_id")
+                if name is not None and rid is not None:
+                    mapping[name] = rid
+        return mapping
+
+    NAME_TO_RUN_ID = _load_name_to_run_id()
 
     _history_cache: dict = {}
 
     def load_history_series(run_name: str, metric: str):
-        """Return sorted [(step, value), ...] for `metric` in run `run_name`'s history.
+        """Return sorted [(step, value), ...] for `metric` in a run's history.
 
-        Reads ml/runs_data/history/<run_name>.jsonl, keeping only rows where both
-        ``_step`` and the metric are present. Results are cached per (run, metric).
+        `run_name` is the CSV ``Name`` (the corrected run name). We resolve it to the
+        run_id (history files are named by run_id) before reading. Keeping only rows
+        where both ``_step`` and the metric are present. Cached per (run, metric).
         Returns [] if the history file is missing.
         """
         cache_key = (run_name, metric)
         if cache_key in _history_cache:
             return _history_cache[cache_key]
-        path = os.path.join(HISTORY_DIR, f"{run_name}.jsonl")
+        # History files are keyed by run_id; translate name -> run_id (falling back
+        # to the name itself for runs where they coincide / aren't in runs.jsonl).
+        run_id = NAME_TO_RUN_ID.get(run_name, run_name)
+        path = os.path.join(HISTORY_DIR, f"{run_id}.jsonl")
         series = []
         if os.path.isfile(path):
             with open(path) as f:
