@@ -182,15 +182,27 @@ def _(json, pd):
             return "moe32"
         return "other"
 
+    MAX_DUR_COL = "trainer.max_duration.value"
+    REQ_TOKENS_COL = "dataset.source_mixture_config.requested_tokens"
+
     def get_reps(row) -> float:
-        """Repetition count. Prefer the numeric data_reps column."""
-        val = row.get(REPS_COL)
+        """Repetition count = total training tokens / unique tokens, computed as
+        ``trainer.max_duration.value / dataset.source_mixture_config.requested_tokens``.
+
+        This is authoritative: an early (pre-2026-04-10) bug wrote wrong repetition
+        counts into run names and the ``data_reps`` column, so those must NOT be
+        trusted. When ``requested_tokens`` is absent (single-pass runs record no
+        source_mixture_config), the run is a single epoch, i.e. rep = 1.
+        """
+        md = row.get(MAX_DUR_COL)
+        rt = row.get(REQ_TOKENS_COL)
         try:
-            if pd.notna(val):
-                return float(val)
+            if pd.notna(rt) and float(rt) > 0 and pd.notna(md):
+                return float(md) / float(rt)
         except (TypeError, ValueError):
             pass
-        return float("nan")
+        # No source-mixture requested-token budget -> single pass over the data.
+        return 1.0
 
     def get_data_tag(row):
         """Return the single data-source tag on this run (or None)."""
@@ -1299,6 +1311,7 @@ def _(mo):
 def _(
     apply_pow2_xaxis,
     axis_label,
+    get_reps,
     keep_arch,
     metric_value,
     pd,
@@ -1315,12 +1328,6 @@ def _(
         """Model type from the run-name suffix (famAr runs aren't tagged MoE32/64)."""
         m = re.search(r"_(dense|moe32|moe64)$", str(name))
         return m.group(1) if m else None
-
-    def famA_reps(name: str) -> float:
-        """Repetition count from a 'rep{N}x' token; original famA runs (no token)
-        are single-pass, i.e. rep 1."""
-        m = re.search(r"rep(\d+)x", str(name))
-        return float(m.group(1)) if m else 1.0
 
     _DASH_CYCLE = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
     _COLORS = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
@@ -1397,7 +1404,7 @@ def _(
             mt = famA_model_type(name)
             if mt is None or not keep_arch(mt, include_archs, exclude_archs):
                 continue
-            reps = famA_reps(name)
+            reps = get_reps(row)
             series.setdefault((mt, reps), []).append((pct, float(loss)))
             rep_set.add(reps)
 
@@ -1446,7 +1453,7 @@ def _(
             mt = famA_model_type(name)
             if mt is None or not keep_arch(mt, include_archs, exclude_archs):
                 continue
-            reps = famA_reps(name)
+            reps = get_reps(row)
             series.setdefault((mt, pct), []).append((reps, float(loss)))
             pct_set.add(pct)
 
