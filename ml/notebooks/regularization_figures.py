@@ -265,11 +265,104 @@ def _(json, pd):
             out.append((reps, val))
         return out
 
+    def _arch_of(row) -> str:
+        """Architecture (dense/moe32/moe64) from the run-name suffix, falling back to
+        tags (matches the famA handling; famAr runs are only tagged 'MoE')."""
+        import re as _re
+
+        m = _re.search(r"_(dense|moe32|moe64)$", str(row.get("Name", "")))
+        if m:
+            return m.group(1)
+        return get_model_type(row)
+
+    def _norm(v):
+        """Normalize a scalar for hashing: NaN/blank -> None so equal configs match
+        (NaN != NaN in Python would otherwise break dedup)."""
+        if v is None:
+            return None
+        if isinstance(v, float) and pd.isna(v):
+            return None
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
+    def _sources_key(row):
+        """Canonical, order-stable key for the source-mixture list. Compares each
+        source dict field by field, ignoring the derived 'unique_tokens' field that
+        is present on only some runs."""
+        s = row.get("dataset.source_mixture_config.source_list.sources")
+        if not isinstance(s, str):
+            return None
+        try:
+            sources = json.loads(s)
+        except (ValueError, TypeError):
+            return None
+        canon = []
+        for d in sources:
+            items = []
+            for k in sorted(d):
+                if k == "unique_tokens":
+                    continue
+                val = d[k]
+                items.append((k, tuple(val) if isinstance(val, list) else val))
+            canon.append(tuple(items))
+        return tuple(canon)
+
+    def _namemix_key(row):
+        """Fallback data-mix signature, used only when the run has no
+        ``source_mixture_config`` (e.g. pure single-source mixes and plain-datamix
+        runs record no sources). Combines the data-source tag (olmo_mix / dclm /
+        starcoder / pes2o / wiki) with any ``dclm{N}`` percentage from the name, so
+        e.g. wiki vs olmo_mix, and dclm0 vs dclm100, aren't merged just because they
+        all lack a sources config."""
+        if _sources_key(row) is not None:
+            return None
+        import re as _re
+
+        m = _re.search(r"dclm(\d+)", str(row.get("Name", "")))
+        return (get_data_tag(row), int(m.group(1)) if m else None)
+
+    def _dedup_key(row):
+        """Identity key for de-duplicating runs that are the same experiment."""
+        return (
+            _sources_key(row),
+            _namemix_key(row),
+            _norm(row.get("dataset.source_mixture_config.requested_tokens")),
+            _norm(row.get("model.d_model")),
+            _norm(row.get(DROPOUT_COL)),
+            _norm(row.get(WD_COL)),
+            _norm(row.get(MGN_COL)),
+            _norm(row.get("train_module.optim.lr")),
+            _norm(router_field(row, "jitter_eps")),
+            _norm(router_field(row, "eom_prob")),
+            _norm(row.get(FOM_COL)),
+            _arch_of(row),
+        )
+
+    def dedupe_runs(df: pd.DataFrame) -> pd.DataFrame:
+        """Drop duplicate runs that share the same experiment identity (source
+        mixture + requested tokens + model size + dropout + weight decay + MoE
+        jitter/EOM/FOM + architecture). Keeps the first occurrence and warns."""
+        seen: dict = {}
+        keep_idx = []
+        for idx, row in df.iterrows():
+            key = _dedup_key(row)
+            if key in seen:
+                print(
+                    f"DEDUP: dropping '{row.get('Name')}' — duplicate of "
+                    f"'{seen[key]}'"
+                )
+                continue
+            seen[key] = row.get("Name")
+            keep_idx.append(idx)
+        return df.loc[keep_idx].copy()
+
     return (
         DROPOUT_COL,
         FOM_COL,
         MGN_COL,
         WD_COL,
+        dedupe_runs,
         filter_finished,
         filter_rep_points,
         get_model_type,
@@ -284,9 +377,10 @@ def _(json, pd):
 
 
 @app.cell
-def _(filter_finished, raw_df):
-    # Single filtered frame reused by every figure below.
-    finished_df = filter_finished(raw_df)
+def _(dedupe_runs, filter_finished, raw_df):
+    # Single filtered frame reused by every figure below. Duplicate runs (same
+    # experiment identity) are dropped up front so no plot double-counts them.
+    finished_df = dedupe_runs(filter_finished(raw_df))
     return (finished_df,)
 
 
