@@ -457,27 +457,6 @@ def _(mo, raw_df, save_pdf):
     return metric_multiselect, render_side_by_side
 
 
-@app.cell(hide_code=True)
-def _(metric_multiselect):
-    sel_famA_rep = metric_multiselect(
-        "famA (vs reps) — metrics",
-        chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"],
-    )
-    sel_famA_rep
-    return (sel_famA_rep,)
-
-
-@app.cell(hide_code=True)
-def _(finished_df, make_famA_rep_figure, render_side_by_side, sel_famA_rep):
-    _out = render_side_by_side(
-        sel_famA_rep.value,
-        lambda m: make_famA_rep_figure(finished_df, m),
-        "famA_rep",
-    )
-    _out
-    return
-
-
 @app.cell(column=1, hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -1379,6 +1358,27 @@ def _(metric_multiselect):
 def _(finished_df, make_famA_figure, render_side_by_side, sel_famA):
     _out = render_side_by_side(
         sel_famA.value, lambda m: make_famA_figure(finished_df, m), "famA"
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(metric_multiselect):
+    sel_famA_rep = metric_multiselect(
+        "famA (vs reps) — metrics",
+        chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"],
+    )
+    sel_famA_rep
+    return (sel_famA_rep,)
+
+
+@app.cell(hide_code=True)
+def _(finished_df, make_famA_rep_figure, render_side_by_side, sel_famA_rep):
+    _out = render_side_by_side(
+        sel_famA_rep.value,
+        lambda m: make_famA_rep_figure(finished_df, m),
+        "famA_rep",
     )
     _out
     return
