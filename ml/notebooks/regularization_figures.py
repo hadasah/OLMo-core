@@ -265,8 +265,10 @@ def _(json, pd):
         vals.append(p)  # smallest power of 2 >= max_reps
         return vals, [str(v) for v in vals]
 
-    # Per-model-type lightening: dense = darkest (0.0), moe64 = lightest.
-    MODEL_SHADE = {"dense": 0.0, "moe32": 0.35, "moe64": 0.65}
+    # Per-model-type lightening: dense = darkest, moe64 = lightest. Positive values
+    # blend toward white; negative toward black. moe64 now sits at the old moe32
+    # level and dense goes slightly below pure base color.
+    MODEL_SHADE = {"dense": -0.1, "moe32": 0.15, "moe64": 0.35}
 
     def shade_color(hex_color: str, lighten: float) -> str:
         """Shade a hex color. Positive `lighten` blends toward white, negative blends
