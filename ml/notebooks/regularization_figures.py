@@ -184,27 +184,62 @@ def _(json, pd):
 
     MAX_DUR_COL = "trainer.max_duration.value"
     REQ_TOKENS_COL = "dataset.source_mixture_config.requested_tokens"
+    SOURCES_COL = "dataset.source_mixture_config.source_list.sources"
+
+    def max_repetition_ratio(row) -> float:
+        """Largest per-source ``max_repetition_ratio`` in the mixture (1.0 if none).
+
+        famB runs keep a fixed token budget and instead encode repetition of the
+        minority source via its ``max_repetition_ratio`` (e.g. rep8x -> 8), so the
+        ``max_duration / requested_tokens`` ratio stays 1 for them. Reading the max
+        ratio across sources recovers the intended repetition count.
+        """
+        raw = row.get(SOURCES_COL)
+        if not isinstance(raw, str):
+            return 1.0
+        try:
+            sources = json.loads(raw)
+        except (ValueError, TypeError):
+            return 1.0
+        best = 1.0
+        for s in sources or []:
+            try:
+                r = float(s.get("max_repetition_ratio"))
+            except (TypeError, ValueError):
+                continue
+            if r > best:
+                best = r
+        return best
 
     def get_reps(row) -> float:
-        """Repetition count = total training tokens / unique tokens, i.e.
-        ``trainer.max_duration.value / dataset.source_mixture_config.requested_tokens``.
+        """Repetition count for a run.
+
+        Two encodings exist and we take whichever implies more repetition:
+
+        1. **Shrunken token budget** (baseline data_rep runs): total training tokens
+           over unique tokens, i.e. ``trainer.max_duration.value /
+           dataset.source_mixture_config.requested_tokens``.
+        2. **Per-source repetition ratio** (famB runs): the mixture keeps a fixed
+           token budget (so ratio #1 is 1) and repeats the minority source via its
+           ``max_repetition_ratio``.
 
         An early (pre-2026-04-10) bug wrote wrong repetition counts into run *ids*
         and the ``data_reps`` column, so neither of those can be trusted. The wide
         CSV's ``Name`` column, however, is the *corrected* run name, and its
-        ``requested_tokens`` / ``max_duration`` columns are correct — so we compute
-        the ratio straight from them. A run with no source-mixture requested-token
-        budget is single-pass, i.e. rep 1.
+        ``requested_tokens`` / ``max_duration`` / ``source_list`` columns are
+        correct — so we compute the count straight from them. A run with neither
+        signal is single-pass, i.e. rep 1.
         """
+        token_reps = 1.0
         md = row.get(MAX_DUR_COL)
         rt = row.get(REQ_TOKENS_COL)
         try:
             if pd.notna(rt) and float(rt) > 0 and pd.notna(md):
-                return float(md) / float(rt)
+                token_reps = float(md) / float(rt)
         except (TypeError, ValueError):
             pass
-        # No source-mixture requested-token budget -> single pass over the data.
-        return 1.0
+        # No source-mixture budget signal -> fall back to per-source rep ratio.
+        return max(token_reps, max_repetition_ratio(row))
 
     def get_data_tag(row):
         """Return the single data-source tag on this run (or None)."""
@@ -1917,7 +1952,7 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_sc):
     _out = render_side_by_side(
         sel_famB_sc.value,
         lambda m: make_famB_figure(
-            finished_df, m, f"famB (starcoder): {m} vs. repetition", _sources
+            finished_df, m, f"famB (starcoder): {m} vs. repetition", _sources, exclude_reps=[128,256]
         ),
         "famB_starcoder",
     )
@@ -1944,7 +1979,7 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_p2o):
     _out = render_side_by_side(
         sel_famB_p2o.value,
         lambda m: make_famB_figure(
-            finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources
+            finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources, exclude_reps=[128,256]
         ),
         "famB_pes2o",
     )
