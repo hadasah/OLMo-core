@@ -58,7 +58,7 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(glob, json, os, pd):
+def _(glob, os, pd):
     def find_latest_data_file() -> str:
         """Return the path to the most recently modified CSV to plot.
 
@@ -102,51 +102,7 @@ def _(glob, json, os, pd):
         return pd.read_csv(DATA_FILE)
 
     raw_df = load_raw_data()
-
-    def load_reps_by_run() -> dict:
-        """Authoritative repetition count per run from ``runs.jsonl`` (next to the
-        CSV), computed as ``trainer.max_duration.value / requested_tokens``.
-
-        The wide CSV's ``Name``/``requested_tokens`` are corrupted for the early
-        (pre-2026-04-10) runs — the run_id carries a wrong rep label and the CSV
-        copied a wrong requested_tokens. ``runs.jsonl`` keeps the corrected config,
-        so we key this lookup by ``run_id`` (== the CSV ``Name`` column) and prefer
-        it over the CSV columns. Runs absent here fall back to the CSV in get_reps.
-        """
-        jsonl_path = os.path.join(os.path.dirname(DATA_FILE), "runs.jsonl")
-        out: dict = {}
-        if not os.path.isfile(jsonl_path):
-            return out
-        with open(jsonl_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                cfg = d.get("config", {})
-                try:
-                    md = cfg["trainer"]["max_duration"]["value"]
-                except (KeyError, TypeError):
-                    md = None
-                try:
-                    rt = cfg["dataset"]["source_mixture_config"]["requested_tokens"]
-                except (KeyError, TypeError):
-                    rt = None
-                rid = d.get("run_id")
-                if rid is None:
-                    continue
-                if md and rt:
-                    out[rid] = float(md) / float(rt)
-                else:
-                    # No source-mixture budget -> single pass.
-                    out[rid] = 1.0
-        return out
-
-    reps_by_run = load_reps_by_run()
-    return DATA_FILE, raw_df, reps_by_run
+    return DATA_FILE, raw_df
 
 
 @app.cell(hide_code=True)
@@ -160,7 +116,7 @@ def _(DATA_FILE, mo, os, raw_df):
 
 
 @app.cell(hide_code=True)
-def _(json, pd, reps_by_run):
+def _(json, pd):
     # ------------------------------------------------------------------
     # Data filtering + parsing helpers.
     # ------------------------------------------------------------------
@@ -233,16 +189,13 @@ def _(json, pd, reps_by_run):
         """Repetition count = total training tokens / unique tokens, i.e.
         ``trainer.max_duration.value / dataset.source_mixture_config.requested_tokens``.
 
-        This is authoritative: an early (pre-2026-04-10) bug wrote wrong repetition
-        counts into run names / the ``data_reps`` column, and the wide CSV even copied
-        a wrong ``requested_tokens`` for those runs. So we FIRST look the value up in
-        ``reps_by_run`` (built from the un-corrupted ``runs.jsonl``, keyed by run_id
-        == the CSV ``Name``); only if the run is absent there do we fall back to the
-        CSV columns. Runs with no source-mixture budget are single-pass, i.e. rep 1.
+        An early (pre-2026-04-10) bug wrote wrong repetition counts into run *ids*
+        and the ``data_reps`` column, so neither of those can be trusted. The wide
+        CSV's ``Name`` column, however, is the *corrected* run name, and its
+        ``requested_tokens`` / ``max_duration`` columns are correct — so we compute
+        the ratio straight from them. A run with no source-mixture requested-token
+        budget is single-pass, i.e. rep 1.
         """
-        rid = str(row.get("Name", ""))
-        if rid in reps_by_run:
-            return reps_by_run[rid]
         md = row.get(MAX_DUR_COL)
         rt = row.get(REQ_TOKENS_COL)
         try:
