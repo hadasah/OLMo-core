@@ -27,9 +27,10 @@ Typical usage::
 
 Metadata (``wandb_export.csv`` / ``runs.jsonl``) is always rebuilt from scratch
 so the snapshot is current. History download is partially incremental: history
-for terminal runs (finished/failed/crashed) that already have a non-empty file
-on disk is skipped, since it can no longer change. Pass ``--refresh-history`` to
-force a full re-fetch. History for still-running runs is always re-downloaded.
+for terminal runs (finished/failed/crashed) is skipped only when the on-disk
+file already reaches the run's reported ``lastHistoryStep``; a truncated cached
+file is re-fetched. Pass ``--refresh-history`` to force a full re-fetch. History
+for still-running runs is always re-downloaded.
 
 wandb serves history from a server-side parquet cache that can lag for recently
 finished runs and return a *truncated* history. Each run's downloaded history is
@@ -290,18 +291,6 @@ def _has_cached_history(output_dir: Path, run_id: str) -> bool:
         return False
 
 
-def _should_skip_history(run: Any, output_dir: Path, refresh: bool) -> bool:
-    """Skip re-downloading history for a terminal run that's already cached.
-
-    Terminal runs (finished/failed/crashed/killed) never produce new steps, so
-    an existing non-empty history file is complete. ``refresh`` forces a full
-    re-fetch regardless.
-    """
-    if refresh:
-        return False
-    return (run.state in TERMINAL_STATES) and _has_cached_history(output_dir, run.id)
-
-
 def _expected_last_step(run: Any) -> int | None:
     """The run's true final history step, if wandb reports it.
 
@@ -316,6 +305,51 @@ def _expected_last_step(run: Any) -> int | None:
         if isinstance(val, int) and val >= 0:
             return val
     return None
+
+
+def _cached_last_step(output_dir: Path, run_id: str) -> int | None:
+    """Max ``_step`` in the cached history file, or None if unreadable/empty.
+
+    Reads only the last non-empty line, since wandb history is written in step
+    order, so scanning the whole file is unnecessary.
+    """
+    path = _history_path(output_dir, run_id)
+    try:
+        if not (path.exists() and path.stat().st_size > 0):
+            return None
+        last_line = ""
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    last_line = line
+        if not last_line:
+            return None
+        step = json.loads(last_line).get("_step")
+        return step if isinstance(step, int) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _should_skip_history(run: Any, output_dir: Path, refresh: bool) -> bool:
+    """Skip re-downloading history for a terminal run that's already cached.
+
+    Terminal runs (finished/failed/crashed/killed) never produce new steps, so
+    an existing history file is a candidate for skipping. But wandb's parquet
+    cache can have written a *truncated* file previously (see fetch_history), so
+    we only skip when the cached file actually reaches the run's reported
+    ``lastHistoryStep``. A short cached file is re-fetched (which then uses the
+    uncached retry path). ``refresh`` forces a re-fetch regardless.
+    """
+    if refresh:
+        return False
+    if run.state not in TERMINAL_STATES or not _has_cached_history(output_dir, run.id):
+        return False
+    expected_last = _expected_last_step(run)
+    if expected_last is None:
+        # Can't verify completeness; trust the existing non-empty file.
+        return True
+    cached_last = _cached_last_step(output_dir, run.id)
+    return cached_last is not None and cached_last >= expected_last
 
 
 def _scan_to_file(run: Any, tmp: Path, *, use_cache: bool) -> tuple[int, int | None]:
