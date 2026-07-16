@@ -1897,6 +1897,8 @@ def _(
         exclude_archs=None,
         include_reps=None,
         exclude_reps=None,
+        annotate_reps=True,
+        annotate_min_gap=0.04,
     ):
         """Faceted training curves (metric vs. train step) for baseline runs of one
         data mixture + model scale.
@@ -1905,6 +1907,18 @@ def _(
         (dense/moe32/moe64) and one **row per metric** in ``metrics``. Within each
         facet, one line per repetition count (color encodes the rep count). Reads
         per-step values from the downloaded W&B history.
+
+        Inline rep labels
+        -----------------
+        When ``annotate_reps`` is True (the default), each line's rep count (e.g.
+        ``"16x"``) is written just above its right endpoint, in the line's color.
+        To avoid unreadable pile-ups where curves converge, a label is drawn only if
+        its endpoint is vertically far enough from every other endpoint in that facet:
+        endpoints are compared on the y axis in facet-relative units (fraction of the
+        facet's y-range), and a label is skipped if its nearest neighbor is within
+        ``annotate_min_gap`` (so a tightly-converged cluster gets no inline labels —
+        the shared legend still covers them). Set ``annotate_reps=False`` to disable
+        the inline labels entirely.
         """
         if isinstance(metrics, str):
             metrics = [metrics]
@@ -1958,6 +1972,7 @@ def _(
         for r, metric in enumerate(metrics):
             for c, model_type in enumerate(archs):
                 ax = axes[r][c]
+                endpoints = []  # (reps, x_last, y_last) for inline labels
                 for reps in rep_order:
                     run_name = runs.get((model_type, reps))
                     if run_name is None:
@@ -1974,6 +1989,36 @@ def _(
                         linewidth=1.0,
                         color=rep_color[reps],
                     )
+                    endpoints.append((reps, series[-1][0], series[-1][1]))
+
+                # Inline rep labels: only for endpoints that are vertically well
+                # separated from every other endpoint in this facet.
+                if annotate_reps and endpoints:
+                    ymin, ymax = ax.get_ylim()
+                    yspan = (ymax - ymin) or 1.0
+                    for reps, x_last, y_last in endpoints:
+                        nearest = min(
+                            (
+                                abs(y_last - other_y) / yspan
+                                for o_reps, _, other_y in endpoints
+                                if o_reps != reps
+                            ),
+                            default=float("inf"),
+                        )
+                        if nearest < annotate_min_gap:
+                            continue
+                        ax.annotate(
+                            f"{reps:g}x",
+                            xy=(x_last, y_last),
+                            xytext=(3, 3),
+                            textcoords="offset points",
+                            fontsize=6,
+                            color=rep_color[reps],
+                            ha="left",
+                            va="bottom",
+                            clip_on=False,
+                        )
+
                 # Column title (architecture) only on the top row.
                 if r == 0:
                     ax.set_title(model_type, fontsize=11, fontweight="bold")

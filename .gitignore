@@ -62,7 +62,7 @@ core
 /dataset-cache/
 data
 models
-runs_data/history
+runs_data/history/*.jsonl
 
 # notebooks
 __marimo__
