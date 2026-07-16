@@ -1110,7 +1110,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(arch_multiselect, metric_multiselect, mo):
-    sel_wiki_80m = metric_multiselect("wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss", "eval/lm/wikitext_103-validation/CE loss"])
+    sel_wiki_80m = metric_multiselect("wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss", "eval/lm/wikitext-validation/CE loss"])
     sel_wiki_80m_arch = arch_multiselect("wiki 80M — architectures")
     mo.vstack([sel_wiki_80m, sel_wiki_80m_arch])
     return sel_wiki_80m, sel_wiki_80m_arch
@@ -1440,7 +1440,7 @@ def _(mo):
 def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_jitter = metric_multiselect("MoE jitter_eps — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_moe_jitter_arch = arch_multiselect(
-        "MoE jitter_eps — architectures", options=["moe32", "moe64"]
+        "MoE jitter_eps — architectures", options=["dense", "moe32", "moe64"]
     )
     mo.vstack([sel_moe_jitter, sel_moe_jitter_arch])
     return sel_moe_jitter, sel_moe_jitter_arch
@@ -1466,6 +1466,7 @@ def _(
             m,
             include_archs=sel_moe_jitter_arch.value,
             value_getter=lambda row: router_field(row, "jitter_eps"),
+            exclude_reps=[128,256],
         ),
         "moe_jitter_eps",
     )
@@ -1477,7 +1478,7 @@ def _(
 def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_eom = metric_multiselect("MoE eom_prob — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_moe_eom_arch = arch_multiselect(
-        "MoE eom_prob — architectures", options=["moe32", "moe64"]
+        "MoE eom_prob — architectures", options=["dense","moe32", "moe64"]
     )
     mo.vstack([sel_moe_eom, sel_moe_eom_arch])
     return sel_moe_eom, sel_moe_eom_arch
@@ -1503,6 +1504,7 @@ def _(
             m,
             include_archs=sel_moe_eom_arch.value,
             value_getter=lambda row: router_field(row, "eom_prob"),
+            exclude_reps=[128,256],
         ),
         "moe_eom_prob",
     )
@@ -1514,7 +1516,7 @@ def _(
 def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_fom = metric_multiselect("MoE fom_prob — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_moe_fom_arch = arch_multiselect(
-        "MoE fom_prob — architectures", options=["moe32", "moe64"]
+        "MoE fom_prob — architectures", options=["dense", "moe32", "moe64"]
     )
     mo.vstack([sel_moe_fom, sel_moe_fom_arch])
     return sel_moe_fom, sel_moe_fom_arch
@@ -1533,7 +1535,7 @@ def _(
     _out = render_side_by_side(
         sel_moe_fom.value,
         lambda m: make_factor_figure(
-            finished_df, FOM_COL, "fom_prob", None, m, include_archs=sel_moe_fom_arch.value
+            finished_df, FOM_COL, "fom_prob", None, m, include_archs=sel_moe_fom_arch.value, exclude_reps=[128,256],
         ),
         "moe_fom_prob",
     )
@@ -1877,6 +1879,91 @@ def _(
 
 
 @app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_famB_sc = metric_multiselect("famB starcoder — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
+    sel_famB_sc_arch = arch_multiselect("famB starcoder — architectures")
+    mo.vstack([sel_famB_sc, sel_famB_sc_arch])
+    return sel_famB_sc, sel_famB_sc_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_famB_figure,
+    render_side_by_side,
+    sel_famB_sc,
+    sel_famB_sc_arch,
+):
+    # Plot 1: starcoder family. Color = source; line style + shade = architecture.
+    # Order (and thus palette assignment) is dclm, sc90, sc50, starcoder.
+    _sources = [
+        ("dclm", "#1f77b4", "baseline", "dclm"),
+        ("sc90", "#d62728", "famB", "sc90"),
+        ("sc50", "#ff7f0e", "famB", "sc50"),
+        ("starcoder", "#2ca02c", "baseline", "starcoder"),
+    ]
+    _out = render_side_by_side(
+        sel_famB_sc.value,
+        lambda m: make_famB_figure(
+            finished_df, m, f"famB (starcoder): {m} vs. repetition", _sources,
+            include_archs=sel_famB_sc_arch.value, exclude_reps=[128,256],
+        ),
+        "famB_starcoder",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_famB_p2o = metric_multiselect("famB pes2o — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
+    sel_famB_p2o_arch = arch_multiselect("famB pes2o — architectures")
+    mo.vstack([sel_famB_p2o, sel_famB_p2o_arch])
+    return sel_famB_p2o, sel_famB_p2o_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_famB_figure,
+    render_side_by_side,
+    sel_famB_p2o,
+    sel_famB_p2o_arch,
+):
+    # Plot 2: pes2o family. Color = source; line style + shade = architecture.
+    # Order (and thus palette assignment) is dclm, p2o50, pes2o.
+    _sources = [
+        ("dclm", "#1f77b4", "baseline", "dclm"),
+        ("p2o50", "#ff7f0e", "famB", "p2o50"),
+        ("pes2o", "#2ca02c", "baseline", "pes2o"),
+    ]
+    _out = render_side_by_side(
+        sel_famB_p2o.value,
+        lambda m: make_famB_figure(
+            finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources,
+            include_archs=sel_famB_p2o_arch.value, exclude_reps=[128,256],
+        ),
+        "famB_pes2o",
+    )
+    _out
+    return
+
+
+@app.cell(column=2, hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Training curves — metric vs. train step (baseline runs)
+
+    Per-step training curves from the downloaded W&B history
+    (`ml/runs_data/history/`). Baseline `olmo_mix` runs (and the single-source
+    mixtures) at 80M / 200M. Each plot is **faceted**: one column per architecture
+    (dense / moe32 / moe64) and one row per selected metric, with one line per
+    repetition count (color = rep count).
+    """)
+    return
+
+
+@app.cell(hide_code=True)
 def _(
     factor_palette,
     get_model_type,
@@ -1898,7 +1985,7 @@ def _(
         include_reps=None,
         exclude_reps=None,
         annotate_reps=True,
-        annotate_min_gap=0.04,
+        annotate_min_gap=0.01,
     ):
         """Faceted training curves (metric vs. train step) for baseline runs of one
         data mixture + model scale.
@@ -2010,7 +2097,7 @@ def _(
                         ax.annotate(
                             f"{reps:g}x",
                             xy=(x_last, y_last),
-                            xytext=(3, 3),
+                            xytext=(3, -3),
                             textcoords="offset points",
                             fontsize=6,
                             color=rep_color[reps],
@@ -2058,91 +2145,6 @@ def _(
         return fig
 
     return (make_training_curve_figure,)
-
-
-@app.cell(hide_code=True)
-def _(arch_multiselect, metric_multiselect, mo):
-    sel_famB_sc = metric_multiselect("famB starcoder — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
-    sel_famB_sc_arch = arch_multiselect("famB starcoder — architectures")
-    mo.vstack([sel_famB_sc, sel_famB_sc_arch])
-    return sel_famB_sc, sel_famB_sc_arch
-
-
-@app.cell(hide_code=True)
-def _(
-    finished_df,
-    make_famB_figure,
-    render_side_by_side,
-    sel_famB_sc,
-    sel_famB_sc_arch,
-):
-    # Plot 1: starcoder family. Color = source; line style + shade = architecture.
-    # Order (and thus palette assignment) is dclm, sc90, sc50, starcoder.
-    _sources = [
-        ("dclm", "#1f77b4", "baseline", "dclm"),
-        ("sc90", "#d62728", "famB", "sc90"),
-        ("sc50", "#ff7f0e", "famB", "sc50"),
-        ("starcoder", "#2ca02c", "baseline", "starcoder"),
-    ]
-    _out = render_side_by_side(
-        sel_famB_sc.value,
-        lambda m: make_famB_figure(
-            finished_df, m, f"famB (starcoder): {m} vs. repetition", _sources,
-            include_archs=sel_famB_sc_arch.value, exclude_reps=[128,256],
-        ),
-        "famB_starcoder",
-    )
-    _out
-    return
-
-
-@app.cell(hide_code=True)
-def _(arch_multiselect, metric_multiselect, mo):
-    sel_famB_p2o = metric_multiselect("famB pes2o — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
-    sel_famB_p2o_arch = arch_multiselect("famB pes2o — architectures")
-    mo.vstack([sel_famB_p2o, sel_famB_p2o_arch])
-    return sel_famB_p2o, sel_famB_p2o_arch
-
-
-@app.cell(hide_code=True)
-def _(
-    finished_df,
-    make_famB_figure,
-    render_side_by_side,
-    sel_famB_p2o,
-    sel_famB_p2o_arch,
-):
-    # Plot 2: pes2o family. Color = source; line style + shade = architecture.
-    # Order (and thus palette assignment) is dclm, p2o50, pes2o.
-    _sources = [
-        ("dclm", "#1f77b4", "baseline", "dclm"),
-        ("p2o50", "#ff7f0e", "famB", "p2o50"),
-        ("pes2o", "#2ca02c", "baseline", "pes2o"),
-    ]
-    _out = render_side_by_side(
-        sel_famB_p2o.value,
-        lambda m: make_famB_figure(
-            finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources,
-            include_archs=sel_famB_p2o_arch.value, exclude_reps=[128,256],
-        ),
-        "famB_pes2o",
-    )
-    _out
-    return
-
-
-@app.cell(column=2, hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## Training curves — metric vs. train step (baseline runs)
-
-    Per-step training curves from the downloaded W&B history
-    (`ml/runs_data/history/`). Baseline `olmo_mix` runs (and the single-source
-    mixtures) at 80M / 200M. Each plot is **faceted**: one column per architecture
-    (dense / moe32 / moe64) and one row per selected metric, with one line per
-    repetition count (color = rep count).
-    """)
-    return
 
 
 @app.cell(hide_code=True)
