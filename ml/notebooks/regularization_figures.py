@@ -1,16 +1,18 @@
 import marimo
 
 __generated_with = "0.23.9"
-app = marimo.App(width="full")
+app = marimo.App(width="columns")
 
 
-@app.cell(hide_code=True)
+@app.cell(column=0, hide_code=True)
 def _(mo):
     mo.md(r"""
     # Regularization & Data-Repetition Figures
 
-    Figures built from the most recent Weights & Biases CSV export in
-    `ml/notebooks/data/`.
+    Figures built from the most recent Weights & Biases CSV export. The notebook
+    reads the automated export in `ml/runs_data/` (written by
+    `ml/wandb_download/download.py`) if present, falling back to the
+    hand-downloaded CSVs in `ml/notebooks/data/` otherwise.
 
     Only runs with `State == "finished"` are plotted, and any run tagged `_HIDE`
     is dropped (see the data filtering function below).
@@ -58,22 +60,41 @@ def _():
 @app.cell(hide_code=True)
 def _(glob, os, pd):
     def find_latest_data_file() -> str:
-        """Return the path to the most recently modified CSV in ml/notebooks/data/."""
+        """Return the path to the most recently modified CSV to plot.
+
+        Prefers the automated export written by ``ml/wandb_download/download.py``
+        into ``ml/runs_data/``; falls back to the hand-downloaded W&B CSVs in
+        ``ml/notebooks/data/`` only when ``ml/runs_data/`` has no CSV yet.
+        """
         _this_dir = (
             os.path.dirname(os.path.abspath(__file__))
             if "__file__" in dir()
             else os.getcwd()
         )
-        # Handle being run from the repo root or from ml/notebooks/.
-        _candidates = [
+        # Handle being run from the repo root or from ml/notebooks/. The primary
+        # location (ml/runs_data) is tried first; the legacy location is the
+        # fallback. First directory that actually contains a CSV wins.
+        _dir_candidates = [
+            # ml/runs_data relative to ml/notebooks/ (this file's dir).
+            os.path.join(_this_dir, "..", "runs_data"),
+            # ml/runs_data relative to the repo root.
+            os.path.join(_this_dir, "ml", "runs_data"),
+            # Legacy hand-download location(s).
             os.path.join(_this_dir, "data"),
             os.path.join(_this_dir, "ml", "notebooks", "data"),
         ]
-        _data_dir = next((d for d in _candidates if os.path.isdir(d)), _candidates[0])
-        _csvs = glob.glob(os.path.join(_data_dir, "*.csv"))
-        if not _csvs:
-            raise FileNotFoundError(f"No CSV files found in {_data_dir}")
-        return max(_csvs, key=os.path.getmtime)
+        _searched = []
+        for _d in _dir_candidates:
+            _d = os.path.normpath(_d)
+            _searched.append(_d)
+            if not os.path.isdir(_d):
+                continue
+            _csvs = glob.glob(os.path.join(_d, "*.csv"))
+            if _csvs:
+                return max(_csvs, key=os.path.getmtime)
+        raise FileNotFoundError(
+            "No CSV files found in any data directory: " + ", ".join(_searched)
+        )
 
     DATA_FILE = find_latest_data_file()
 
@@ -161,15 +182,64 @@ def _(json, pd):
             return "moe32"
         return "other"
 
-    def get_reps(row) -> float:
-        """Repetition count. Prefer the numeric data_reps column."""
-        val = row.get(REPS_COL)
+    MAX_DUR_COL = "trainer.max_duration.value"
+    REQ_TOKENS_COL = "dataset.source_mixture_config.requested_tokens"
+    SOURCES_COL = "dataset.source_mixture_config.source_list.sources"
+
+    def max_repetition_ratio(row) -> float:
+        """Largest per-source ``max_repetition_ratio`` in the mixture (1.0 if none).
+
+        famB runs keep a fixed token budget and instead encode repetition of the
+        minority source via its ``max_repetition_ratio`` (e.g. rep8x -> 8), so the
+        ``max_duration / requested_tokens`` ratio stays 1 for them. Reading the max
+        ratio across sources recovers the intended repetition count.
+        """
+        raw = row.get(SOURCES_COL)
+        if not isinstance(raw, str):
+            return 1.0
         try:
-            if pd.notna(val):
-                return float(val)
+            sources = json.loads(raw)
+        except (ValueError, TypeError):
+            return 1.0
+        best = 1.0
+        for s in sources or []:
+            try:
+                r = float(s.get("max_repetition_ratio"))
+            except (TypeError, ValueError):
+                continue
+            if r > best:
+                best = r
+        return best
+
+    def get_reps(row) -> float:
+        """Repetition count for a run.
+
+        Two encodings exist and we take whichever implies more repetition:
+
+        1. **Shrunken token budget** (baseline data_rep runs): total training tokens
+           over unique tokens, i.e. ``trainer.max_duration.value /
+           dataset.source_mixture_config.requested_tokens``.
+        2. **Per-source repetition ratio** (famB runs): the mixture keeps a fixed
+           token budget (so ratio #1 is 1) and repeats the minority source via its
+           ``max_repetition_ratio``.
+
+        An early (pre-2026-04-10) bug wrote wrong repetition counts into run *ids*
+        and the ``data_reps`` column, so neither of those can be trusted. The wide
+        CSV's ``Name`` column, however, is the *corrected* run name, and its
+        ``requested_tokens`` / ``max_duration`` / ``source_list`` columns are
+        correct — so we compute the count straight from them. A run with neither
+        signal is single-pass, i.e. rep 1.
+        """
+        token_reps = 1.0
+        md = row.get(MAX_DUR_COL)
+        rt = row.get(REQ_TOKENS_COL)
+        try:
+            if pd.notna(rt) and float(rt) > 0 and pd.notna(md):
+                token_reps = float(md) / float(rt)
         except (TypeError, ValueError):
             pass
-        return float("nan")
+        # No source-mixture budget signal -> fall back to per-source rep ratio.
+        return max(token_reps, max_repetition_ratio(row))
 
     def get_data_tag(row):
         """Return the single data-source tag on this run (or None)."""
@@ -195,8 +265,10 @@ def _(json, pd):
         vals.append(p)  # smallest power of 2 >= max_reps
         return vals, [str(v) for v in vals]
 
-    # Per-model-type lightening: dense = darkest (0.0), moe64 = lightest.
-    MODEL_SHADE = {"dense": 0.0, "moe32": 0.35, "moe64": 0.65}
+    # Per-model-type lightening: dense = darkest, moe64 = lightest. Positive values
+    # blend toward white; negative toward black. moe64 now sits at the old moe32
+    # level and dense goes slightly below pure base color.
+    MODEL_SHADE = {"dense": -0.2, "moe32": -0.1, "moe64": 0.05}
 
     def shade_color(hex_color: str, lighten: float) -> str:
         """Shade a hex color. Positive `lighten` blends toward white, negative blends
@@ -244,11 +316,105 @@ def _(json, pd):
             out.append((reps, val))
         return out
 
+    def _arch_of(row) -> str:
+        """Architecture (dense/moe32/moe64) from the run-name suffix, falling back to
+        tags (matches the famA handling; famAr runs are only tagged 'MoE')."""
+        import re as _re
+
+        m = _re.search(r"_(dense|moe32|moe64)$", str(row.get("Name", "")))
+        if m:
+            return m.group(1)
+        return get_model_type(row)
+
+    def _norm(v):
+        """Normalize a scalar for hashing: NaN/blank -> None so equal configs match
+        (NaN != NaN in Python would otherwise break dedup)."""
+        if v is None:
+            return None
+        if isinstance(v, float) and pd.isna(v):
+            return None
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
+    def _sources_key(row):
+        """Canonical, order-stable key for the source-mixture list. Compares each
+        source dict field by field, ignoring the derived 'unique_tokens' field that
+        is present on only some runs."""
+        s = row.get("dataset.source_mixture_config.source_list.sources")
+        if not isinstance(s, str):
+            return None
+        try:
+            sources = json.loads(s)
+        except (ValueError, TypeError):
+            return None
+        canon = []
+        for d in sources:
+            items = []
+            for k in sorted(d):
+                if k == "unique_tokens":
+                    continue
+                val = d[k]
+                items.append((k, tuple(val) if isinstance(val, list) else val))
+            canon.append(tuple(items))
+        return tuple(canon)
+
+    def _namemix_key(row):
+        """Fallback data-mix signature, used only when the run has no
+        ``source_mixture_config`` (e.g. pure single-source mixes and plain-datamix
+        runs record no sources). Combines the data-source tag (olmo_mix / dclm /
+        starcoder / pes2o / wiki) with any ``dclm{N}`` percentage from the name, so
+        e.g. wiki vs olmo_mix, and dclm0 vs dclm100, aren't merged just because they
+        all lack a sources config."""
+        if _sources_key(row) is not None:
+            return None
+        import re as _re
+
+        m = _re.search(r"dclm(\d+)", str(row.get("Name", "")))
+        return (get_data_tag(row), int(m.group(1)) if m else None)
+
+    def _dedup_key(row):
+        """Identity key for de-duplicating runs that are the same experiment."""
+        return (
+            _sources_key(row),
+            _namemix_key(row),
+            _norm(row.get("dataset.source_mixture_config.requested_tokens")),
+            _norm(row.get("model.d_model")),
+            _norm(row.get(DROPOUT_COL)),
+            _norm(row.get(WD_COL)),
+            _norm(row.get(MGN_COL)),
+            _norm(row.get("train_module.optim.lr")),
+            _norm(router_field(row, "jitter_eps")),
+            _norm(router_field(row, "eom_prob")),
+            _norm(row.get(FOM_COL)),
+            _arch_of(row),
+        )
+
+    def dedupe_runs(df: pd.DataFrame) -> pd.DataFrame:
+        """Drop duplicate runs that share the same experiment identity (source
+        mixture + requested tokens + model size + dropout + weight decay + MoE
+        jitter/EOM/FOM + architecture). Keeps the first occurrence and warns."""
+        seen: dict = {}
+        keep_idx = []
+        for idx, row in df.iterrows():
+            key = _dedup_key(row)
+            if key in seen:
+                print(
+                    f"DEDUP: dropping '{row.get('Name')}' — duplicate of "
+                    f"'{seen[key]}'"
+                )
+                continue
+            seen[key] = row.get("Name")
+            keep_idx.append(idx)
+        return df.loc[keep_idx].copy()
+
     return (
         DROPOUT_COL,
         FOM_COL,
         MGN_COL,
+        MODEL_SHADE,
         WD_COL,
+        dedupe_runs,
         filter_finished,
         filter_rep_points,
         get_model_type,
@@ -263,10 +429,263 @@ def _(json, pd):
 
 
 @app.cell
-def _(filter_finished, raw_df):
-    # Single filtered frame reused by every figure below.
-    finished_df = filter_finished(raw_df)
+def _(dedupe_runs, filter_finished, raw_df):
+    # Single filtered frame reused by every figure below. Duplicate runs (same
+    # experiment identity) are dropped up front so no plot double-counts them.
+    finished_df = dedupe_runs(filter_finished(raw_df))
     return (finished_df,)
+
+
+@app.cell(hide_code=True)
+def _(MODEL_SHADE, plt, shade_color):
+    # ------------------------------------------------------------------
+    # Shared visual encoding used by EVERY figure:
+    #   - architecture -> line style + shade (dense solid/darkest,
+    #     moe32 dashed, moe64 dotted/lightest)
+    #   - color -> the plot's factor (regularizer value, data source,
+    #     rep count, or %dclm), assigned from a perceptual colormap.
+    # ------------------------------------------------------------------
+    from matplotlib.colors import to_hex
+    from matplotlib.lines import Line2D
+
+    ARCH_DASH = {"dense": "-", "moe32": "--", "moe64": ":"}
+    # Per-architecture base color, used only by plots where architecture is the sole
+    # variable (Groups 1 & 2). These are the viridis endpoints (purple / greenish-blue
+    # / yellow) so they match the factor palette used everywhere else. Elsewhere color
+    # encodes the factor and architecture is carried by line style + shade.
+    _viridis = plt.get_cmap("viridis")
+    ARCH_COLOR = {
+        "dense": to_hex(_viridis(0.0)),
+        "moe32": to_hex(_viridis(0.3)),
+        "moe64": to_hex(_viridis(0.75)),
+    }
+
+    def arch_dash(model_type):
+        return ARCH_DASH.get(model_type, "-")
+
+    def arch_shade(model_type):
+        return MODEL_SHADE.get(model_type, 0.0)
+
+    def arch_color(base_color, model_type):
+        """Shade a per-factor base color by architecture."""
+        return shade_color(base_color, arch_shade(model_type))
+
+    def factor_palette(keys, high_end=0.8):
+        """Distinct color per factor key (in the given order), spread across viridis.
+
+        A single key gets a fixed mid-palette color so lone-series plots stay
+        readable rather than collapsing to an extreme of the colormap.
+        """
+        keys = list(keys)
+        n = len(keys)
+        cmap = plt.get_cmap("viridis")
+        if n == 1:
+            return {keys[0]: to_hex(cmap(0.35))}
+        return {k: to_hex(cmap(i * high_end / (n - 1))) for i, k in enumerate(keys)}
+
+    def arch_factor_legend(
+        ax,
+        shown_archs,
+        factor_title=None,
+        factor_keys=(),
+        factor_color=None,
+        key_fmt=str,
+        arch_colored=False,
+    ):
+        """Single-box legend. Section 1: line style + shade -> architecture. When
+        ``arch_colored`` is set, the architecture swatches also use each arch's base
+        color (for Groups 1 & 2, where color encodes architecture); otherwise they are
+        drawn in grey so only style/shade read. Section 2 (optional): color -> factor."""
+
+        def _header():
+            return Line2D([0], [0], linestyle="none", marker="", label="")
+
+        arch_order = [a for a in ["dense", "moe32", "moe64"] if a in shown_archs]
+        arch_handles = [
+            Line2D(
+                [0],
+                [0],
+                color=(
+                    ARCH_COLOR[a]
+                    if arch_colored
+                    else shade_color("#000000", arch_shade(a) + 0.2)
+                ),
+                linewidth=1.5,
+                linestyle=arch_dash(a),
+            )
+            for a in arch_order
+        ]
+        handles = [_header()] + arch_handles
+        labels = ["Model type"] + arch_order
+        factor_keys = list(factor_keys)
+        if factor_keys and factor_color is not None:
+            factor_handles = [
+                Line2D([0], [0], color=factor_color[k], linewidth=2, linestyle="-")
+                for k in factor_keys
+            ]
+            handles += [_header()] + factor_handles
+            labels += [factor_title] + [key_fmt(k) for k in factor_keys]
+        legend = ax.legend(
+            handles,
+            labels,
+            fontsize=7,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0.0,
+            handlelength=2.2,
+        )
+        for text in legend.get_texts():
+            if text.get_text() in ("Model type", factor_title):
+                text.set_fontweight("bold")
+
+    return (
+        ARCH_COLOR,
+        arch_color,
+        arch_dash,
+        arch_factor_legend,
+        factor_palette,
+    )
+
+
+@app.cell(hide_code=True)
+def _(json, os):
+    # ------------------------------------------------------------------
+    # Per-step training history (for the training-curve column, and for the
+    # smoothed train loss in the column-1 plots).
+    #
+    # ml/wandb_download/download.py --include-history writes one JSONL per run to
+    # ml/runs_data/history/<run_id>.jsonl, each line a logged step with a "_step"
+    # field plus whatever metrics were logged that step (train/CE loss is dense;
+    # eval metrics are sparse).
+    #
+    # IMPORTANT: history files are named by *run_id*, but everywhere else the
+    # notebook identifies a run by the CSV ``Name`` column, which is the *corrected*
+    # run ``name``. For the early (pre-2026-04-10) runs the run_id carries a wrong
+    # rep label while the name is corrected, so name != run_id. We therefore
+    # translate name -> run_id (via runs.jsonl) before opening a history file, or
+    # the smoothed train loss / training curves would be cross-wired (e.g. the
+    # rep-16 run would load the rep-128 run's history).
+    # ------------------------------------------------------------------
+    def _runs_data_dir():
+        _this_dir = (
+            os.path.dirname(os.path.abspath(__file__))
+            if "__file__" in dir()
+            else os.getcwd()
+        )
+        _candidates = [
+            os.path.join(_this_dir, "..", "runs_data"),
+            os.path.join(_this_dir, "ml", "runs_data"),
+        ]
+        for d in _candidates:
+            if os.path.isdir(os.path.normpath(d)):
+                return os.path.normpath(d)
+        return os.path.normpath(_candidates[0])
+
+    RUNS_DATA_DIR = _runs_data_dir()
+    HISTORY_DIR = os.path.join(RUNS_DATA_DIR, "history")
+
+    def _load_name_to_run_id():
+        """Map corrected run ``name`` -> ``run_id`` from runs.jsonl. History files
+        are named by run_id, but the CSV/plots key on name."""
+        path = os.path.join(RUNS_DATA_DIR, "runs.jsonl")
+        mapping: dict = {}
+        if not os.path.isfile(path):
+            return mapping
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                name = d.get("name")
+                rid = d.get("run_id")
+                if name is not None and rid is not None:
+                    mapping[name] = rid
+        return mapping
+
+    NAME_TO_RUN_ID = _load_name_to_run_id()
+
+    _history_cache: dict = {}
+
+    def load_history_series(run_name: str, metric: str):
+        """Return sorted [(step, value), ...] for `metric` in a run's history.
+
+        `run_name` is the CSV ``Name`` (the corrected run name). We resolve it to the
+        run_id (history files are named by run_id) before reading. Keeping only rows
+        where both ``_step`` and the metric are present. Cached per (run, metric).
+        Returns [] if the history file is missing.
+        """
+        cache_key = (run_name, metric)
+        if cache_key in _history_cache:
+            return _history_cache[cache_key]
+        # History files are keyed by run_id; translate name -> run_id (falling back
+        # to the name itself for runs where they coincide / aren't in runs.jsonl).
+        run_id = NAME_TO_RUN_ID.get(run_name, run_name)
+        path = os.path.join(HISTORY_DIR, f"{run_id}.jsonl")
+        series = []
+        if os.path.isfile(path):
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    step = row.get("_step")
+                    val = row.get(metric)
+                    if step is None or val is None:
+                        continue
+                    try:
+                        series.append((float(step), float(val)))
+                    except (TypeError, ValueError):
+                        continue
+            series.sort()
+        _history_cache[cache_key] = series
+        return series
+
+    # Metric that gets smoothed for the column-1 (final-value) plots, and how the
+    # smoothed axis is labeled.
+    SMOOTHED_METRIC = "train/CE loss"
+    SMOOTH_WINDOW = 100
+    SMOOTHED_LABEL = f"{SMOOTHED_METRIC} (last-{SMOOTH_WINDOW}-step avg)"
+
+    def smoothed_train_loss(run_name: str, window: int = SMOOTH_WINDOW):
+        """Mean of ``train/CE loss`` over the last `window` logged steps of a run.
+
+        train/CE loss is logged every step, so the last `window` logged points are
+        the last `window` steps. Returns None if the run has no usable history.
+        """
+        series = load_history_series(run_name, SMOOTHED_METRIC)
+        if not series:
+            return None
+        tail = series[-window:]
+        if not tail:
+            return None
+        return sum(v for _, v in tail) / len(tail)
+
+    def metric_value(row, metric):
+        """Value to plot for `metric` in the column-1 (final-value) figures.
+
+        For ``train/CE loss`` this is the mean over the last SMOOTH_WINDOW steps from
+        the run's history; every other metric uses its raw final value from the CSV.
+        Falls back to the raw CSV value if a run has no history.
+        """
+        if metric == SMOOTHED_METRIC:
+            sm = smoothed_train_loss(str(row.get("Name", "")))
+            if sm is not None:
+                return sm
+        return row.get(metric)
+
+    def axis_label(metric):
+        """Y-axis / legend label for a metric (annotates the smoothed train loss)."""
+        return SMOOTHED_LABEL if metric == SMOOTHED_METRIC else metric
+
+    return axis_label, load_history_series, metric_value
 
 
 @app.cell(hide_code=True)
@@ -352,6 +771,22 @@ def _(mo, raw_df, save_pdf):
             # full_width=True,
         )
 
+    _ARCH_OPTIONS = ["dense", "moe32", "moe64"]
+
+    def arch_multiselect(label, chosen_values=None, options=None):
+        """A per-plot multi-select over the architectures (dense/moe32/moe64).
+
+        Its ``.value`` is a list suitable to pass as ``include_archs``. Defaults to
+        all architectures selected. Pass ``options`` to restrict the choices (e.g.
+        MoE-only plots offer just ``["moe32", "moe64"]``).
+        """
+        opts = list(options) if options is not None else list(_ARCH_OPTIONS)
+        return mo.ui.multiselect(
+            options=opts,
+            value=chosen_values if chosen_values is not None else list(opts),
+            label=label,
+        )
+
     def render_side_by_side(metrics, build_fig, plot_key):
         """Render one figure per selected metric, laid out side by side.
 
@@ -367,10 +802,28 @@ def _(mo, raw_df, save_pdf):
             figs.append(fig)
         return mo.hstack(figs, widths="equal", gap=1, wrap=True)
 
-    return metric_multiselect, render_side_by_side
+    def render_faceted(metrics, build_fig, plot_key):
+        """Render a single faceted figure covering all selected metrics at once.
+
+        `build_fig(metrics)` should return one matplotlib figure whose facets already
+        span the metric list (e.g. metrics as rows, architectures as columns). The
+        figure is saved to ml/figures/ as `<plot_key>__facets.pdf`.
+        """
+        if not metrics:
+            return mo.md("*Select at least one metric.*")
+        fig = build_fig(metrics)
+        save_pdf(fig, plot_key, "facets")
+        return fig
+
+    return (
+        arch_multiselect,
+        metric_multiselect,
+        render_faceted,
+        render_side_by_side,
+    )
 
 
-@app.cell(hide_code=True)
+@app.cell(column=1, hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Group 1 & 2 — Final loss vs. repetition (baseline runs)
@@ -385,12 +838,17 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    ARCH_COLOR,
+    arch_dash,
+    arch_factor_legend,
+    axis_label,
     filter_rep_points,
     get_model_type,
     get_reps,
     get_scale,
     has_tag,
     keep_arch,
+    metric_value,
     pd,
     plt,
     pow2_ticks,
@@ -414,7 +872,7 @@ def _(
             if not has_tag(row, data_tag):
                 continue
             reps = get_reps(row)
-            loss = row.get(metric)
+            loss = metric_value(row, metric)
             if pd.isna(reps) or pd.isna(loss):
                 continue
             rows.append((reps, float(loss), str(row.get("Name", ""))))
@@ -457,8 +915,9 @@ def _(
     ):
         """One figure: Dense + MoE32 + MoE64 baseline, metric vs reps (log X).
 
-        Model type is distinguished by both line style (dense solid, moe32 dotted,
-        moe64 dashed) and a distinct color.
+        Architecture is the only variable here, so it drives color (dense = purple,
+        moe32 = greenish-blue, moe64 = yellow, i.e. the viridis palette used by the
+        factor plots) as well as line style (solid/dashed/dotted).
 
         Filters (all default to no-op):
 
@@ -467,10 +926,9 @@ def _(
         - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
         fig, ax = plt.subplots(figsize=(5.0, 4.5))
-        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
-        dash_map = {"dense": "-", "moe32": ":", "moe64": "--"}
         any_data = False
         max_reps = 0
+        shown_archs = []
         for model_type in ["dense", "moe32", "moe64"]:
             if not keep_arch(model_type, include_archs, exclude_archs):
                 continue
@@ -479,6 +937,7 @@ def _(
             if not points:
                 continue
             any_data = True
+            shown_archs.append(model_type)
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             max_reps = max(max_reps, max(xs))
@@ -487,22 +946,19 @@ def _(
                 ys,
                 marker="o",
                 markersize=4,
-                linewidth=1.2,
-                linestyle=dash_map[model_type],
-                color=color_map[model_type],
-                label=model_type,
+                linewidth=1.5,
+                linestyle=arch_dash(model_type),
+                color=ARCH_COLOR[model_type],
             )
         title = f"{data_tag} — {scale}\n{metric} vs. repetition (baseline)"
         if not any_data:
             title += "  [no finished baseline runs]"
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
-        ax.set_ylabel(metric)
+        ax.set_ylabel(axis_label(metric))
         ax.set_title(title, fontsize=10)
         if any_data:
-            # plt.rcParams['legend.numpoints'] = 1
-            # ax.legend(fontsize=8)
-            ax.legend(fontsize=8, markerscale=0.5)
+            arch_factor_legend(ax, shown_archs, arch_colored=True)
         fig.tight_layout()
         return fig
 
@@ -510,17 +966,26 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_olmo_80m = metric_multiselect("olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_olmo_80m
-    return (sel_olmo_80m,)
+    sel_olmo_80m_arch = arch_multiselect("olmo_mix 80M — architectures")
+    mo.vstack([sel_olmo_80m, sel_olmo_80m_arch])
+    return sel_olmo_80m, sel_olmo_80m_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_olmo_80m):
+def _(
+    finished_df,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_olmo_80m,
+    sel_olmo_80m_arch,
+):
     _out = render_side_by_side(
         sel_olmo_80m.value,
-        lambda m: make_repetition_figure(finished_df, "olmo_mix", "80M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "olmo_mix", "80M", m, include_archs=sel_olmo_80m_arch.value
+        ),
         "olmo_mix_80M",
     )
     _out
@@ -528,17 +993,26 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_olmo_80m):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_olmo_200m = metric_multiselect("olmo_mix 200M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_olmo_200m
-    return (sel_olmo_200m,)
+    sel_olmo_200m_arch = arch_multiselect("olmo_mix 200M — architectures")
+    mo.vstack([sel_olmo_200m, sel_olmo_200m_arch])
+    return sel_olmo_200m, sel_olmo_200m_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_olmo_200m):
+def _(
+    finished_df,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_olmo_200m,
+    sel_olmo_200m_arch,
+):
     _out = render_side_by_side(
         sel_olmo_200m.value,
-        lambda m: make_repetition_figure(finished_df, "olmo_mix", "200M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "olmo_mix", "200M", m, include_archs=sel_olmo_200m_arch.value
+        ),
         "olmo_mix_200M",
     )
     _out
@@ -554,17 +1028,26 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_dclm_80m = metric_multiselect("dclm 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_dclm_80m
-    return (sel_dclm_80m,)
+    sel_dclm_80m_arch = arch_multiselect("dclm 80M — architectures")
+    mo.vstack([sel_dclm_80m, sel_dclm_80m_arch])
+    return sel_dclm_80m, sel_dclm_80m_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_dclm_80m):
+def _(
+    finished_df,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_dclm_80m,
+    sel_dclm_80m_arch,
+):
     _out = render_side_by_side(
         sel_dclm_80m.value,
-        lambda m: make_repetition_figure(finished_df, "dclm", "80M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "dclm", "80M", m, include_archs=sel_dclm_80m_arch.value
+        ),
         "dclm_80M",
     )
     _out
@@ -572,10 +1055,11 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_dclm_80m):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_starcoder_80m = metric_multiselect("starcoder 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
-    sel_starcoder_80m
-    return (sel_starcoder_80m,)
+    sel_starcoder_80m_arch = arch_multiselect("starcoder 80M — architectures")
+    mo.vstack([sel_starcoder_80m, sel_starcoder_80m_arch])
+    return sel_starcoder_80m, sel_starcoder_80m_arch
 
 
 @app.cell(hide_code=True)
@@ -584,10 +1068,13 @@ def _(
     make_repetition_figure,
     render_side_by_side,
     sel_starcoder_80m,
+    sel_starcoder_80m_arch,
 ):
     _out = render_side_by_side(
         sel_starcoder_80m.value,
-        lambda m: make_repetition_figure(finished_df, "starcoder", "80M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "starcoder", "80M", m, include_archs=sel_starcoder_80m_arch.value
+        ),
         "starcoder_80M",
     )
     _out
@@ -595,17 +1082,26 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_pes2o_80m = metric_multiselect("pes2o 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
-    sel_pes2o_80m
-    return (sel_pes2o_80m,)
+    sel_pes2o_80m_arch = arch_multiselect("pes2o 80M — architectures")
+    mo.vstack([sel_pes2o_80m, sel_pes2o_80m_arch])
+    return sel_pes2o_80m, sel_pes2o_80m_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_pes2o_80m):
+def _(
+    finished_df,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_pes2o_80m,
+    sel_pes2o_80m_arch,
+):
     _out = render_side_by_side(
         sel_pes2o_80m.value,
-        lambda m: make_repetition_figure(finished_df, "pes2o", "80M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "pes2o", "80M", m, include_archs=sel_pes2o_80m_arch.value
+        ),
         "pes2o_80M",
     )
     _out
@@ -613,17 +1109,26 @@ def _(finished_df, make_repetition_figure, render_side_by_side, sel_pes2o_80m):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
-    sel_wiki_80m = metric_multiselect("wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss"])
-    sel_wiki_80m
-    return (sel_wiki_80m,)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_wiki_80m = metric_multiselect("wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss", "eval/lm/wikitext-validation/CE loss"])
+    sel_wiki_80m_arch = arch_multiselect("wiki 80M — architectures")
+    mo.vstack([sel_wiki_80m, sel_wiki_80m_arch])
+    return sel_wiki_80m, sel_wiki_80m_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_repetition_figure, render_side_by_side, sel_wiki_80m):
+def _(
+    finished_df,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_wiki_80m,
+    sel_wiki_80m_arch,
+):
     _out = render_side_by_side(
         sel_wiki_80m.value,
-        lambda m: make_repetition_figure(finished_df, "wiki", "80M", m),
+        lambda m: make_repetition_figure(
+            finished_df, "wiki", "80M", m, include_archs=sel_wiki_80m_arch.value
+        ),
         "wiki_80M",
     )
     _out
@@ -648,15 +1153,20 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     apply_pow2_xaxis,
+    arch_color,
+    arch_dash,
+    arch_factor_legend,
+    axis_label,
+    factor_palette,
     filter_rep_points,
     get_model_type,
     get_reps,
     get_scale,
     has_tag,
     keep_arch,
+    metric_value,
     pd,
     plt,
-    shade_color,
 ):
     def _factor_value(row, col):
         """Read a regularizer column as a float; blank/NaN means 'baseline'."""
@@ -681,7 +1191,7 @@ def _(
         nan_label=None,
         value_getter=None,
     ):
-        """color -> model type; line style -> baseline vs each factor value.
+        """color -> factor value; line style + shade -> architecture.
 
         `baseline_value` is the value that represents 'no regularization' for this
         column (e.g. dropout baseline = None/blank, weight-decay baseline = 0.1).
@@ -718,7 +1228,7 @@ def _(
             if not keep_arch(model_type, include_archs, exclude_archs):
                 continue
             reps = get_reps(row)
-            loss = row.get(metric)
+            loss = metric_value(row, metric)
             if pd.isna(reps) or pd.isna(loss):
                 continue
 
@@ -744,34 +1254,28 @@ def _(
             prev = series[key].get(reps)
             series[key][reps] = min(loss, prev) if prev is not None else float(loss)
 
-        # Color encodes the model type; line style encodes the factor value.
-        # Within a model-type color, the factor value also sets the shade: the first
-        # bucket is the DARKEST + solid line, later buckets are lighter with other
-        # dashes. `extra_buckets` (e.g. max_grad_norm "no clip") come first so they
-        # get the solid line.
-        ordered_buckets = extra_buckets + ["baseline"] + sorted(factor_values)
-        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
-        dash_cycle = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
-        factor_dash = {
-            b: dash_cycle[i % len(dash_cycle)] for i, b in enumerate(ordered_buckets)
-        }
-        # Shade level per bucket: baseline is the DARKEST (blended toward black),
-        # higher factor values get progressively lighter up to LIGHTEST. Spread
-        # evenly; with a single bucket everything sits at DARKEST.
-        _DARKEST = -0.45
-        _LIGHTEST = 0.4
-        _n = len(ordered_buckets)
-        bucket_shade = {
-            b: (_DARKEST + (_LIGHTEST - _DARKEST) * i / (_n - 1) if _n > 1 else _DARKEST)
-            for i, b in enumerate(ordered_buckets)
-        }
+        # Color encodes the factor value; architecture sets the line style + shade.
+        # Buckets are ordered by their numeric value: extra buckets (e.g. max_grad_norm
+        # "no clip") sort first (treated as 0), then the baseline and swept values are
+        # interleaved by magnitude. This puts e.g. max_grad_norm at "0 (no clip)", 0.2,
+        # 1.0 rather than grouping the baseline right after the extra bucket.
+        baseline_display = baseline_value if baseline_value is not None else 0.0
+
+        def _bucket_sort_key(b):
+            if b == "baseline":
+                return baseline_display
+            if isinstance(b, str):  # extra bucket (e.g. "no clip") -> first
+                return float("-inf")
+            return b
+
+        ordered_buckets = sorted(
+            extra_buckets + ["baseline"] + list(factor_values), key=_bucket_sort_key
+        )
+        bucket_color = factor_palette(ordered_buckets)
 
         fig, ax = plt.subplots(figsize=(6.5, 4.5))
         any_data = False
         max_reps = 0
-        # The factor value the baseline actually takes (dropout/jitter/eom/fom -> 0.0,
-        # weight_decay -> 0.1, max_grad_norm -> 1.0). Shown as its numeric value.
-        baseline_display = baseline_value if baseline_value is not None else 0.0
 
         def _bucket_label(fval_key):
             if fval_key == "baseline":
@@ -781,7 +1285,7 @@ def _(
                 return fval_key
             return f"{fval_key:g}"
 
-        shown_models = []  # model types actually plotted, in canonical order
+        shown_archs = []  # architectures actually plotted, in canonical order
         shown_buckets = []  # factor buckets actually plotted, in ordered_buckets order
         for (model_type, fval_key), pts in sorted(
             series.items(), key=lambda kv: (str(kv[0][1]), kv[0][0])
@@ -793,8 +1297,8 @@ def _(
             xs = [p[0] for p in points]
             ys = [p[1] for p in points]
             max_reps = max(max_reps, max(xs))
-            if model_type not in shown_models:
-                shown_models.append(model_type)
+            if model_type not in shown_archs:
+                shown_archs.append(model_type)
             if fval_key not in shown_buckets:
                 shown_buckets.append(fval_key)
             ax.plot(
@@ -802,68 +1306,24 @@ def _(
                 ys,
                 marker="o",
                 markersize=3,
-                linewidth=1.2,
-                linestyle=factor_dash[fval_key],
-                color=shade_color(color_map[model_type], bucket_shade[fval_key]),
+                linewidth=1.8,
+                linestyle=arch_dash(model_type),
+                color=arch_color(bucket_color[fval_key], model_type),
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
-        ax.set_ylabel(metric)
+        ax.set_ylabel(axis_label(metric))
         ax.set_title(f"{factor_label} — {metric} (olmo_mix, 80M)", fontsize=10)
         if any_data:
-            from matplotlib.lines import Line2D
-
-            def _header():
-                # Invisible handle used to render a section-title row in the legend.
-                return Line2D([0], [0], linestyle="none", marker="", label="")
-
-            # Section 1: color -> model type (solid lines in each model's color).
-            model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
-            model_handles = [
-                Line2D([0], [0], color=color_map[m], linewidth=2, linestyle="-")
-                for m in model_order
-            ]
-            # Section 2: line style -> factor value. Shade the key from black (first
-            # bucket, solid) to light grey (last bucket), mirroring the data lines.
             bucket_order = [b for b in ordered_buckets if b in shown_buckets]
-            _nb = len(bucket_order)
-            _grey_top = 0.7  # lightest grey level for the last bucket
-            bucket_handles = [
-                Line2D(
-                    [0],
-                    [0],
-                    color=shade_color("#000000", _grey_top * i / (_nb - 1) if _nb > 1 else 0.0),
-                    linewidth=1.5,
-                    linestyle=factor_dash[b],
-                )
-                for i, b in enumerate(bucket_order)
-            ]
-            # Combine both sections into one legend box with bold section headers.
-            handles = (
-                [_header()]
-                + model_handles
-                + [_header()]
-                + bucket_handles
+            arch_factor_legend(
+                ax,
+                shown_archs,
+                factor_label,
+                bucket_order,
+                bucket_color,
+                _bucket_label,
             )
-            labels = (
-                ["Model type"]
-                + model_order
-                + [factor_label]
-                + [_bucket_label(b) for b in bucket_order]
-            )
-            legend = ax.legend(
-                handles,
-                labels,
-                fontsize=7,
-                loc="upper left",
-                bbox_to_anchor=(1.02, 1.0),
-                borderaxespad=0.0,
-                handlelength=2.2,
-            )
-            # Bold + left-align the section-header rows.
-            for text in legend.get_texts():
-                if text.get_text() in ("Model type", factor_label):
-                    text.set_fontweight("bold")
         fig.tight_layout()
         return fig
 
@@ -871,10 +1331,11 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_dropout = metric_multiselect("dropout — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_dropout
-    return (sel_dropout,)
+    sel_dropout_arch = arch_multiselect("dropout — architectures")
+    mo.vstack([sel_dropout, sel_dropout_arch])
+    return sel_dropout, sel_dropout_arch
 
 
 @app.cell(hide_code=True)
@@ -884,11 +1345,15 @@ def _(
     make_factor_figure,
     render_side_by_side,
     sel_dropout,
+    sel_dropout_arch,
 ):
     # Dropout: baseline = no dropout set (blank).
     _out = render_side_by_side(
         sel_dropout.value,
-        lambda m: make_factor_figure(finished_df, DROPOUT_COL, "dropout", None, m, exclude_reps=[128,256]),
+        lambda m: make_factor_figure(
+            finished_df, DROPOUT_COL, "dropout", None, m,
+            include_archs=sel_dropout_arch.value, exclude_reps=[128,256],
+        ),
         "dropout",
     )
     _out
@@ -896,10 +1361,11 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_weight_decay = metric_multiselect("weight decay — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_weight_decay
-    return (sel_weight_decay,)
+    sel_weight_decay_arch = arch_multiselect("weight decay — architectures")
+    mo.vstack([sel_weight_decay, sel_weight_decay_arch])
+    return sel_weight_decay, sel_weight_decay_arch
 
 
 @app.cell(hide_code=True)
@@ -909,11 +1375,15 @@ def _(
     make_factor_figure,
     render_side_by_side,
     sel_weight_decay,
+    sel_weight_decay_arch,
 ):
     # Weight decay: baseline = the default 0.1; swept values are 0.2 / 0.4.
     _out = render_side_by_side(
         sel_weight_decay.value,
-        lambda m: make_factor_figure(finished_df, WD_COL, "weight_decay", 0.1, m, exclude_reps=[128,256]),
+        lambda m: make_factor_figure(
+            finished_df, WD_COL, "weight_decay", 0.1, m,
+            include_archs=sel_weight_decay_arch.value, exclude_reps=[128,256],
+        ),
         "weight_decay",
     )
     _out
@@ -921,10 +1391,11 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_max_grad_norm = metric_multiselect("max grad norm — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_max_grad_norm
-    return (sel_max_grad_norm,)
+    sel_max_grad_norm_arch = arch_multiselect("max grad norm — architectures")
+    mo.vstack([sel_max_grad_norm, sel_max_grad_norm_arch])
+    return sel_max_grad_norm, sel_max_grad_norm_arch
 
 
 @app.cell(hide_code=True)
@@ -934,13 +1405,15 @@ def _(
     make_factor_figure,
     render_side_by_side,
     sel_max_grad_norm,
+    sel_max_grad_norm_arch,
 ):
     # Max grad norm: baseline = the default 1.0; swept value is 0.2; a `null` (no
-    # clipping) setting is bucketed separately via nan_label.
+    # clipping) setting is bucketed separately via nan_label and sorts first as 0.
     _out = render_side_by_side(
         sel_max_grad_norm.value,
         lambda m: make_factor_figure(
-            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="no clip", exclude_reps=[128,256]
+            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="0 (no clip)",
+            include_archs=sel_max_grad_norm_arch.value, exclude_reps=[128,256],
         ),
         "max_grad_norm",
     )
@@ -964,10 +1437,13 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_jitter = metric_multiselect("MoE jitter_eps — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_moe_jitter
-    return (sel_moe_jitter,)
+    sel_moe_jitter_arch = arch_multiselect(
+        "MoE jitter_eps — architectures", options=["dense", "moe32", "moe64"]
+    )
+    mo.vstack([sel_moe_jitter, sel_moe_jitter_arch])
+    return sel_moe_jitter, sel_moe_jitter_arch
 
 
 @app.cell(hide_code=True)
@@ -977,6 +1453,7 @@ def _(
     render_side_by_side,
     router_field,
     sel_moe_jitter,
+    sel_moe_jitter_arch,
 ):
     # Router jitter: baseline = not set (blank); MoE only.
     _out = render_side_by_side(
@@ -987,8 +1464,9 @@ def _(
             "jitter_eps",
             None,
             m,
-            exclude_archs=["dense"],
+            include_archs=sel_moe_jitter_arch.value,
             value_getter=lambda row: router_field(row, "jitter_eps"),
+            exclude_reps=[128,256],
         ),
         "moe_jitter_eps",
     )
@@ -997,10 +1475,13 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_eom = metric_multiselect("MoE eom_prob — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_moe_eom
-    return (sel_moe_eom,)
+    sel_moe_eom_arch = arch_multiselect(
+        "MoE eom_prob — architectures", options=["dense","moe32", "moe64"]
+    )
+    mo.vstack([sel_moe_eom, sel_moe_eom_arch])
+    return sel_moe_eom, sel_moe_eom_arch
 
 
 @app.cell(hide_code=True)
@@ -1010,6 +1491,7 @@ def _(
     render_side_by_side,
     router_field,
     sel_moe_eom,
+    sel_moe_eom_arch,
 ):
     # Expert Output Masking: baseline = not set (blank); MoE only.
     _out = render_side_by_side(
@@ -1020,8 +1502,9 @@ def _(
             "eom_prob",
             None,
             m,
-            exclude_archs=["dense"],
+            include_archs=sel_moe_eom_arch.value,
             value_getter=lambda row: router_field(row, "eom_prob"),
+            exclude_reps=[128,256],
         ),
         "moe_eom_prob",
     )
@@ -1030,10 +1513,13 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_fom = metric_multiselect("MoE fom_prob — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_moe_fom
-    return (sel_moe_fom,)
+    sel_moe_fom_arch = arch_multiselect(
+        "MoE fom_prob — architectures", options=["dense", "moe32", "moe64"]
+    )
+    mo.vstack([sel_moe_fom, sel_moe_fom_arch])
+    return sel_moe_fom, sel_moe_fom_arch
 
 
 @app.cell(hide_code=True)
@@ -1043,12 +1529,13 @@ def _(
     make_factor_figure,
     render_side_by_side,
     sel_moe_fom,
+    sel_moe_fom_arch,
 ):
     # Final Output Masking: baseline = not set (blank); MoE only.
     _out = render_side_by_side(
         sel_moe_fom.value,
         lambda m: make_factor_figure(
-            finished_df, FOM_COL, "fom_prob", None, m, exclude_archs=["dense"]
+            finished_df, FOM_COL, "fom_prob", None, m, include_archs=sel_moe_fom_arch.value, exclude_reps=[128,256],
         ),
         "moe_fom_prob",
     )
@@ -1059,79 +1546,205 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Group 4 — `famA` runs: metric vs. %dclm
+    ## Group 4 — `famA` runs
 
-    Every finished run whose name contains `famA`. The X axis is the DCLM
-    percentage parsed from `dclm{N}` in the run name (0, 25, 50, 75, 100);
-    Y is the chosen metric. Lines are colored by model type.
+    Every finished run whose name contains `famA`. Color = model type (parsed from
+    the run-name suffix, since the newer `famAr` rep-sweep runs are only tagged
+    `MoE`). Two plots:
+
+    1. **metric vs. %dclm** (0/25/50/75/100 from `dclm{N}` in the name) — line style
+       + shade encode the repetition count.
+    2. **metric vs. repetition count** (log X; `rep{N}x` in the name, original famA
+       runs are rep 1) — line style + shade encode %dclm.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(get_model_type, keep_arch, pd, plt, re):
+def _(
+    apply_pow2_xaxis,
+    arch_color,
+    arch_dash,
+    arch_factor_legend,
+    axis_label,
+    factor_palette,
+    get_reps,
+    keep_arch,
+    metric_value,
+    pd,
+    plt,
+    re,
+):
     def parse_dclm_pct(name: str):
         """Extract the DCLM percentage from a 'dclm{N}' token in the run name."""
         m = re.search(r"dclm(\d+)", str(name))
         return int(m.group(1)) if m else None
 
-    def make_famA_figure(df, metric, include_archs=None, exclude_archs=None):
-        """famA: metric vs. %dclm, one line per architecture.
+    def famA_model_type(name: str):
+        """Model type from the run-name suffix (famAr runs aren't tagged MoE32/64)."""
+        m = re.search(r"_(dense|moe32|moe64)$", str(name))
+        return m.group(1) if m else None
 
-        ``include_archs`` / ``exclude_archs`` keep/drop architectures. (There is no
-        repetition axis here, so rep filters do not apply.)
-        """
-        colors = {"dense": "#1f77b4", "moe64": "#d62728", "moe32": "#2ca02c"}
-        # Collect points per model type.
-        per_type: dict = {}
+    def make_famA_figure(df, metric, include_archs=None, exclude_archs=None):
+        """famA: metric vs. %dclm. Color = rep count; line style + shade = architecture."""
+        # Collect: {(model_type, reps): [(pct, value), ...]}
+        series: dict = {}
+        rep_set = set()
         for _, row in df.iterrows():
             name = str(row.get("Name", ""))
             if "famA" not in name:
                 continue
             pct = parse_dclm_pct(name)
-            loss = row.get(metric)
+            loss = metric_value(row, metric)
             if pct is None or pd.isna(loss):
                 continue
-            mt = get_model_type(row)
-            if not keep_arch(mt, include_archs, exclude_archs):
+            mt = famA_model_type(name)
+            if mt is None or not keep_arch(mt, include_archs, exclude_archs):
                 continue
-            per_type.setdefault(mt, []).append((pct, float(loss)))
+            reps = get_reps(row)
+            series.setdefault((mt, reps), []).append((pct, float(loss)))
+            rep_set.add(reps)
 
+        rep_order = sorted(rep_set)
+        rep_color = factor_palette(rep_order)
         fig, ax = plt.subplots(figsize=(5.5, 4.5))
-        for mt in sorted(per_type):
-            pts = sorted(per_type[mt])
+        shown_archs = []
+        for (mt, reps), pts in sorted(series.items()):
+            pts = sorted(pts)
+            if mt not in shown_archs:
+                shown_archs.append(mt)
             ax.plot(
                 [p[0] for p in pts],
                 [p[1] for p in pts],
                 marker="o",
-                markersize=7,
-                linewidth=2,
-                color=colors.get(mt, "#7f7f7f"),
-                label=mt,
+                markersize=5,
+                linewidth=1.5,
+                linestyle=arch_dash(mt),
+                color=arch_color(rep_color[reps], mt),
             )
         ax.set_xticks([0, 25, 50, 75, 100])
         ax.set_xlabel("% dclm")
-        ax.set_ylabel(metric)
+        ax.set_ylabel(axis_label(metric))
         ax.set_title(f"famA runs: {metric} vs. %dclm", fontsize=10)
-        if per_type:
-            ax.legend(fontsize=8)
+        if series:
+            arch_factor_legend(
+                ax, shown_archs, "Repetitions", rep_order, rep_color, lambda r: f"{r:g}x"
+            )
         fig.tight_layout()
         return fig
 
-    return (make_famA_figure,)
+    def make_famA_rep_figure(df, metric, include_archs=None, exclude_archs=None):
+        """famA: metric vs. repetition count (log X). Color = %dclm; line style +
+        shade = architecture."""
+        # Collect: {(model_type, pct): [(reps, value), ...]}
+        series: dict = {}
+        pct_set = set()
+        for _, row in df.iterrows():
+            name = str(row.get("Name", ""))
+            if "famA" not in name:
+                continue
+            pct = parse_dclm_pct(name)
+            loss = metric_value(row, metric)
+            if pct is None or pd.isna(loss):
+                continue
+            mt = famA_model_type(name)
+            if mt is None or not keep_arch(mt, include_archs, exclude_archs):
+                continue
+            reps = get_reps(row)
+            series.setdefault((mt, pct), []).append((reps, float(loss)))
+            pct_set.add(pct)
+
+        pct_order = sorted(pct_set)
+        pct_color = factor_palette(pct_order)
+        fig, ax = plt.subplots(figsize=(5.5, 4.5))
+        shown_archs = []
+        max_reps = 0
+        any_data = False
+        for (mt, pct), pts in sorted(series.items()):
+            # Collapse duplicate rep counts (keep min).
+            by_reps: dict = {}
+            for reps, val in pts:
+                by_reps[reps] = min(val, by_reps.get(reps, val))
+            xy = sorted(by_reps.items())
+            if not xy:
+                continue
+            any_data = True
+            if mt not in shown_archs:
+                shown_archs.append(mt)
+            max_reps = max(max_reps, max(r for r, _ in xy))
+            ax.plot(
+                [r for r, _ in xy],
+                [v for _, v in xy],
+                marker="o",
+                markersize=5,
+                linewidth=1.5,
+                linestyle=arch_dash(mt),
+                color=arch_color(pct_color[pct], mt),
+            )
+        apply_pow2_xaxis(ax, max_reps, any_data)
+        ax.set_xlabel("repetition count")
+        ax.set_ylabel(axis_label(metric))
+        ax.set_title(f"famA runs: {metric} vs. repetition", fontsize=10)
+        if any_data:
+            arch_factor_legend(
+                ax, shown_archs, "% dclm", pct_order, pct_color, lambda p: f"{p:g}%"
+            )
+        fig.tight_layout()
+        return fig
+
+    return make_famA_figure, make_famA_rep_figure
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
-    sel_famA = metric_multiselect("famA — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_famA
-    return (sel_famA,)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_famA = metric_multiselect("famA — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/downstream/hellaswag (CE loss)"])
+    sel_famA_arch = arch_multiselect("famA — architectures")
+    mo.vstack([sel_famA, sel_famA_arch])
+    return sel_famA, sel_famA_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_famA_figure, render_side_by_side, sel_famA):
+def _(
+    finished_df,
+    make_famA_figure,
+    render_side_by_side,
+    sel_famA,
+    sel_famA_arch,
+):
     _out = render_side_by_side(
-        sel_famA.value, lambda m: make_famA_figure(finished_df, m), "famA"
+        sel_famA.value,
+        lambda m: make_famA_figure(finished_df, m, include_archs=sel_famA_arch.value),
+        "famA",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_famA_rep = metric_multiselect(
+        "famA (vs reps) — metrics",
+        chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/downstream/hellaswag (CE loss)"],
+    )
+    sel_famA_rep_arch = arch_multiselect("famA (vs reps) — architectures")
+    mo.vstack([sel_famA_rep, sel_famA_rep_arch])
+    return sel_famA_rep, sel_famA_rep_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_famA_rep_figure,
+    render_side_by_side,
+    sel_famA_rep,
+    sel_famA_rep_arch,
+):
+    _out = render_side_by_side(
+        sel_famA_rep.value,
+        lambda m: make_famA_rep_figure(
+            finished_df, m, include_archs=sel_famA_rep_arch.value
+        ),
+        "famA_rep",
     )
     _out
     return
@@ -1143,17 +1756,18 @@ def _(mo):
     ## Group 5 — `famB` runs: metric vs. repetition
 
     `famB` runs mix a single source into `olmo_mix` at a fixed fraction, encoded in
-    the run name (`sc50`/`sc90` = 50%/90% starcoder, `p2o50`/`p2o90` = 50%/90% pes2o).
+    the run name (`sc50`/`sc90` = 50%/90% starcoder, `p2o50` = 50% pes2o).
 
     Each figure plots the chosen metric vs. repetition count (log X, power-of-2 ticks)
     with:
 
-    - **line color** = model type (blue = dense, green = moe32, red = moe64), and
-    - **line style** = data source (`olmo_mix` baseline, single-source baseline, and
-      the two famB mixes).
+    - **line color** = data source, and
+    - **line style + shade** = architecture (dense solid/darkest, moe32 dashed,
+      moe64 dotted/lightest).
 
-    The `olmo_mix` and single-source lines are **baseline** runs (tag `baseline`);
-    duplicate baseline runs at a rep count keep the lowest value (see Group 1 & 2).
+    The reference lines are the `dclm` and single-source **baseline** runs (tag
+    `baseline`); duplicate baseline runs at a rep count keep the lowest value (see
+    Group 1 & 2).
     """)
     return
 
@@ -1161,11 +1775,17 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     apply_pow2_xaxis,
+    arch_color,
+    arch_dash,
+    arch_factor_legend,
+    axis_label,
     collect_baseline_points,
+    factor_palette,
     filter_rep_points,
     get_model_type,
     get_reps,
     keep_arch,
+    metric_value,
     pd,
     plt,
 ):
@@ -1179,7 +1799,7 @@ def _(
             if get_model_type(row) != model_type:
                 continue
             reps = get_reps(row)
-            loss = row.get(metric)
+            loss = metric_value(row, metric)
             if pd.isna(reps) or pd.isna(loss):
                 continue
             prev = by_reps.get(reps)
@@ -1201,22 +1821,19 @@ def _(
         `sources` is an ordered list of (label, color, kind, key) tuples where kind is
         either "baseline" (key = data tag, uses baseline runs at 80M) or "famB"
         (key = run-name substring). The per-source color is ignored: color now encodes
-        the model type and line style encodes the source.
+        the data source and line style + shade encode the architecture.
 
         Filters (all default to no-op):
 
         - ``include_archs`` / ``exclude_archs``: keep/drop architectures.
         - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
         """
-        color_map = {"dense": "#1f77b4", "moe32": "#2ca02c", "moe64": "#d62728"}
-        dash_cycle = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
-        source_dash = {
-            src[0]: dash_cycle[i % len(dash_cycle)] for i, src in enumerate(sources)
-        }
+        source_labels = [src[0] for src in sources]
+        source_color = factor_palette(source_labels)
         fig, ax = plt.subplots(figsize=(6.0, 5.0))
         max_reps = 0
         any_data = False
-        shown_models = []
+        shown_archs = []
         shown_sources = []
         for label, color, kind, key in sources:
             for model_type in ["dense", "moe32", "moe64"]:
@@ -1233,8 +1850,8 @@ def _(
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
                 max_reps = max(max_reps, max(xs))
-                if model_type not in shown_models:
-                    shown_models.append(model_type)
+                if model_type not in shown_archs:
+                    shown_archs.append(model_type)
                 if label not in shown_sources:
                     shown_sources.append(label)
                 ax.plot(
@@ -1242,52 +1859,19 @@ def _(
                     ys,
                     marker="o",
                     markersize=3,
-                    linewidth=1.2,
-                    linestyle=source_dash[label],
-                    color=color_map[model_type],
+                    linewidth=1.5,
+                    linestyle=arch_dash(model_type),
+                    color=arch_color(source_color[label], model_type),
                 )
         apply_pow2_xaxis(ax, max_reps, any_data)
         ax.set_xlabel("repetition count")
-        ax.set_ylabel(metric)
+        ax.set_ylabel(axis_label(metric))
         ax.set_title(title, fontsize=10)
         if any_data:
-            from matplotlib.lines import Line2D
-
-            def _header():
-                return Line2D([0], [0], linestyle="none", marker="", label="")
-
-            # Section 1: color -> model type.
-            model_order = [m for m in ["dense", "moe32", "moe64"] if m in shown_models]
-            model_handles = [
-                Line2D([0], [0], color=color_map[m], linewidth=2, linestyle="-")
-                for m in model_order
-            ]
-            # Section 2: line style -> data source (black/grey).
-            source_order = [s[0] for s in sources if s[0] in shown_sources]
-            source_handles = [
-                Line2D([0], [0], color="#333333", linewidth=1.5, linestyle=source_dash[s])
-                for s in source_order
-            ]
-            # Combine both sections into one legend box with bold section headers.
-            handles = [_header()] + model_handles + [_header()] + source_handles
-            labels = (
-                ["Model type"]
-                + model_order
-                + ["Data source"]
-                + source_order
+            source_order = [s for s in source_labels if s in shown_sources]
+            arch_factor_legend(
+                ax, shown_archs, "Data source", source_order, source_color, str
             )
-            legend = ax.legend(
-                handles,
-                labels,
-                fontsize=7,
-                loc="upper left",
-                bbox_to_anchor=(1.02, 1.0),
-                borderaxespad=0.0,
-                handlelength=2.2,
-            )
-            for text in legend.get_texts():
-                if text.get_text() in ("Model type", "Data source"):
-                    text.set_fontweight("bold")
         fig.tight_layout()
         return fig
 
@@ -1295,25 +1879,34 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_famB_sc = metric_multiselect("famB starcoder — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
-    sel_famB_sc
-    return (sel_famB_sc,)
+    sel_famB_sc_arch = arch_multiselect("famB starcoder — architectures")
+    mo.vstack([sel_famB_sc, sel_famB_sc_arch])
+    return sel_famB_sc, sel_famB_sc_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_sc):
-    # Plot 1: starcoder family. Color = model type; line style = source.
+def _(
+    finished_df,
+    make_famB_figure,
+    render_side_by_side,
+    sel_famB_sc,
+    sel_famB_sc_arch,
+):
+    # Plot 1: starcoder family. Color = source; line style + shade = architecture.
+    # Order (and thus palette assignment) is dclm, sc90, sc50, starcoder.
     _sources = [
-        ("olmo_mix", "#1f77b4", "baseline", "olmo_mix"),
-        ("starcoder", "#2ca02c", "baseline", "starcoder"),
-        ("sc50", "#ff7f0e", "famB", "sc50"),
+        ("dclm", "#1f77b4", "baseline", "dclm"),
         ("sc90", "#d62728", "famB", "sc90"),
+        ("sc50", "#ff7f0e", "famB", "sc50"),
+        ("starcoder", "#2ca02c", "baseline", "starcoder"),
     ]
     _out = render_side_by_side(
         sel_famB_sc.value,
         lambda m: make_famB_figure(
-            finished_df, m, f"famB (starcoder): {m} vs. repetition", _sources
+            finished_df, m, f"famB (starcoder): {m} vs. repetition", _sources,
+            include_archs=sel_famB_sc_arch.value, exclude_reps=[128,256],
         ),
         "famB_starcoder",
     )
@@ -1322,27 +1915,410 @@ def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_sc):
 
 
 @app.cell(hide_code=True)
-def _(metric_multiselect):
+def _(arch_multiselect, metric_multiselect, mo):
     sel_famB_p2o = metric_multiselect("famB pes2o — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
-    sel_famB_p2o
-    return (sel_famB_p2o,)
+    sel_famB_p2o_arch = arch_multiselect("famB pes2o — architectures")
+    mo.vstack([sel_famB_p2o, sel_famB_p2o_arch])
+    return sel_famB_p2o, sel_famB_p2o_arch
 
 
 @app.cell(hide_code=True)
-def _(finished_df, make_famB_figure, render_side_by_side, sel_famB_p2o):
-    # Plot 2: pes2o family. Color = model type; line style = source.
+def _(
+    finished_df,
+    make_famB_figure,
+    render_side_by_side,
+    sel_famB_p2o,
+    sel_famB_p2o_arch,
+):
+    # Plot 2: pes2o family. Color = source; line style + shade = architecture.
+    # Order (and thus palette assignment) is dclm, p2o50, pes2o.
     _sources = [
-        ("olmo_mix", "#1f77b4", "baseline", "olmo_mix"),
-        ("pes2o", "#2ca02c", "baseline", "pes2o"),
+        ("dclm", "#1f77b4", "baseline", "dclm"),
         ("p2o50", "#ff7f0e", "famB", "p2o50"),
-        ("p2o90", "#d62728", "famB", "p2o90"),
+        ("pes2o", "#2ca02c", "baseline", "pes2o"),
     ]
     _out = render_side_by_side(
         sel_famB_p2o.value,
         lambda m: make_famB_figure(
-            finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources
+            finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources,
+            include_archs=sel_famB_p2o_arch.value, exclude_reps=[128,256],
         ),
         "famB_pes2o",
+    )
+    _out
+    return
+
+
+@app.cell(column=2, hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Training curves — metric vs. train step (baseline runs)
+
+    Per-step training curves from the downloaded W&B history
+    (`ml/runs_data/history/`). Baseline `olmo_mix` runs (and the single-source
+    mixtures) at 80M / 200M. Each plot is **faceted**: one column per architecture
+    (dense / moe32 / moe64) and one row per selected metric, with one line per
+    repetition count (color = rep count).
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    factor_palette,
+    get_model_type,
+    get_reps,
+    get_scale,
+    has_tag,
+    keep_arch,
+    load_history_series,
+    pd,
+    plt,
+):
+    def make_training_curve_figure(
+        df,
+        data_tag,
+        scale,
+        metrics,
+        include_archs=None,
+        exclude_archs=None,
+        include_reps=None,
+        exclude_reps=None,
+        annotate_reps=True,
+        annotate_min_gap=0.01,
+    ):
+        """Faceted training curves (metric vs. train step) for baseline runs of one
+        data mixture + model scale.
+
+        Facets are laid out as a grid: one **column per architecture**
+        (dense/moe32/moe64) and one **row per metric** in ``metrics``. Within each
+        facet, one line per repetition count (color encodes the rep count). Reads
+        per-step values from the downloaded W&B history.
+
+        Inline rep labels
+        -----------------
+        When ``annotate_reps`` is True (the default), each line's rep count (e.g.
+        ``"16x"``) is written just above its right endpoint, in the line's color.
+        To avoid unreadable pile-ups where curves converge, a label is drawn only if
+        its endpoint is vertically far enough from every other endpoint in that facet:
+        endpoints are compared on the y axis in facet-relative units (fraction of the
+        facet's y-range), and a label is skipped if its nearest neighbor is within
+        ``annotate_min_gap`` (so a tightly-converged cluster gets no inline labels —
+        the shared legend still covers them). Set ``annotate_reps=False`` to disable
+        the inline labels entirely.
+        """
+        if isinstance(metrics, str):
+            metrics = [metrics]
+
+        # Architectures to show, in canonical order, filtered by include/exclude.
+        archs = [
+            a
+            for a in ["dense", "moe32", "moe64"]
+            if keep_arch(a, include_archs, exclude_archs)
+        ]
+
+        # Collect baseline runs: {(model_type, reps): run_name} (keep last seen), and
+        # the global rep set so colors are consistent across facets.
+        runs: dict = {}
+        rep_set = set()
+        for _, row in df.iterrows():
+            if get_scale(row) != scale:
+                continue
+            if not has_tag(row, "baseline"):
+                continue
+            if not has_tag(row, data_tag):
+                continue
+            model_type = get_model_type(row)
+            if model_type not in archs:
+                continue
+            reps = get_reps(row)
+            if pd.isna(reps):
+                continue
+            reps = float(reps)
+            if include_reps is not None and reps not in {float(r) for r in include_reps}:
+                continue
+            if exclude_reps and reps in {float(r) for r in exclude_reps}:
+                continue
+            runs[(model_type, reps)] = str(row.get("Name", ""))
+            rep_set.add(reps)
+
+        rep_order = sorted(rep_set)
+        rep_color = factor_palette(rep_order)  # color per repetition count
+
+        n_rows = max(1, len(metrics))
+        n_cols = max(1, len(archs))
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(4.2 * n_cols, 3.4 * n_rows),
+            squeeze=False,
+        )
+
+        any_data = False
+        shown_reps = []
+        for r, metric in enumerate(metrics):
+            for c, model_type in enumerate(archs):
+                ax = axes[r][c]
+                endpoints = []  # (reps, x_last, y_last) for inline labels
+                for reps in rep_order:
+                    run_name = runs.get((model_type, reps))
+                    if run_name is None:
+                        continue
+                    series = load_history_series(run_name, metric)
+                    if not series:
+                        continue
+                    any_data = True
+                    if reps not in shown_reps:
+                        shown_reps.append(reps)
+                    ax.plot(
+                        [p[0] for p in series],
+                        [p[1] for p in series],
+                        linewidth=1.0,
+                        color=rep_color[reps],
+                    )
+                    endpoints.append((reps, series[-1][0], series[-1][1]))
+
+                # Inline rep labels: only for endpoints that are vertically well
+                # separated from every other endpoint in this facet.
+                if annotate_reps and endpoints:
+                    ymin, ymax = ax.get_ylim()
+                    yspan = (ymax - ymin) or 1.0
+                    for reps, x_last, y_last in endpoints:
+                        nearest = min(
+                            (
+                                abs(y_last - other_y) / yspan
+                                for o_reps, _, other_y in endpoints
+                                if o_reps != reps
+                            ),
+                            default=float("inf"),
+                        )
+                        if nearest < annotate_min_gap:
+                            continue
+                        ax.annotate(
+                            f"{reps:g}x",
+                            xy=(x_last, y_last),
+                            xytext=(3, -3),
+                            textcoords="offset points",
+                            fontsize=6,
+                            color=rep_color[reps],
+                            ha="left",
+                            va="bottom",
+                            clip_on=False,
+                        )
+
+                # Column title (architecture) only on the top row.
+                if r == 0:
+                    ax.set_title(model_type, fontsize=11, fontweight="bold")
+                # Y label (metric) only on the leftmost column.
+                if c == 0:
+                    ax.set_ylabel(metric, fontsize=8)
+                # X label only on the bottom row.
+                if r == n_rows - 1:
+                    ax.set_xlabel("train step")
+
+        fig.suptitle(f"{data_tag} — {scale}: training curves (baseline)", fontsize=11)
+
+        if any_data:
+            from matplotlib.lines import Line2D
+
+            rep_shown = [r for r in rep_order if r in shown_reps]
+            handles = [
+                Line2D([0], [0], color=rep_color[r], linewidth=2) for r in rep_shown
+            ]
+            labels = [f"{r:g}x" for r in rep_shown]
+            fig.legend(
+                handles,
+                labels,
+                title="Repetitions",
+                fontsize=7,
+                title_fontsize=8,
+                loc="center left",
+                bbox_to_anchor=(1.0, 0.5),
+                borderaxespad=0.0,
+            )
+        else:
+            axes[0][0].set_title(
+                axes[0][0].get_title() + "  [no history found]", fontsize=9
+            )
+
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        return fig
+
+    return (make_training_curve_figure,)
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_curve_olmo_80m = metric_multiselect(
+        "curves: olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_curve_olmo_80m_arch = arch_multiselect("curves: olmo_mix 80M — architectures")
+    mo.vstack([sel_curve_olmo_80m, sel_curve_olmo_80m_arch])
+    return sel_curve_olmo_80m, sel_curve_olmo_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_curve_olmo_80m,
+    sel_curve_olmo_80m_arch,
+):
+    _out = render_faceted(
+        sel_curve_olmo_80m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "olmo_mix", "80M", ms, include_archs=sel_curve_olmo_80m_arch.value
+        ),
+        "curve_olmo_mix_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_curve_olmo_200m = metric_multiselect(
+        "curves: olmo_mix 200M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_curve_olmo_200m_arch = arch_multiselect("curves: olmo_mix 200M — architectures")
+    mo.vstack([sel_curve_olmo_200m, sel_curve_olmo_200m_arch])
+    return sel_curve_olmo_200m, sel_curve_olmo_200m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_curve_olmo_200m,
+    sel_curve_olmo_200m_arch,
+):
+    _out = render_faceted(
+        sel_curve_olmo_200m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "olmo_mix", "200M", ms, include_archs=sel_curve_olmo_200m_arch.value
+        ),
+        "curve_olmo_mix_200M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Single-source mixtures (80M): `dclm`, `starcoder`, `pes2o`, `wiki`
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_curve_dclm_80m = metric_multiselect(
+        "curves: dclm 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_curve_dclm_80m_arch = arch_multiselect("curves: dclm 80M — architectures")
+    mo.vstack([sel_curve_dclm_80m, sel_curve_dclm_80m_arch])
+    return sel_curve_dclm_80m, sel_curve_dclm_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_curve_dclm_80m,
+    sel_curve_dclm_80m_arch,
+):
+    _out = render_faceted(
+        sel_curve_dclm_80m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "dclm", "80M", ms, include_archs=sel_curve_dclm_80m_arch.value
+        ),
+        "curve_dclm_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_curve_starcoder_80m = metric_multiselect(
+        "curves: starcoder 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
+    sel_curve_starcoder_80m_arch = arch_multiselect("curves: starcoder 80M — architectures")
+    mo.vstack([sel_curve_starcoder_80m, sel_curve_starcoder_80m_arch])
+    return sel_curve_starcoder_80m, sel_curve_starcoder_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_curve_starcoder_80m,
+    sel_curve_starcoder_80m_arch,
+):
+    _out = render_faceted(
+        sel_curve_starcoder_80m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "starcoder", "80M", ms, include_archs=sel_curve_starcoder_80m_arch.value
+        ),
+        "curve_starcoder_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_curve_pes2o_80m = metric_multiselect(
+        "curves: pes2o 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
+    sel_curve_pes2o_80m_arch = arch_multiselect("curves: pes2o 80M — architectures")
+    mo.vstack([sel_curve_pes2o_80m, sel_curve_pes2o_80m_arch])
+    return sel_curve_pes2o_80m, sel_curve_pes2o_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_curve_pes2o_80m,
+    sel_curve_pes2o_80m_arch,
+):
+    _out = render_faceted(
+        sel_curve_pes2o_80m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "pes2o", "80M", ms, include_archs=sel_curve_pes2o_80m_arch.value
+        ),
+        "curve_pes2o_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_curve_wiki_80m = metric_multiselect(
+        "curves: wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss"]
+    )
+    sel_curve_wiki_80m_arch = arch_multiselect("curves: wiki 80M — architectures")
+    mo.vstack([sel_curve_wiki_80m, sel_curve_wiki_80m_arch])
+    return sel_curve_wiki_80m, sel_curve_wiki_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_curve_wiki_80m,
+    sel_curve_wiki_80m_arch,
+):
+    _out = render_faceted(
+        sel_curve_wiki_80m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "wiki", "80M", ms, include_archs=sel_curve_wiki_80m_arch.value
+        ),
+        "curve_wiki_80M",
     )
     _out
     return
