@@ -1736,17 +1736,18 @@ def _(mo):
     ## Group 5 — `famB` runs: metric vs. repetition
 
     `famB` runs mix a single source into `olmo_mix` at a fixed fraction, encoded in
-    the run name (`sc50`/`sc90` = 50%/90% starcoder, `p2o50`/`p2o90` = 50%/90% pes2o).
+    the run name (`sc50`/`sc90` = 50%/90% starcoder, `p2o50` = 50% pes2o).
 
     Each figure plots the chosen metric vs. repetition count (log X, power-of-2 ticks)
     with:
 
-    - **line color** = model type (blue = dense, green = moe32, red = moe64), and
-    - **line style** = data source (`olmo_mix` baseline, single-source baseline, and
-      the two famB mixes).
+    - **line color** = data source, and
+    - **line style + shade** = architecture (dense solid/darkest, moe32 dashed,
+      moe64 dotted/lightest).
 
-    The `olmo_mix` and single-source lines are **baseline** runs (tag `baseline`);
-    duplicate baseline runs at a rep count keep the lowest value (see Group 1 & 2).
+    The reference lines are the `dclm` and single-source **baseline** runs (tag
+    `baseline`); duplicate baseline runs at a rep count keep the lowest value (see
+    Group 1 & 2).
     """)
     return
 
@@ -1977,11 +1978,12 @@ def _(
     sel_famB_sc_arch,
 ):
     # Plot 1: starcoder family. Color = source; line style + shade = architecture.
+    # Order (and thus palette assignment) is dclm, sc90, sc50, starcoder.
     _sources = [
-        ("olmo_mix", "#1f77b4", "baseline", "olmo_mix"),
-        ("starcoder", "#2ca02c", "baseline", "starcoder"),
-        ("sc50", "#ff7f0e", "famB", "sc50"),
+        ("dclm", "#1f77b4", "baseline", "dclm"),
         ("sc90", "#d62728", "famB", "sc90"),
+        ("sc50", "#ff7f0e", "famB", "sc50"),
+        ("starcoder", "#2ca02c", "baseline", "starcoder"),
     ]
     _out = render_side_by_side(
         sel_famB_sc.value,
@@ -2012,11 +2014,11 @@ def _(
     sel_famB_p2o_arch,
 ):
     # Plot 2: pes2o family. Color = source; line style + shade = architecture.
+    # Order (and thus palette assignment) is dclm, p2o50, pes2o.
     _sources = [
-        ("olmo_mix", "#1f77b4", "baseline", "olmo_mix"),
-        ("pes2o", "#2ca02c", "baseline", "pes2o"),
+        ("dclm", "#1f77b4", "baseline", "dclm"),
         ("p2o50", "#ff7f0e", "famB", "p2o50"),
-        ("p2o90", "#d62728", "famB", "p2o90"),
+        ("pes2o", "#2ca02c", "baseline", "pes2o"),
     ]
     _out = render_side_by_side(
         sel_famB_p2o.value,
