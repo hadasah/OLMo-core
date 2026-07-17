@@ -649,18 +649,23 @@ def _(json, os):
         return series
 
     # Metric that gets smoothed for the column-1 (final-value) plots, and how the
-    # smoothed axis is labeled.
+    # smoothed axis is labeled. Every ``train/*`` metric is averaged over the last
+    # SMOOTH_WINDOW logged steps (they are logged every step), matching train loss.
     SMOOTHED_METRIC = "train/CE loss"
     SMOOTH_WINDOW = 100
     SMOOTHED_LABEL = f"{SMOOTHED_METRIC} (last-{SMOOTH_WINDOW}-step avg)"
 
-    def smoothed_train_loss(run_name: str, window: int = SMOOTH_WINDOW):
-        """Mean of ``train/CE loss`` over the last `window` logged steps of a run.
+    def is_smoothed_metric(metric) -> bool:
+        """Whether `metric` gets last-window averaging (all ``train/*`` metrics)."""
+        return isinstance(metric, str) and metric.startswith("train/")
 
-        train/CE loss is logged every step, so the last `window` logged points are
-        the last `window` steps. Returns None if the run has no usable history.
+    def smoothed_metric_value(run_name: str, metric: str, window: int = SMOOTH_WINDOW):
+        """Mean of `metric` over the last `window` logged steps of a run.
+
+        ``train/*`` metrics are logged every step, so the last `window` logged points
+        are the last `window` steps. Returns None if the run has no usable history.
         """
-        series = load_history_series(run_name, SMOOTHED_METRIC)
+        series = load_history_series(run_name, metric)
         if not series:
             return None
         tail = series[-window:]
@@ -668,22 +673,28 @@ def _(json, os):
             return None
         return sum(v for _, v in tail) / len(tail)
 
+    def smoothed_train_loss(run_name: str, window: int = SMOOTH_WINDOW):
+        """Mean of ``train/CE loss`` over the last `window` logged steps of a run."""
+        return smoothed_metric_value(run_name, SMOOTHED_METRIC, window)
+
     def metric_value(row, metric):
         """Value to plot for `metric` in the column-1 (final-value) figures.
 
-        For ``train/CE loss`` this is the mean over the last SMOOTH_WINDOW steps from
-        the run's history; every other metric uses its raw final value from the CSV.
-        Falls back to the raw CSV value if a run has no history.
+        For any ``train/*`` metric this is the mean over the last SMOOTH_WINDOW steps
+        from the run's history; every other metric uses its raw final value from the
+        CSV. Falls back to the raw CSV value if a run has no history.
         """
-        if metric == SMOOTHED_METRIC:
-            sm = smoothed_train_loss(str(row.get("Name", "")))
+        if is_smoothed_metric(metric):
+            sm = smoothed_metric_value(str(row.get("Name", "")), metric)
             if sm is not None:
                 return sm
         return row.get(metric)
 
     def axis_label(metric):
-        """Y-axis / legend label for a metric (annotates the smoothed train loss)."""
-        return SMOOTHED_LABEL if metric == SMOOTHED_METRIC else metric
+        """Y-axis / legend label for a metric (annotates the smoothed train metrics)."""
+        if is_smoothed_metric(metric):
+            return f"{metric} (last-{SMOOTH_WINDOW}-step avg)"
+        return metric
 
     return axis_label, load_history_series, metric_value
 
