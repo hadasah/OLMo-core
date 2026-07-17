@@ -760,8 +760,30 @@ def _(mo, raw_df, save_pdf):
 
     METRIC_OPTIONS = build_metric_options(raw_df)
 
+    def build_load_metric_options(df):
+        """Collect the MoE router load metrics present in the data.
+
+        Every column whose name ends in ``load imbalance`` or ``load balancing loss
+        unscaled`` (the aggregate ``train/router 0 ...`` plus the per-block
+        ``train/block NN/router 0 ...`` variants). Aggregate metrics are listed first.
+        """
+        cols = list(df.columns)
+        agg, per_block = [], []
+        for c in cols:
+            cl = c.lower()
+            if cl.endswith("load imbalance") or cl.endswith("load balancing loss unscaled"):
+                (per_block if "/block " in c else agg).append(c)
+        return agg + per_block
+
+    LOAD_METRIC_OPTIONS = build_load_metric_options(raw_df)
+
     _DEFAULT_METRIC = (
         ["train/CE loss"] if "train/CE loss" in METRIC_OPTIONS else METRIC_OPTIONS[:1]
+    )
+    _DEFAULT_LOAD_METRIC = (
+        ["train/router 0 load imbalance"]
+        if "train/router 0 load imbalance" in LOAD_METRIC_OPTIONS
+        else LOAD_METRIC_OPTIONS[:1]
     )
 
     def metric_multiselect(label, chosen_values=[]):
@@ -769,6 +791,15 @@ def _(mo, raw_df, save_pdf):
         return mo.ui.multiselect(
             options=METRIC_OPTIONS, value=(chosen_values if chosen_values else _DEFAULT_METRIC), label=label,
             # full_width=True,
+        )
+
+    def load_metric_multiselect(label, chosen_values=None):
+        """A per-plot multi-select over the MoE router load metrics (load imbalance /
+        load balancing loss unscaled)."""
+        return mo.ui.multiselect(
+            options=LOAD_METRIC_OPTIONS,
+            value=chosen_values if chosen_values else _DEFAULT_LOAD_METRIC,
+            label=label,
         )
 
     _ARCH_OPTIONS = ["dense", "moe32", "moe64"]
@@ -817,10 +848,208 @@ def _(mo, raw_df, save_pdf):
 
     return (
         arch_multiselect,
+        load_metric_multiselect,
         metric_multiselect,
         render_faceted,
         render_side_by_side,
     )
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Router load metrics — metric vs. train step (baseline runs)
+
+    Identical faceting to the training-curve plots above (one column per
+    architecture, one row per selected metric, one line per repetition count), but
+    the metric dropdown lists the **MoE router load metrics** — every series ending
+    in `load imbalance` or `load balancing loss unscaled` (the aggregate
+    `train/router 0 ...` plus the per-block variants). Dense is excluded since these
+    are MoE-only.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, load_metric_multiselect, mo):
+    sel_load_olmo_80m = load_metric_multiselect("load: olmo_mix 80M — metrics")
+    sel_load_olmo_80m_arch = arch_multiselect(
+        "load: olmo_mix 80M — architectures", options=["moe32", "moe64"]
+    )
+    mo.vstack([sel_load_olmo_80m, sel_load_olmo_80m_arch])
+    return sel_load_olmo_80m, sel_load_olmo_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_load_olmo_80m,
+    sel_load_olmo_80m_arch,
+):
+    _out = render_faceted(
+        sel_load_olmo_80m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "olmo_mix", "80M", ms, include_archs=sel_load_olmo_80m_arch.value
+        ),
+        "load_olmo_mix_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, load_metric_multiselect, mo):
+    sel_load_olmo_200m = load_metric_multiselect("load: olmo_mix 200M — metrics")
+    sel_load_olmo_200m_arch = arch_multiselect(
+        "load: olmo_mix 200M — architectures", options=["moe32", "moe64"]
+    )
+    mo.vstack([sel_load_olmo_200m, sel_load_olmo_200m_arch])
+    return sel_load_olmo_200m, sel_load_olmo_200m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_load_olmo_200m,
+    sel_load_olmo_200m_arch,
+):
+    _out = render_faceted(
+        sel_load_olmo_200m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "olmo_mix", "200M", ms, include_archs=sel_load_olmo_200m_arch.value
+        ),
+        "load_olmo_mix_200M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Single-source mixtures (80M): `dclm`, `starcoder`, `pes2o`, `wiki`
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, load_metric_multiselect, mo):
+    sel_load_dclm_80m = load_metric_multiselect("load: dclm 80M — metrics")
+    sel_load_dclm_80m_arch = arch_multiselect(
+        "load: dclm 80M — architectures", options=["moe32", "moe64"]
+    )
+    mo.vstack([sel_load_dclm_80m, sel_load_dclm_80m_arch])
+    return sel_load_dclm_80m, sel_load_dclm_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_load_dclm_80m,
+    sel_load_dclm_80m_arch,
+):
+    _out = render_faceted(
+        sel_load_dclm_80m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "dclm", "80M", ms, include_archs=sel_load_dclm_80m_arch.value
+        ),
+        "load_dclm_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, load_metric_multiselect, mo):
+    sel_load_starcoder_80m = load_metric_multiselect("load: starcoder 80M — metrics")
+    sel_load_starcoder_80m_arch = arch_multiselect(
+        "load: starcoder 80M — architectures", options=["moe32", "moe64"]
+    )
+    mo.vstack([sel_load_starcoder_80m, sel_load_starcoder_80m_arch])
+    return sel_load_starcoder_80m, sel_load_starcoder_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_load_starcoder_80m,
+    sel_load_starcoder_80m_arch,
+):
+    _out = render_faceted(
+        sel_load_starcoder_80m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "starcoder", "80M", ms, include_archs=sel_load_starcoder_80m_arch.value
+        ),
+        "load_starcoder_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, load_metric_multiselect, mo):
+    sel_load_pes2o_80m = load_metric_multiselect("load: pes2o 80M — metrics")
+    sel_load_pes2o_80m_arch = arch_multiselect(
+        "load: pes2o 80M — architectures", options=["moe32", "moe64"]
+    )
+    mo.vstack([sel_load_pes2o_80m, sel_load_pes2o_80m_arch])
+    return sel_load_pes2o_80m, sel_load_pes2o_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_load_pes2o_80m,
+    sel_load_pes2o_80m_arch,
+):
+    _out = render_faceted(
+        sel_load_pes2o_80m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "pes2o", "80M", ms, include_archs=sel_load_pes2o_80m_arch.value
+        ),
+        "load_pes2o_80M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, load_metric_multiselect, mo):
+    sel_load_wiki_80m = load_metric_multiselect("load: wiki 80M — metrics")
+    sel_load_wiki_80m_arch = arch_multiselect(
+        "load: wiki 80M — architectures", options=["moe32", "moe64"]
+    )
+    mo.vstack([sel_load_wiki_80m, sel_load_wiki_80m_arch])
+    return sel_load_wiki_80m, sel_load_wiki_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    make_training_curve_figure,
+    render_faceted,
+    sel_load_wiki_80m,
+    sel_load_wiki_80m_arch,
+):
+    _out = render_faceted(
+        sel_load_wiki_80m.value,
+        lambda ms: make_training_curve_figure(
+            finished_df, "wiki", "80M", ms, include_archs=sel_load_wiki_80m_arch.value
+        ),
+        "load_wiki_80M",
+    )
+    _out
+    return
 
 
 @app.cell(column=1, hide_code=True)
@@ -1110,7 +1339,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(arch_multiselect, metric_multiselect, mo):
-    sel_wiki_80m = metric_multiselect("wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss", "eval/lm/wikitext-validation/CE loss"])
+    sel_wiki_80m = metric_multiselect("wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss", "eval/lm/wikitext_103-validation/CE loss"])
     sel_wiki_80m_arch = arch_multiselect("wiki 80M — architectures")
     mo.vstack([sel_wiki_80m, sel_wiki_80m_arch])
     return sel_wiki_80m, sel_wiki_80m_arch
