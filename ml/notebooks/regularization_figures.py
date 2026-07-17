@@ -2018,6 +2018,7 @@ def _(
         exclude_reps=None,
         annotate_reps=True,
         annotate_min_gap=0.01,
+        log_y=None,
     ):
         """Faceted training curves (metric vs. train step) for baseline runs of one
         data mixture + model scale.
@@ -2027,6 +2028,13 @@ def _(
         facet, one line per repetition count (color encodes the rep count). Reads
         per-step values from the downloaded W&B history.
 
+        Log y-axis
+        ----------
+        ``log_y`` controls the y scale: ``True``/``False`` forces log/linear for every
+        facet, ``None`` (the default) auto-detects per metric — the MoE router load
+        metrics (names ending in ``load imbalance`` or ``load balancing loss
+        unscaled``) get a log y-axis, everything else stays linear.
+
         Inline rep labels
         -----------------
         When ``annotate_reps`` is True (the default), each line's rep count (e.g.
@@ -2034,11 +2042,16 @@ def _(
         To avoid unreadable pile-ups where curves converge, a label is drawn only if
         its endpoint is vertically far enough from every other endpoint in that facet:
         endpoints are compared on the y axis in facet-relative units (fraction of the
-        facet's y-range), and a label is skipped if its nearest neighbor is within
-        ``annotate_min_gap`` (so a tightly-converged cluster gets no inline labels —
-        the shared legend still covers them). Set ``annotate_reps=False`` to disable
-        the inline labels entirely.
+        facet's height, honoring the y scale), and a label is skipped if its nearest
+        neighbor is within ``annotate_min_gap`` (so a tightly-converged cluster gets no
+        inline labels — the shared legend still covers them). Set
+        ``annotate_reps=False`` to disable the inline labels entirely.
         """
+        def _is_log_metric(metric):
+            m = metric.lower()
+            return m.endswith("load imbalance") or m.endswith(
+                "load balancing loss unscaled"
+            )
         if isinstance(metrics, str):
             metrics = [metrics]
 
@@ -2089,6 +2102,7 @@ def _(
         any_data = False
         shown_reps = []
         for r, metric in enumerate(metrics):
+            use_log = _is_log_metric(metric) if log_y is None else log_y
             for c, model_type in enumerate(archs):
                 ax = axes[r][c]
                 endpoints = []  # (reps, x_last, y_last) for inline labels
@@ -2110,15 +2124,29 @@ def _(
                     )
                     endpoints.append((reps, series[-1][0], series[-1][1]))
 
+                if use_log:
+                    ax.set_yscale("log")
+
                 # Inline rep labels: only for endpoints that are vertically well
-                # separated from every other endpoint in this facet.
+                # separated from every other endpoint in this facet. Distances are
+                # measured in axis-fraction units so the rule works under log scale.
                 if annotate_reps and endpoints:
+                    import math
+
                     ymin, ymax = ax.get_ylim()
-                    yspan = (ymax - ymin) or 1.0
+
+                    def _yfrac(y):
+                        if use_log:
+                            if y <= 0 or ymin <= 0:
+                                return 0.0
+                            lo, hi = math.log10(ymin), math.log10(ymax)
+                            return (math.log10(y) - lo) / ((hi - lo) or 1.0)
+                        return (y - ymin) / ((ymax - ymin) or 1.0)
+
                     for reps, x_last, y_last in endpoints:
                         nearest = min(
                             (
-                                abs(y_last - other_y) / yspan
+                                abs(_yfrac(y_last) - _yfrac(other_y))
                                 for o_reps, _, other_y in endpoints
                                 if o_reps != reps
                             ),
