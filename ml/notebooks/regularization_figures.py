@@ -1195,6 +1195,10 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    DROPOUT_COL,
+    FOM_COL,
+    MGN_COL,
+    WD_COL,
     apply_pow2_xaxis,
     arch_color,
     arch_dash,
@@ -1210,6 +1214,7 @@ def _(
     metric_value,
     pd,
     plt,
+    router_field,
 ):
     def _factor_value(row, col):
         """Read a regularizer column as a float; blank/NaN means 'baseline'."""
@@ -1233,6 +1238,7 @@ def _(
         exclude_reps=None,
         nan_label=None,
         value_getter=None,
+        factor_key=None,
     ):
         """color -> factor value; line style + shade -> architecture.
 
@@ -1248,6 +1254,12 @@ def _(
         nested inside JSON columns (e.g. MoE ``jitter_eps`` / ``eom_prob`` inside
         ``routers_list``).
 
+        `factor_key`: which regularizer this plot sweeps (one of ``"dropout"``,
+        ``"weight_decay"``, ``"max_grad_norm"``, ``"fom_prob"``, ``"jitter_eps"``,
+        ``"eom_prob"``). Only runs whose *other* knobs are all at their defaults are
+        included, so e.g. a dropout=0.2 run does not contaminate the weight-decay
+        plot's baseline bucket. When None, no such filtering is applied.
+
         Filters (all default to no-op):
 
         - ``include_archs`` / ``exclude_archs``: keep/drop architectures.
@@ -1255,6 +1267,44 @@ def _(
         """
         if value_getter is None:
             value_getter = lambda row: row.get(factor_col)
+
+        # Each regularizer knob: (reader, is-at-default predicate). A run is a valid
+        # baseline / pure single-factor sweep only when every knob EXCEPT the one this
+        # plot sweeps (`factor_key`) is at its default. Otherwise e.g. the dropout and
+        # jitter experiment runs (which leave weight_decay at its 0.1 default) would
+        # leak into the weight-decay plot's baseline bucket and, via the per-rep min,
+        # drag the baseline line below its true value.
+        def _blank(v):
+            return v is None or (isinstance(v, float) and pd.isna(v)) or (
+                isinstance(v, str) and v.strip() == ""
+            )
+
+        def _num_default(v, default):
+            if _blank(v):
+                return True
+            try:
+                return float(v) == default
+            except (TypeError, ValueError):
+                return False
+
+        _knob_at_default = {
+            "dropout": lambda row: _blank(row.get(DROPOUT_COL)),
+            "weight_decay": lambda row: _num_default(row.get(WD_COL), 0.1),
+            "max_grad_norm": lambda row: _num_default(row.get(MGN_COL), 1.0),
+            "fom_prob": lambda row: _blank(row.get(FOM_COL)),
+            "jitter_eps": lambda row: _blank(router_field(row, "jitter_eps")),
+            "eom_prob": lambda row: _blank(router_field(row, "eom_prob")),
+        }
+
+        def _other_knobs_at_default(row):
+            if factor_key is None:
+                return True
+            for _k, _pred in _knob_at_default.items():
+                if _k == factor_key:
+                    continue
+                if not _pred(row):
+                    return False
+            return True
 
         # Gather points keyed by (model_type, factor_value) -> {reps: min_value}.
         series: dict = {}
@@ -1264,6 +1314,8 @@ def _(
             if get_scale(row) != "80M":
                 continue
             if not has_tag(row, "olmo_mix"):
+                continue
+            if not _other_knobs_at_default(row):
                 continue
             model_type = get_model_type(row)
             if model_type not in ("dense", "moe32", "moe64"):
@@ -1396,6 +1448,7 @@ def _(
         lambda m: make_factor_figure(
             finished_df, DROPOUT_COL, "dropout", None, m,
             include_archs=sel_dropout_arch.value, exclude_reps=[128,256],
+            factor_key="dropout",
         ),
         "dropout",
     )
@@ -1426,6 +1479,7 @@ def _(
         lambda m: make_factor_figure(
             finished_df, WD_COL, "weight_decay", 0.1, m,
             include_archs=sel_weight_decay_arch.value, exclude_reps=[128,256],
+            factor_key="weight_decay",
         ),
         "weight_decay",
     )
@@ -1457,6 +1511,7 @@ def _(
         lambda m: make_factor_figure(
             finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="0 (no clip)",
             include_archs=sel_max_grad_norm_arch.value, exclude_reps=[128,256],
+            factor_key="max_grad_norm",
         ),
         "max_grad_norm",
     )
@@ -1510,6 +1565,7 @@ def _(
             include_archs=sel_moe_jitter_arch.value,
             value_getter=lambda row: router_field(row, "jitter_eps"),
             exclude_reps=[128,256],
+            factor_key="jitter_eps",
         ),
         "moe_jitter_eps",
     )
@@ -1548,6 +1604,7 @@ def _(
             include_archs=sel_moe_eom_arch.value,
             value_getter=lambda row: router_field(row, "eom_prob"),
             exclude_reps=[128,256],
+            factor_key="eom_prob",
         ),
         "moe_eom_prob",
     )
@@ -1578,7 +1635,7 @@ def _(
     _out = render_side_by_side(
         sel_moe_fom.value,
         lambda m: make_factor_figure(
-            finished_df, FOM_COL, "fom_prob", None, m, include_archs=sel_moe_fom_arch.value, exclude_reps=[128,256],
+            finished_df, FOM_COL, "fom_prob", None, m, include_archs=sel_moe_fom_arch.value, exclude_reps=[128,256], factor_key="fom_prob",
         ),
         "moe_fom_prob",
     )
