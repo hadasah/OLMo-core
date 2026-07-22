@@ -225,8 +225,12 @@ def _(DATASETS, REP_LEVELS, os, plt):
         """Shade a per-factor base color by architecture."""
         return shade_color(base_color, MODEL_SHADE.get(mc, 0.0))
 
-    def factor_palette(keys):
-        """Distinct color per key (in order) across viridis; single key -> mid-palette."""
+    def factor_palette(keys, high_end=0.8):
+        """Distinct color per key (in order) across viridis; single key -> mid-palette.
+
+        `high_end` caps how far toward yellow we go (0.8 = stop 80% of the way, so the
+        bright-yellow end of viridis is never used).
+        """
         keys = list(keys)
         n = len(keys)
         cmap = plt.get_cmap("viridis")
@@ -234,12 +238,19 @@ def _(DATASETS, REP_LEVELS, os, plt):
             return {}
         if n == 1:
             return {keys[0]: to_hex(cmap(0.35))}
-        return {k: to_hex(cmap(i / (n - 1))) for i, k in enumerate(keys)}
+        return {k: to_hex(cmap(i * high_end / (n - 1))) for i, k in enumerate(keys)}
 
     # Fixed palettes for the recurring factors.
     DATASET_COLORS = factor_palette(DATASETS)
     REP_COLORS = factor_palette(REP_LEVELS)
     MOE_COLORS = factor_palette(["moe32", "moe64"])  # for plotly box/heatmap accents
+
+    # Truncated viridis for plotly heatmaps: 0 -> 0.8 of the colormap, so the bright
+    # yellow end is never used (matches the matplotlib factor_palette cap).
+    _cs_cmap = plt.get_cmap("viridis")
+    VIRIDIS_CAPPED = [
+        [_i / 8, to_hex(_cs_cmap(_i / 8 * 0.8))] for _i in range(9)
+    ]
 
     def pow2_ticks(max_reps):
         if max_reps is None or max_reps < 1:
@@ -355,6 +366,7 @@ def _(DATASETS, REP_LEVELS, os, plt):
         MOE_COLORS,
         REP_COLORS,
         REP_INT,
+        VIRIDIS_CAPPED,
         apply_pow2_xaxis,
         arch_color,
         arch_dash,
@@ -585,7 +597,15 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(REP_LEVELS, active_datasets, active_moe, df_knockout, go, make_subplots):
+def _(
+    REP_LEVELS,
+    VIRIDIS_CAPPED,
+    active_datasets,
+    active_moe,
+    df_knockout,
+    go,
+    make_subplots,
+):
     """Plot 3 — Per-Layer Knockout Heatmap (Layer × Rep)."""
 
     _n_moe = len(active_moe)
@@ -622,7 +642,7 @@ def _(REP_LEVELS, active_datasets, active_moe, df_knockout, go, make_subplots):
                         z=_heat.values,
                         x=[f"L{_c}" for _c in _heat.columns],
                         y=[str(_r) for _r in _heat.index],
-                        colorscale="Viridis",
+                        colorscale=VIRIDIS_CAPPED,
                         showscale=(_r_idx == 0 and _c_idx == _n_ds - 1),
                         text=_heat.values.round(4),
                         texttemplate="%{text:.4f}",
@@ -1230,6 +1250,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    VIRIDIS_CAPPED,
     ca_dataset_dd,
     ca_layer_slider,
     ca_moe_dd,
@@ -1249,7 +1270,7 @@ def _(
                 z=_mat,
                 x=list(range(_n_experts)),
                 y=list(range(_n_experts)),
-                colorscale="Viridis",
+                colorscale=VIRIDIS_CAPPED,
                 hovertemplate="Expert %{x} × Expert %{y}<br>Co-activation: %{z:.6f}<extra></extra>",
             )
         )
@@ -1285,6 +1306,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    VIRIDIS_CAPPED,
     ca_dataset_dd,
     ca_layer_slider,
     ca_moe_dd,
@@ -1317,7 +1339,7 @@ def _(
             _fig.add_trace(
                 go.Heatmap(
                     z=_mat,
-                    colorscale="Viridis",
+                    colorscale=VIRIDIS_CAPPED,
                     showscale=(_col_i == 1),
                     hovertemplate="Expert %{x} × Expert %{y}<br>Freq: %{z:.6f}<extra></extra>",
                 ),
