@@ -1611,7 +1611,10 @@ def _(
     arch_factor_legend,
     axis_label,
     factor_palette,
+    get_model_type,
     get_reps,
+    get_scale,
+    has_tag,
     keep_arch,
     metric_value,
     pd,
@@ -1628,32 +1631,59 @@ def _(
         m = re.search(r"_(dense|moe32|moe64)$", str(name))
         return m.group(1) if m else None
 
-    def make_famA_figure(df, metric, include_archs=None, exclude_archs=None):
-        """famA: metric vs. %dclm. Color = rep count; line style + shade = architecture."""
-        # Collect: {(model_type, reps): [(pct, value), ...]}
-        series: dict = {}
-        rep_set = set()
+    def famA_points(df, metric, include_archs=None, exclude_archs=None):
+        """Yield ``(model_type, reps, pct, loss)`` for the famA %dclm plots.
+
+        Includes both the famA runs (``%dclm`` and arch parsed from the name) and the
+        single-source **dclm baseline** sweep (tag ``baseline``+``dclm`` at 80M),
+        which is folded in as the ``pct = 100`` (100% dclm) series — its arch comes
+        from the tags. Runs without a usable metric / pct / arch are skipped.
+        """
+        out = []
         for _, row in df.iterrows():
             name = str(row.get("Name", ""))
-            if "famA" not in name:
+            is_famA = "famA" in name
+            is_dclm_base = (
+                has_tag(row, "baseline")
+                and has_tag(row, "dclm")
+                and get_scale(row) == "80M"
+            )
+            if not (is_famA or is_dclm_base):
                 continue
-            pct = parse_dclm_pct(name)
             loss = metric_value(row, metric)
-            if pct is None or pd.isna(loss):
+            if pd.isna(loss):
                 continue
-            mt = famA_model_type(name)
-            if mt is None or not keep_arch(mt, include_archs, exclude_archs):
+            if is_famA:
+                pct = parse_dclm_pct(name)
+                mt = famA_model_type(name)
+            else:
+                pct = 100  # dclm baseline == 100% dclm
+                mt = get_model_type(row)
+            if pct is None or mt is None:
                 continue
-            reps = get_reps(row)
-            series.setdefault((mt, reps), []).append((pct, float(loss)))
+            if not keep_arch(mt, include_archs, exclude_archs):
+                continue
+            out.append((mt, get_reps(row), pct, float(loss)))
+        return out
+
+    def make_famA_figure(df, metric, include_archs=None, exclude_archs=None):
+        """famA: metric vs. %dclm. Color = rep count; line style + shade = architecture.
+
+        The dclm baseline runs are included as the 100% dclm points."""
+        # Collect: {(model_type, reps): {pct: min_value}}
+        series: dict = {}
+        rep_set = set()
+        for mt, reps, pct, loss in famA_points(df, metric, include_archs, exclude_archs):
+            by_pct = series.setdefault((mt, reps), {})
+            by_pct[pct] = min(loss, by_pct.get(pct, loss))
             rep_set.add(reps)
 
         rep_order = sorted(rep_set)
         rep_color = factor_palette(rep_order)
         fig, ax = plt.subplots(figsize=(5.5, 4.5))
         shown_archs = []
-        for (mt, reps), pts in sorted(series.items()):
-            pts = sorted(pts)
+        for (mt, reps), by_pct in sorted(series.items()):
+            pts = sorted(by_pct.items())
             if mt not in shown_archs:
                 shown_archs.append(mt)
             ax.plot(
@@ -1678,23 +1708,15 @@ def _(
 
     def make_famA_rep_figure(df, metric, include_archs=None, exclude_archs=None):
         """famA: metric vs. repetition count (log X). Color = %dclm; line style +
-        shade = architecture."""
-        # Collect: {(model_type, pct): [(reps, value), ...]}
+        shade = architecture.
+
+        The dclm baseline runs are included as the 100% dclm series."""
+        # Collect: {(model_type, pct): {reps: min_value}}
         series: dict = {}
         pct_set = set()
-        for _, row in df.iterrows():
-            name = str(row.get("Name", ""))
-            if "famA" not in name:
-                continue
-            pct = parse_dclm_pct(name)
-            loss = metric_value(row, metric)
-            if pct is None or pd.isna(loss):
-                continue
-            mt = famA_model_type(name)
-            if mt is None or not keep_arch(mt, include_archs, exclude_archs):
-                continue
-            reps = get_reps(row)
-            series.setdefault((mt, pct), []).append((reps, float(loss)))
+        for mt, reps, pct, loss in famA_points(df, metric, include_archs, exclude_archs):
+            by_reps = series.setdefault((mt, pct), {})
+            by_reps[reps] = min(loss, by_reps.get(reps, loss))
             pct_set.add(pct)
 
         pct_order = sorted(pct_set)
@@ -1703,11 +1725,7 @@ def _(
         shown_archs = []
         max_reps = 0
         any_data = False
-        for (mt, pct), pts in sorted(series.items()):
-            # Collapse duplicate rep counts (keep min).
-            by_reps: dict = {}
-            for reps, val in pts:
-                by_reps[reps] = min(val, by_reps.get(reps, val))
+        for (mt, pct), by_reps in sorted(series.items()):
             xy = sorted(by_reps.items())
             if not xy:
                 continue
