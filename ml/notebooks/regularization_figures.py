@@ -2030,6 +2030,7 @@ def _(
         annotate_reps=True,
         annotate_min_gap=0.01,
         log_y=None,
+        smooth_window=100,
     ):
         """Faceted training curves (metric vs. train step) for baseline runs of one
         data mixture + model scale.
@@ -2038,6 +2039,14 @@ def _(
         (dense/moe32/moe64) and one **row per metric** in ``metrics``. Within each
         facet, one line per repetition count (color encodes the rep count). Reads
         per-step values from the downloaded W&B history.
+
+        Smoothing
+        ---------
+        ``train/*`` metrics are logged every step and are noisy, so their per-step
+        curve is replaced by a trailing moving average over ``smooth_window`` steps
+        (default 100), matching the last-window averaging used for the final-value
+        plots. Non-``train/*`` metrics are drawn raw. Set ``smooth_window`` to 1 (or
+        0) to disable.
 
         Log y-axis
         ----------
@@ -2063,6 +2072,29 @@ def _(
             return m.endswith("load imbalance") or m.endswith(
                 "load balancing loss unscaled"
             )
+
+        def _trailing_avg(series, window):
+            """Trailing moving average of a sorted [(step, value), ...] series.
+
+            Point i becomes the mean of the values in the window ending at i (up to
+            `window` points), so the curve is smoothed while keeping every step's x.
+            Only applied to train/* metrics, which are logged every step.
+            """
+            if window is None or window <= 1:
+                return series
+            out = []
+            acc = 0.0
+            from collections import deque
+
+            buf = deque()
+            for x, v in series:
+                buf.append(v)
+                acc += v
+                if len(buf) > window:
+                    acc -= buf.popleft()
+                out.append((x, acc / len(buf)))
+            return out
+
         if isinstance(metrics, str):
             metrics = [metrics]
 
@@ -2114,6 +2146,8 @@ def _(
         shown_reps = []
         for r, metric in enumerate(metrics):
             use_log = _is_log_metric(metric) if log_y is None else log_y
+            # train/* metrics are logged every step and noisy -> trailing average.
+            smooth = smooth_window if metric.startswith("train/") else None
             for c, model_type in enumerate(archs):
                 ax = axes[r][c]
                 endpoints = []  # (reps, x_last, y_last) for inline labels
@@ -2124,6 +2158,7 @@ def _(
                     series = load_history_series(run_name, metric)
                     if not series:
                         continue
+                    series = _trailing_avg(series, smooth)
                     any_data = True
                     if reps not in shown_reps:
                         shown_reps.append(reps)
