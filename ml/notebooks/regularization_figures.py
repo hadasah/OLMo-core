@@ -1110,7 +1110,7 @@ def _(
 
 @app.cell(hide_code=True)
 def _(arch_multiselect, metric_multiselect, mo):
-    sel_wiki_80m = metric_multiselect("wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss", "eval/lm/wikitext-validation/CE loss"])
+    sel_wiki_80m = metric_multiselect("wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss", "eval/lm/wikitext_103-validation/CE loss"])
     sel_wiki_80m_arch = arch_multiselect("wiki 80M — architectures")
     mo.vstack([sel_wiki_80m, sel_wiki_80m_arch])
     return sel_wiki_80m, sel_wiki_80m_arch
