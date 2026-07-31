@@ -316,15 +316,23 @@ def _(json, pd):
             out.append((reps, val))
         return out
 
-    def _arch_of(row) -> str:
+    def arch_of_run(row) -> str:
         """Architecture (dense/moe32/moe64) from the run-name suffix, falling back to
-        tags (matches the famA handling; famAr runs are only tagged 'MoE')."""
+        tags.
+
+        Some sweeps (the ``famAr`` rep runs, the ``famB`` ``p2o10`` runs) are only
+        tagged ``MoE`` without the ``MoE32``/``MoE64`` tag, so tag-only classification
+        drops them as "other". The trailing ``_dense``/``_moe32``/``_moe64`` in the run
+        name is reliable, so prefer it and fall back to tags when it is absent.
+        """
         import re as _re
 
         m = _re.search(r"_(dense|moe32|moe64)$", str(row.get("Name", "")))
         if m:
             return m.group(1)
         return get_model_type(row)
+
+    _arch_of = arch_of_run  # backwards-compatible alias used by the dedup key
 
     def _norm(v):
         """Normalize a scalar for hashing: NaN/blank -> None so equal configs match
@@ -414,6 +422,7 @@ def _(json, pd):
         MGN_COL,
         MODEL_SHADE,
         WD_COL,
+        arch_of_run,
         dedupe_runs,
         filter_finished,
         filter_rep_points,
@@ -2211,7 +2220,7 @@ def _(mo):
     ## Group 5 — `famB` runs: metric vs. repetition
 
     `famB` runs mix a single source into `olmo_mix` at a fixed fraction, encoded in
-    the run name (`sc50`/`sc90` = 50%/90% starcoder, `p2o50` = 50% pes2o).
+    the run name (`sc50`/`sc90` = 50%/90% starcoder, `p2o10`/`p2o50` = 10%/50% pes2o).
 
     Each figure plots the chosen metric vs. repetition count (log X, power-of-2 ticks)
     with:
@@ -2259,6 +2268,7 @@ def _(
         _p2o_sources = [
             ("dclm", "#1f77b4", "baseline", "dclm"),
             ("p2o50", "#ff7f0e", "famB", "p2o50"),
+            ("p2o10", "#9467bd", "famB", "p2o10"),
             ("pes2o", "#2ca02c", "baseline", "pes2o"),
         ]
         _specs = [
@@ -2291,11 +2301,11 @@ def _(
     arch_color,
     arch_dash,
     arch_factor_legend,
+    arch_of_run,
     axis_label,
     collect_baseline_points,
     factor_palette,
     filter_rep_points,
-    get_model_type,
     get_reps,
     keep_arch,
     metric_value,
@@ -2303,13 +2313,18 @@ def _(
     plt,
 ):
     def collect_famB_points(df, name_substr, model_type, metric):
-        """Sorted (reps, value) points for famB runs matching a name substring."""
+        """Sorted (reps, value) points for famB runs matching a name substring.
+
+        Architecture comes from ``arch_of_run`` (run-name suffix, tags as fallback)
+        because some famB sweeps — e.g. ``p2o10`` — are only tagged ``MoE`` and would
+        otherwise be dropped as "other".
+        """
         by_reps: dict = {}
         for _, row in df.iterrows():
             name = str(row.get("Name", ""))
             if "famB" not in name or name_substr not in name:
                 continue
-            if get_model_type(row) != model_type:
+            if arch_of_run(row) != model_type:
                 continue
             reps = get_reps(row)
             loss = metric_value(row, metric)
@@ -2444,10 +2459,11 @@ def _(
     sel_famB_p2o_arch,
 ):
     # Plot 2: pes2o family. Color = source; line style + shade = architecture.
-    # Order (and thus palette assignment) is dclm, p2o50, pes2o.
+    # Order (and thus palette assignment) is dclm, p2o50, p2o10, pes2o.
     _sources = [
         ("dclm", "#1f77b4", "baseline", "dclm"),
         ("p2o50", "#ff7f0e", "famB", "p2o50"),
+        ("p2o10", "#9467bd", "famB", "p2o10"),
         ("pes2o", "#2ca02c", "baseline", "pes2o"),
     ]
     _out = render_side_by_side(
