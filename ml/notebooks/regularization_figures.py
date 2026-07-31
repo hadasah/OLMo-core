@@ -709,7 +709,7 @@ def _(json, os):
 
 
 @app.cell(hide_code=True)
-def _(mo, os, plt):
+def _(METRIC_SHORTNAMES, mo, os, plt):
     # ------------------------------------------------------------------
     # PDF export: every figure is written to ml/figures/ when generated.
     # ------------------------------------------------------------------
@@ -766,6 +766,15 @@ def _(mo, os, plt):
         sel = [a for a in ARCH_ORDER if a in (archs or [])]
         return "_".join(sel) if sel else "none"
 
+    def metric_tag(metric):
+        """Short, filename-friendly name for a metric.
+
+        Uses ``METRIC_SHORTNAMES`` when the metric is listed there (e.g.
+        ``train/CE loss`` -> ``train_loss``); otherwise the raw metric name is used
+        and ``export_pdf`` sanitizes it.
+        """
+        return METRIC_SHORTNAMES.get(metric, metric)
+
     def export_pdf(fig, subfolder, *parts, close=True):
         """Save `fig` to ml/figures/<subfolder>/<parts joined by '__'>.pdf.
 
@@ -792,7 +801,7 @@ def _(mo, os, plt):
         listing = "\n".join(f"- `{p}`" for p in paths)
         return mo.md(f"**Exported {len(paths)} figure(s) to `ml/figures/`:**\n\n{listing}")
 
-    return arch_tag, export_pdf, export_report
+    return arch_tag, export_pdf, export_report, metric_tag
 
 
 @app.cell(hide_code=True)
@@ -910,6 +919,21 @@ def _(mo, raw_df):
     )
 
 
+@app.cell
+def _():
+    METRIC_SHORTNAMES = {
+        "train/CE loss": "train_loss",
+        "eval/lm/dolma_common-crawl-validation/CE loss": "eval_dolma_cc_loss",
+        "eval/lm/dolma_pes2o-validation/CE loss": "eval_dolma_pes2o_loss", 
+        "eval/lm/dolma_stack-validation/CE loss": "eval_dolma_stack_loss",
+        "eval/lm/dolma_wiki-validation/CE loss": "eval_dolma_wiki_loss", 
+        "eval/lm/wikitext_103-validation/CE loss": "eval_wikitext_loss",
+        "eval/downstream/hellaswag (CE loss)": "eval_hellaswag_loss",
+        "train/router 0 load imbalance": "load_imbalance",
+    }
+    return (METRIC_SHORTNAMES,)
+
+
 @app.cell(hide_code=True)
 def _(
     arch_tag,
@@ -918,6 +942,7 @@ def _(
     export_report,
     finished_df,
     make_repetition_figure,
+    metric_tag,
     mo,
     sel_dclm_80m,
     sel_dclm_80m_arch,
@@ -934,7 +959,7 @@ def _(
 ):
     # Export every Group 1 & 2 plot. Group 1 (the full olmo mix) goes to
     # olmoe_mix/, the single-source mixtures of Group 2 to single_domain/.
-    # Name: <data source>__<scale>__<architectures>[__<metric>].
+    # Name: <data source>__<scale>__<architectures>__<metric>.
     if not export_btn_g12.value:
         _out = mo.md("*Click **Export images** to write this column's PDFs.*")
     else:
@@ -948,18 +973,16 @@ def _(
         ]
         _paths = []
         for _sub, _tag, _scale, _sel, _arch in _specs:
-            _metrics = list(_sel.value)
-            # The metric is not part of the name for these columns; append it only
-            # when several are selected so the files cannot overwrite each other.
-            _multi = len(_metrics) > 1
-            for _m in _metrics:
+            # One separate image per selected metric, always suffixed with the
+            # short metric name.
+            for _m in _sel.value:
                 _fig = make_repetition_figure(
                     finished_df, _tag, _scale, _m, include_archs=_arch.value
                 )
                 _paths.append(
                     export_pdf(
                         _fig, _sub, _tag, _scale, arch_tag(_arch.value),
-                        _m if _multi else None,
+                        metric_tag(_m),
                     )
                 )
         _out = export_report(_paths)
@@ -979,6 +1002,7 @@ def _(
     export_report,
     finished_df,
     make_factor_figure,
+    metric_tag,
     mo,
     router_field,
     sel_dropout,
@@ -995,7 +1019,7 @@ def _(
     sel_weight_decay_arch,
 ):
     # Export every Group 3 / 3b regularizer sweep to regularizers/.
-    # Name: olmo_mix__80M__<architectures>__<varied feature>[__<metric>].
+    # Name: olmo_mix__80M__<architectures>__<varied feature>__<metric>.
     if not export_btn_g3.value:
         _out = mo.md("*Click **Export images** to write this column's PDFs.*")
     else:
@@ -1019,9 +1043,9 @@ def _(
         ]
         _paths = []
         for _feature, _sel, _arch, _kw in _specs:
-            _metrics = list(_sel.value)
-            _multi = len(_metrics) > 1
-            for _m in _metrics:
+            # One separate image per selected metric, always suffixed with the
+            # short metric name.
+            for _m in _sel.value:
                 _fig = make_factor_figure(
                     finished_df,
                     _kw["factor_col"],
@@ -1037,7 +1061,7 @@ def _(
                 _paths.append(
                     export_pdf(
                         _fig, "regularizers", "olmo_mix", "80M",
-                        arch_tag(_arch.value), _feature, _m if _multi else None,
+                        arch_tag(_arch.value), _feature, metric_tag(_m),
                     )
                 )
         _out = export_report(_paths)
@@ -1054,6 +1078,7 @@ def _(
     finished_df,
     make_famA_figure,
     make_famA_rep_figure,
+    metric_tag,
     mo,
     sel_famA,
     sel_famA_arch,
@@ -1061,7 +1086,7 @@ def _(
     sel_famA_rep_arch,
 ):
     # Export the two Group 4 (famA) plots to filtering/.
-    # Name: famA__80M__<architectures>__<x axis>[__<metric>].
+    # Name: famA__80M__<architectures>__<x axis>__<metric>.
     if not export_btn_g4.value:
         _out = mo.md("*Click **Export images** to write this column's PDFs.*")
     else:
@@ -1071,14 +1096,14 @@ def _(
         ]
         _paths = []
         for _feature, _sel, _arch, _builder in _specs:
-            _metrics = list(_sel.value)
-            _multi = len(_metrics) > 1
-            for _m in _metrics:
+            # One separate image per selected metric, always suffixed with the
+            # short metric name.
+            for _m in _sel.value:
                 _fig = _builder(finished_df, _m, include_archs=_arch.value)
                 _paths.append(
                     export_pdf(
                         _fig, "filtering", "famA", "80M",
-                        arch_tag(_arch.value), _feature, _m if _multi else None,
+                        arch_tag(_arch.value), _feature, metric_tag(_m),
                     )
                 )
         _out = export_report(_paths)
@@ -1094,6 +1119,7 @@ def _(
     export_report,
     finished_df,
     make_training_curve_figure,
+    metric_tag,
     mo,
     sel_curve_dclm_80m,
     sel_curve_dclm_80m_arch,
@@ -1130,7 +1156,8 @@ def _(
                 )
                 _paths.append(
                     export_pdf(
-                        _fig, "history", _tag, _scale, arch_tag(_arch.value), _m
+                        _fig, "history", _tag, _scale, arch_tag(_arch.value),
+                        metric_tag(_m),
                     )
                 )
         _out = export_report(_paths)
@@ -1146,6 +1173,7 @@ def _(
     export_report,
     finished_df,
     make_training_curve_figure,
+    metric_tag,
     mo,
     sel_load_dclm_80m,
     sel_load_dclm_80m_arch,
@@ -1182,7 +1210,8 @@ def _(
                 )
                 _paths.append(
                     export_pdf(
-                        _fig, "history", _tag, _scale, arch_tag(_arch.value), _m
+                        _fig, "history", _tag, _scale, arch_tag(_arch.value),
+                        metric_tag(_m),
                     )
                 )
         _out = export_report(_paths)
@@ -2248,6 +2277,7 @@ def _(
     export_report,
     finished_df,
     make_famB_figure,
+    metric_tag,
     mo,
     sel_famB_p2o,
     sel_famB_p2o_arch,
@@ -2255,7 +2285,7 @@ def _(
     sel_famB_sc_arch,
 ):
     # Export the two Group 5 (famB) family plots to mix_varied_rep/.
-    # Name: <family data source>__80M__<architectures>[__<metric>].
+    # Name: <family data source>__80M__<architectures>__<metric>.
     if not export_btn_g5.value:
         _out = mo.md("*Click **Export images** to write this column's PDFs.*")
     else:
@@ -2277,9 +2307,9 @@ def _(
         ]
         _paths = []
         for _family, _sel, _arch, _sources in _specs:
-            _metrics = list(_sel.value)
-            _multi = len(_metrics) > 1
-            for _m in _metrics:
+            # One separate image per selected metric, always suffixed with the
+            # short metric name.
+            for _m in _sel.value:
                 _fig = make_famB_figure(
                     finished_df, _m, f"famB ({_family}): {_m} vs. repetition",
                     _sources, include_archs=_arch.value, exclude_reps=[128, 256],
@@ -2287,7 +2317,7 @@ def _(
                 _paths.append(
                     export_pdf(
                         _fig, "mix_varied_rep", _family, "80M",
-                        arch_tag(_arch.value), _m if _multi else None,
+                        arch_tag(_arch.value), metric_tag(_m),
                     )
                 )
         _out = export_report(_paths)
