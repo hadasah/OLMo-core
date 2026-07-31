@@ -27,8 +27,8 @@ MODELS = [
 #                 unique pool nested across rep (higher R => smaller head-prefix), ratio fixed.
 #   Family B:     generalist primary + repeated specialist minority (rep ladder x architecture).
 RUN_FAMILY_A = False
-RUN_FAMILY_A_REP = True
-RUN_FAMILY_B = False
+RUN_FAMILY_A_REP = False
+RUN_FAMILY_B = True
 INCLUDE_GRANULARITY = False
 
 
@@ -40,6 +40,9 @@ def build_family_b_subgrids():
         ("sc50", "dclm_only", "starcoder_only", "0.5"),
         ("sc90", "dclm_only", "starcoder_only", "0.1"),
         ("p2o50", "dclm_only", "pes2o_only", "0.5"),
+        # p2o10 mirrors sc90 for pes2o, so both specialists are covered at a 50% and a
+        # 10% minority share. Appended last, so its 18 subgrids are indices 54-71.
+        ("p2o10", "dclm_only", "pes2o_only", "0.1"),
     ]
     reps = ["1", "2", "4", "8", "16", "32"]
     arches = [
