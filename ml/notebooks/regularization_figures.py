@@ -1178,7 +1178,7 @@ def _(
     return
 
 
-@app.cell(hide_code=True)
+@app.cell(column=2, hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Group 3 — Regularizer sweeps: dropout, weight decay & max grad norm
@@ -1643,7 +1643,7 @@ def _(
     return
 
 
-@app.cell(hide_code=True)
+@app.cell(column=3, hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Group 4 — `famA` runs
@@ -1868,7 +1868,7 @@ def _(
     return
 
 
-@app.cell(hide_code=True)
+@app.cell(column=4, hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Group 5 — `famB` runs: metric vs. repetition
@@ -2067,7 +2067,7 @@ def _(
     return
 
 
-@app.cell(column=2, hide_code=True)
+@app.cell(column=5, hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Training curves — metric vs. train step (baseline runs)
@@ -2512,7 +2512,7 @@ def _():
     return (mo,)
 
 
-@app.cell(column=3, hide_code=True)
+@app.cell(column=6, hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Router load metrics — metric vs. train step (baseline runs)
