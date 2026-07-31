@@ -2267,8 +2267,8 @@ def _(
         ]
         _p2o_sources = [
             ("dclm", "#1f77b4", "baseline", "dclm"),
-            ("p2o50", "#ff7f0e", "famB", "p2o50"),
             ("p2o10", "#9467bd", "famB", "p2o10"),
+            ("p2o50", "#ff7f0e", "famB", "p2o50"),
             ("pes2o", "#2ca02c", "baseline", "pes2o"),
         ]
         _specs = [
@@ -2459,11 +2459,11 @@ def _(
     sel_famB_p2o_arch,
 ):
     # Plot 2: pes2o family. Color = source; line style + shade = architecture.
-    # Order (and thus palette assignment) is dclm, p2o50, p2o10, pes2o.
+    # Order (and thus palette assignment) is dclm, p2o10, p2o50, pes2o.
     _sources = [
         ("dclm", "#1f77b4", "baseline", "dclm"),
-        ("p2o50", "#ff7f0e", "famB", "p2o50"),
         ("p2o10", "#9467bd", "famB", "p2o10"),
+        ("p2o50", "#ff7f0e", "famB", "p2o50"),
         ("pes2o", "#2ca02c", "baseline", "pes2o"),
     ]
     _out = render_side_by_side(
