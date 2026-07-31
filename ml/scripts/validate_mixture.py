@@ -32,6 +32,7 @@ FAMILY_B_CELLS = [
     ("sc50", "dclm_only", "starcoder_only", 0.5),
     ("sc90", "dclm_only", "starcoder_only", 0.1),
     ("p2o50", "dclm_only", "pes2o_only", 0.5),
+    ("p2o10", "dclm_only", "pes2o_only", 0.1),
 ]
 FAMILY_B_REPS = [1, 2, 4, 8, 16, 32]
 
