@@ -700,7 +700,7 @@ def _(json, os):
 
 
 @app.cell(hide_code=True)
-def _(os):
+def _(mo, os, plt):
     # ------------------------------------------------------------------
     # PDF export: every figure is written to ml/figures/ when generated.
     # ------------------------------------------------------------------
@@ -743,11 +743,51 @@ def _(os):
             print(f"NOTE: could not save PDF '{fname}': {type(e).__name__}: {e}")
         return fig
 
-    return (save_pdf,)
+    # ------------------------------------------------------------------
+    # Organized export used by the per-column "Export images" buttons.
+    # Files land in ml/figures/<subfolder>/ and are named by their
+    # distinguishing features joined with "__", in the order:
+    #   data source __ model scale __ architectures __ varied feature
+    # with the metric appended last for the training-history columns.
+    # ------------------------------------------------------------------
+    ARCH_ORDER = ["dense", "moe32", "moe64"]
+
+    def arch_tag(archs):
+        """Canonical architecture part of a filename, e.g. ``dense_moe32_moe64``."""
+        sel = [a for a in ARCH_ORDER if a in (archs or [])]
+        return "_".join(sel) if sel else "none"
+
+    def export_pdf(fig, subfolder, *parts, close=True):
+        """Save `fig` to ml/figures/<subfolder>/<parts joined by '__'>.pdf.
+
+        Empty/None parts are dropped. The figure is closed after saving so a bulk
+        export does not accumulate open figures.
+        """
+        out_dir = os.path.join(FIGURES_DIR, subfolder)
+        os.makedirs(out_dir, exist_ok=True)
+        name = "__".join(_sanitize(str(p)) for p in parts if p not in (None, ""))
+        path = os.path.join(out_dir, f"{name}.pdf")
+        try:
+            fig.savefig(path, bbox_inches="tight")
+        except Exception as e:  # pragma: no cover - env dependent
+            print(f"NOTE: could not save PDF '{path}': {type(e).__name__}: {e}")
+        finally:
+            if close:
+                plt.close(fig)
+        return os.path.join(subfolder, f"{name}.pdf")
+
+    def export_report(paths):
+        """Markdown summary listing what a column export wrote."""
+        if not paths:
+            return mo.md("*Nothing to export — select at least one metric.*")
+        listing = "\n".join(f"- `{p}`" for p in paths)
+        return mo.md(f"**Exported {len(paths)} figure(s) to `ml/figures/`:**\n\n{listing}")
+
+    return arch_tag, export_pdf, export_report
 
 
 @app.cell(hide_code=True)
-def _(mo, raw_df, save_pdf):
+def _(mo, raw_df):
     # ------------------------------------------------------------------
     # Per-plot metric selection utilities.
     # ------------------------------------------------------------------
@@ -829,33 +869,28 @@ def _(mo, raw_df, save_pdf):
             label=label,
         )
 
-    def render_side_by_side(metrics, build_fig, plot_key):
+    def render_side_by_side(metrics, build_fig, plot_key=None):
         """Render one figure per selected metric, laid out side by side.
 
         `build_fig(metric)` should return a matplotlib figure for a single metric.
-        Each figure is also saved to ml/figures/ as `<plot_key>__<metric>.pdf`.
+        PDFs are *not* written here — use a column's "Export images" button, which
+        saves into the organized ``ml/figures/<subfolder>/`` layout.
         """
         if not metrics:
             return mo.md("*Select at least one metric.*")
-        figs = []
-        for m in metrics:
-            fig = build_fig(m)
-            save_pdf(fig, plot_key, m)
-            figs.append(fig)
+        figs = [build_fig(m) for m in metrics]
         return mo.hstack(figs, widths="equal", gap=1, wrap=True)
 
-    def render_faceted(metrics, build_fig, plot_key):
+    def render_faceted(metrics, build_fig, plot_key=None):
         """Render a single faceted figure covering all selected metrics at once.
 
         `build_fig(metrics)` should return one matplotlib figure whose facets already
-        span the metric list (e.g. metrics as rows, architectures as columns). The
-        figure is saved to ml/figures/ as `<plot_key>__facets.pdf`.
+        span the metric list (e.g. metrics as rows, architectures as columns). PDFs
+        are written by the column's "Export images" button, not here.
         """
         if not metrics:
             return mo.md("*Select at least one metric.*")
-        fig = build_fig(metrics)
-        save_pdf(fig, plot_key, "facets")
-        return fig
+        return build_fig(metrics)
 
     return (
         arch_multiselect,
@@ -866,17 +901,304 @@ def _(mo, raw_df, save_pdf):
     )
 
 
+@app.cell(hide_code=True)
+def _(
+    arch_tag,
+    export_btn_g12,
+    export_pdf,
+    export_report,
+    finished_df,
+    make_repetition_figure,
+    mo,
+    sel_dclm_80m,
+    sel_dclm_80m_arch,
+    sel_olmo_200m,
+    sel_olmo_200m_arch,
+    sel_olmo_80m,
+    sel_olmo_80m_arch,
+    sel_pes2o_80m,
+    sel_pes2o_80m_arch,
+    sel_starcoder_80m,
+    sel_starcoder_80m_arch,
+    sel_wiki_80m,
+    sel_wiki_80m_arch,
+):
+    # Export every Group 1 & 2 plot. Group 1 (the full olmo mix) goes to
+    # olmoe_mix/, the single-source mixtures of Group 2 to single_domain/.
+    # Name: <data source>__<scale>__<architectures>[__<metric>].
+    if not export_btn_g12.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _specs = [
+            ("olmoe_mix", "olmo_mix", "80M", sel_olmo_80m, sel_olmo_80m_arch),
+            ("olmoe_mix", "olmo_mix", "200M", sel_olmo_200m, sel_olmo_200m_arch),
+            ("single_domain", "dclm", "80M", sel_dclm_80m, sel_dclm_80m_arch),
+            ("single_domain", "starcoder", "80M", sel_starcoder_80m, sel_starcoder_80m_arch),
+            ("single_domain", "pes2o", "80M", sel_pes2o_80m, sel_pes2o_80m_arch),
+            ("single_domain", "wiki", "80M", sel_wiki_80m, sel_wiki_80m_arch),
+        ]
+        _paths = []
+        for _sub, _tag, _scale, _sel, _arch in _specs:
+            _metrics = list(_sel.value)
+            # The metric is not part of the name for these columns; append it only
+            # when several are selected so the files cannot overwrite each other.
+            _multi = len(_metrics) > 1
+            for _m in _metrics:
+                _fig = make_repetition_figure(
+                    finished_df, _tag, _scale, _m, include_archs=_arch.value
+                )
+                _paths.append(
+                    export_pdf(
+                        _fig, _sub, _tag, _scale, arch_tag(_arch.value),
+                        _m if _multi else None,
+                    )
+                )
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    DROPOUT_COL,
+    FOM_COL,
+    MGN_COL,
+    WD_COL,
+    arch_tag,
+    export_btn_g3,
+    export_pdf,
+    export_report,
+    finished_df,
+    make_factor_figure,
+    mo,
+    router_field,
+    sel_dropout,
+    sel_dropout_arch,
+    sel_max_grad_norm,
+    sel_max_grad_norm_arch,
+    sel_moe_eom,
+    sel_moe_eom_arch,
+    sel_moe_fom,
+    sel_moe_fom_arch,
+    sel_moe_jitter,
+    sel_moe_jitter_arch,
+    sel_weight_decay,
+    sel_weight_decay_arch,
+):
+    # Export every Group 3 / 3b regularizer sweep to regularizers/.
+    # Name: olmo_mix__80M__<architectures>__<varied feature>[__<metric>].
+    if not export_btn_g3.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        # (varied feature, selector, arch selector, extra make_factor_figure kwargs)
+        _specs = [
+            ("dropout", sel_dropout, sel_dropout_arch,
+             dict(factor_col=DROPOUT_COL, baseline_value=None, factor_key="dropout")),
+            ("weight_decay", sel_weight_decay, sel_weight_decay_arch,
+             dict(factor_col=WD_COL, baseline_value=0.1, factor_key="weight_decay")),
+            ("max_grad_norm", sel_max_grad_norm, sel_max_grad_norm_arch,
+             dict(factor_col=MGN_COL, baseline_value=1.0, nan_label="0 (no clip)",
+                  factor_key="max_grad_norm")),
+            ("jitter_eps", sel_moe_jitter, sel_moe_jitter_arch,
+             dict(factor_col=None, baseline_value=None, factor_key="jitter_eps",
+                  value_getter=lambda row: router_field(row, "jitter_eps"))),
+            ("eom_prob", sel_moe_eom, sel_moe_eom_arch,
+             dict(factor_col=None, baseline_value=None, factor_key="eom_prob",
+                  value_getter=lambda row: router_field(row, "eom_prob"))),
+            ("fom_prob", sel_moe_fom, sel_moe_fom_arch,
+             dict(factor_col=FOM_COL, baseline_value=None, factor_key="fom_prob")),
+        ]
+        _paths = []
+        for _feature, _sel, _arch, _kw in _specs:
+            _metrics = list(_sel.value)
+            _multi = len(_metrics) > 1
+            for _m in _metrics:
+                _fig = make_factor_figure(
+                    finished_df,
+                    _kw["factor_col"],
+                    _feature,
+                    _kw["baseline_value"],
+                    _m,
+                    include_archs=_arch.value,
+                    exclude_reps=[128, 256],
+                    nan_label=_kw.get("nan_label"),
+                    value_getter=_kw.get("value_getter"),
+                    factor_key=_kw["factor_key"],
+                )
+                _paths.append(
+                    export_pdf(
+                        _fig, "regularizers", "olmo_mix", "80M",
+                        arch_tag(_arch.value), _feature, _m if _multi else None,
+                    )
+                )
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    arch_tag,
+    export_btn_g4,
+    export_pdf,
+    export_report,
+    finished_df,
+    make_famA_figure,
+    make_famA_rep_figure,
+    mo,
+    sel_famA,
+    sel_famA_arch,
+    sel_famA_rep,
+    sel_famA_rep_arch,
+):
+    # Export the two Group 4 (famA) plots to filtering/.
+    # Name: famA__80M__<architectures>__<x axis>[__<metric>].
+    if not export_btn_g4.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _specs = [
+            ("pct_dclm", sel_famA, sel_famA_arch, make_famA_figure),
+            ("repetition", sel_famA_rep, sel_famA_rep_arch, make_famA_rep_figure),
+        ]
+        _paths = []
+        for _feature, _sel, _arch, _builder in _specs:
+            _metrics = list(_sel.value)
+            _multi = len(_metrics) > 1
+            for _m in _metrics:
+                _fig = _builder(finished_df, _m, include_archs=_arch.value)
+                _paths.append(
+                    export_pdf(
+                        _fig, "filtering", "famA", "80M",
+                        arch_tag(_arch.value), _feature, _m if _multi else None,
+                    )
+                )
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    arch_tag,
+    export_btn_curves,
+    export_pdf,
+    export_report,
+    finished_df,
+    make_training_curve_figure,
+    mo,
+    sel_curve_dclm_80m,
+    sel_curve_dclm_80m_arch,
+    sel_curve_olmo_200m,
+    sel_curve_olmo_200m_arch,
+    sel_curve_olmo_80m,
+    sel_curve_olmo_80m_arch,
+    sel_curve_pes2o_80m,
+    sel_curve_pes2o_80m_arch,
+    sel_curve_starcoder_80m,
+    sel_curve_starcoder_80m_arch,
+    sel_curve_wiki_80m,
+    sel_curve_wiki_80m_arch,
+):
+    # Export the training-curve facets to history/, one PDF per metric so the
+    # metric name is meaningful. Name:
+    #   <data source>__<scale>__<architectures>__<metric>.
+    if not export_btn_curves.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _specs = [
+            ("olmo_mix", "80M", sel_curve_olmo_80m, sel_curve_olmo_80m_arch),
+            ("olmo_mix", "200M", sel_curve_olmo_200m, sel_curve_olmo_200m_arch),
+            ("dclm", "80M", sel_curve_dclm_80m, sel_curve_dclm_80m_arch),
+            ("starcoder", "80M", sel_curve_starcoder_80m, sel_curve_starcoder_80m_arch),
+            ("pes2o", "80M", sel_curve_pes2o_80m, sel_curve_pes2o_80m_arch),
+            ("wiki", "80M", sel_curve_wiki_80m, sel_curve_wiki_80m_arch),
+        ]
+        _paths = []
+        for _tag, _scale, _sel, _arch in _specs:
+            for _m in _sel.value:
+                _fig = make_training_curve_figure(
+                    finished_df, _tag, _scale, [_m], include_archs=_arch.value
+                )
+                _paths.append(
+                    export_pdf(
+                        _fig, "history", _tag, _scale, arch_tag(_arch.value), _m
+                    )
+                )
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    arch_tag,
+    export_btn_load,
+    export_pdf,
+    export_report,
+    finished_df,
+    make_training_curve_figure,
+    mo,
+    sel_load_dclm_80m,
+    sel_load_dclm_80m_arch,
+    sel_load_olmo_200m,
+    sel_load_olmo_200m_arch,
+    sel_load_olmo_80m,
+    sel_load_olmo_80m_arch,
+    sel_load_pes2o_80m,
+    sel_load_pes2o_80m_arch,
+    sel_load_starcoder_80m,
+    sel_load_starcoder_80m_arch,
+    sel_load_wiki_80m,
+    sel_load_wiki_80m_arch,
+):
+    # Export the router-load facets to history/ (same folder as the training
+    # curves; the metric name keeps them distinct). Name:
+    #   <data source>__<scale>__<architectures>__<metric>.
+    if not export_btn_load.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _specs = [
+            ("olmo_mix", "80M", sel_load_olmo_80m, sel_load_olmo_80m_arch),
+            ("olmo_mix", "200M", sel_load_olmo_200m, sel_load_olmo_200m_arch),
+            ("dclm", "80M", sel_load_dclm_80m, sel_load_dclm_80m_arch),
+            ("starcoder", "80M", sel_load_starcoder_80m, sel_load_starcoder_80m_arch),
+            ("pes2o", "80M", sel_load_pes2o_80m, sel_load_pes2o_80m_arch),
+            ("wiki", "80M", sel_load_wiki_80m, sel_load_wiki_80m_arch),
+        ]
+        _paths = []
+        for _tag, _scale, _sel, _arch in _specs:
+            for _m in _sel.value:
+                _fig = make_training_curve_figure(
+                    finished_df, _tag, _scale, [_m], include_archs=_arch.value
+                )
+                _paths.append(
+                    export_pdf(
+                        _fig, "history", _tag, _scale, arch_tag(_arch.value), _m
+                    )
+                )
+        _out = export_report(_paths)
+    _out
+    return
+
+
 @app.cell(column=1, hide_code=True)
 def _(mo):
-    mo.md(r"""
+    export_btn_g12 = mo.ui.run_button(label="Export images")
+    mo.vstack([
+        mo.md(r"""
     ## Group 1 & 2 — Final loss vs. repetition (baseline runs)
 
     For each data mixture we plot Dense, MoE32 and MoE64 **baseline** runs (tag
     `baseline`, i.e. no dropout/EOM/FOM/jitter). Metric on Y, repetition count on a
     log X axis. If more than one baseline run exists at the same repetition count, a
     warning is printed and the **lowest** value is kept.
-    """)
-    return
+
+    **Export images** writes Group 1 to `ml/figures/olmoe_mix/` and Group 2 to
+    `ml/figures/single_domain/`.
+    """),
+        export_btn_g12,
+    ])
+    return (export_btn_g12,)
 
 
 @app.cell(hide_code=True)
@@ -1180,7 +1502,9 @@ def _(
 
 @app.cell(column=2, hide_code=True)
 def _(mo):
-    mo.md(r"""
+    export_btn_g3 = mo.ui.run_button(label="Export images")
+    mo.vstack([
+        mo.md(r"""
     ## Group 3 — Regularizer sweeps: dropout, weight decay & max grad norm
 
     Model type is encoded as **color** (blue = dense, green = moe32, red = moe64).
@@ -1189,8 +1513,13 @@ def _(mo):
     to the `olmo_mix` mixture at 80M scale (where the regularizer sweeps live). Note
     the sweeps currently only cover dense and moe64. For max grad norm, the baseline
     is the default `1.0`; a `null` (no clipping) setting is shown as its own series.
-    """)
-    return
+
+    **Export images** writes this column (Groups 3 and 3b) to
+    `ml/figures/regularizers/`.
+    """),
+        export_btn_g3,
+    ])
+    return (export_btn_g3,)
 
 
 @app.cell(hide_code=True)
@@ -1645,7 +1974,9 @@ def _(
 
 @app.cell(column=3, hide_code=True)
 def _(mo):
-    mo.md(r"""
+    export_btn_g4 = mo.ui.run_button(label="Export images")
+    mo.vstack([
+        mo.md(r"""
     ## Group 4 — `famA` runs
 
     Every finished run whose name contains `famA`. Color = model type (parsed from
@@ -1656,8 +1987,12 @@ def _(mo):
        + shade encode the repetition count.
     2. **metric vs. repetition count** (log X; `rep{N}x` in the name, original famA
        runs are rep 1) — line style + shade encode %dclm.
-    """)
-    return
+
+    **Export images** writes this column to `ml/figures/filtering/`.
+    """),
+        export_btn_g4,
+    ])
+    return (export_btn_g4,)
 
 
 @app.cell(hide_code=True)
@@ -1870,7 +2205,9 @@ def _(
 
 @app.cell(column=4, hide_code=True)
 def _(mo):
-    mo.md(r"""
+    export_btn_g5 = mo.ui.run_button(label="Export images")
+    mo.vstack([
+        mo.md(r"""
     ## Group 5 — `famB` runs: metric vs. repetition
 
     `famB` runs mix a single source into `olmo_mix` at a fixed fraction, encoded in
@@ -1886,7 +2223,65 @@ def _(mo):
     The reference lines are the `dclm` and single-source **baseline** runs (tag
     `baseline`); duplicate baseline runs at a rep count keep the lowest value (see
     Group 1 & 2).
-    """)
+
+    **Export images** writes this column to `ml/figures/mix_varied_rep/`.
+    """),
+        export_btn_g5,
+    ])
+    return (export_btn_g5,)
+
+
+@app.cell(hide_code=True)
+def _(
+    arch_tag,
+    export_btn_g5,
+    export_pdf,
+    export_report,
+    finished_df,
+    make_famB_figure,
+    mo,
+    sel_famB_p2o,
+    sel_famB_p2o_arch,
+    sel_famB_sc,
+    sel_famB_sc_arch,
+):
+    # Export the two Group 5 (famB) family plots to mix_varied_rep/.
+    # Name: <family data source>__80M__<architectures>[__<metric>].
+    if not export_btn_g5.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _sc_sources = [
+            ("dclm", "#1f77b4", "baseline", "dclm"),
+            ("sc90", "#d62728", "famB", "sc90"),
+            ("sc50", "#ff7f0e", "famB", "sc50"),
+            ("starcoder", "#2ca02c", "baseline", "starcoder"),
+        ]
+        _p2o_sources = [
+            ("dclm", "#1f77b4", "baseline", "dclm"),
+            ("p2o50", "#ff7f0e", "famB", "p2o50"),
+            ("pes2o", "#2ca02c", "baseline", "pes2o"),
+        ]
+        _specs = [
+            ("starcoder", sel_famB_sc, sel_famB_sc_arch, _sc_sources),
+            ("pes2o", sel_famB_p2o, sel_famB_p2o_arch, _p2o_sources),
+        ]
+        _paths = []
+        for _family, _sel, _arch, _sources in _specs:
+            _metrics = list(_sel.value)
+            _multi = len(_metrics) > 1
+            for _m in _metrics:
+                _fig = make_famB_figure(
+                    finished_df, _m, f"famB ({_family}): {_m} vs. repetition",
+                    _sources, include_archs=_arch.value, exclude_reps=[128, 256],
+                )
+                _paths.append(
+                    export_pdf(
+                        _fig, "mix_varied_rep", _family, "80M",
+                        arch_tag(_arch.value), _m if _multi else None,
+                    )
+                )
+        _out = export_report(_paths)
+    _out
     return
 
 
@@ -2069,7 +2464,9 @@ def _(
 
 @app.cell(column=5, hide_code=True)
 def _(mo):
-    mo.md(r"""
+    export_btn_curves = mo.ui.run_button(label="Export images")
+    mo.vstack([
+        mo.md(r"""
     ## Training curves — metric vs. train step (baseline runs)
 
     Per-step training curves from the downloaded W&B history
@@ -2077,8 +2474,13 @@ def _(mo):
     mixtures) at 80M / 200M. Each plot is **faceted**: one column per architecture
     (dense / moe32 / moe64) and one row per selected metric, with one line per
     repetition count (color = rep count).
-    """)
-    return
+
+    **Export images** writes this column to `ml/figures/history/`, one file per
+    metric (each a single-metric facet row).
+    """),
+        export_btn_curves,
+    ])
+    return (export_btn_curves,)
 
 
 @app.cell(hide_code=True)
@@ -2514,7 +2916,9 @@ def _():
 
 @app.cell(column=6, hide_code=True)
 def _(mo):
-    mo.md(r"""
+    export_btn_load = mo.ui.run_button(label="Export images")
+    mo.vstack([
+        mo.md(r"""
     ## Router load metrics — metric vs. train step (baseline runs)
 
     Identical faceting to the training-curve plots above (one column per
@@ -2523,8 +2927,13 @@ def _(mo):
     in `load imbalance` or `load balancing loss unscaled` (the aggregate
     `train/router 0 ...` plus the per-block variants). Dense is excluded since these
     are MoE-only.
-    """)
-    return
+
+    **Export images** writes this column to `ml/figures/history/` (alongside the
+    training curves), one file per metric.
+    """),
+        export_btn_load,
+    ])
+    return (export_btn_load,)
 
 
 @app.cell(hide_code=True)
