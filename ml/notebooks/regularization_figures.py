@@ -805,14 +805,14 @@ def _(METRIC_SHORTNAMES, mo, os, plt):
 
 
 @app.cell(hide_code=True)
-def _(mo, raw_df):
+def _(METRIC_SHORTNAMES, mo, raw_df):
     # ------------------------------------------------------------------
     # Per-plot metric selection utilities.
     # ------------------------------------------------------------------
     def build_metric_options(df):
-        """Collect the plottable metric columns present in the data.
+        """Collect the plottable loss metrics present in the data.
 
-        Includes the train CE loss, every ``eval/lm/*/CE loss`` metric, and every
+        The train CE loss, every ``eval/lm/*/CE loss`` metric, and every
         ``eval/downstream/* (CE loss)`` metric (the non-``v2`` variant).
         """
         cols = list(df.columns)
@@ -827,7 +827,26 @@ def _(mo, raw_df):
                 options.append(c)
         return options
 
-    METRIC_OPTIONS = build_metric_options(raw_df)
+    def build_accuracy_options(df):
+        """Accuracy metrics, taken from ``METRIC_SHORTNAMES``.
+
+        These are not matched by the CE-loss patterns above, so they are pulled from
+        the shortname table (which is the list of accuracy metrics we care about) and
+        kept in its order. Only columns actually present in the data are offered.
+        """
+        cols = set(df.columns)
+        return [
+            c
+            for c in METRIC_SHORTNAMES
+            if "accuracy" in c.lower() and c in cols
+        ]
+
+    # Loss metrics only — used by the training-curve (history) dropdowns.
+    HISTORY_METRIC_OPTIONS = build_metric_options(raw_df)
+    # Loss + accuracy — used by the Group 1-5 dropdowns.
+    METRIC_OPTIONS = HISTORY_METRIC_OPTIONS + [
+        c for c in build_accuracy_options(raw_df) if c not in HISTORY_METRIC_OPTIONS
+    ]
 
     def build_load_metric_options(df):
         """Collect the MoE router load metrics present in the data.
@@ -856,10 +875,25 @@ def _(mo, raw_df):
     )
 
     def metric_multiselect(label, chosen_values=[]):
-        """A per-plot multi-select over the available metrics."""
+        """A per-plot multi-select over the loss + accuracy metrics.
+
+        Used by the Group 1-5 columns.
+        """
         return mo.ui.multiselect(
             options=METRIC_OPTIONS, value=(chosen_values if chosen_values else _DEFAULT_METRIC), label=label,
             # full_width=True,
+        )
+
+    def history_metric_multiselect(label, chosen_values=[]):
+        """A per-plot multi-select for the training-curve (history) column.
+
+        Loss metrics only — the accuracy metrics are offered on the Group 1-5
+        dropdowns instead.
+        """
+        return mo.ui.multiselect(
+            options=HISTORY_METRIC_OPTIONS,
+            value=(chosen_values if chosen_values else _DEFAULT_METRIC),
+            label=label,
         )
 
     def load_metric_multiselect(label, chosen_values=None):
@@ -912,6 +946,7 @@ def _(mo, raw_df):
 
     return (
         arch_multiselect,
+        history_metric_multiselect,
         load_metric_multiselect,
         metric_multiselect,
         render_faceted,
@@ -923,13 +958,30 @@ def _(mo, raw_df):
 def _():
     METRIC_SHORTNAMES = {
         "train/CE loss": "train_loss",
+        "eval/lm/c4_en-validation/CE loss": "eval_c4_loss",
+        "eval/lm/dolma_books-validation/CE loss": "eval_dolma_books_loss",
         "eval/lm/dolma_common-crawl-validation/CE loss": "eval_dolma_cc_loss",
         "eval/lm/dolma_pes2o-validation/CE loss": "eval_dolma_pes2o_loss", 
+        "eval/lm/dolma_reddit-validation/CE loss": "eval_dolma_reddit_loss",
         "eval/lm/dolma_stack-validation/CE loss": "eval_dolma_stack_loss",
         "eval/lm/dolma_wiki-validation/CE loss": "eval_dolma_wiki_loss", 
+        "eval/lm/ice-validation/CE loss": "eval_ice_loss",
+        "eval/lm/m2d2_s2orc-validation/CE loss": "eval_s2orc_loss",
+        "eval/lm/pile-validation/CE loss": "eval_pile_loss",
         "eval/lm/wikitext_103-validation/CE loss": "eval_wikitext_loss",
         "eval/downstream/hellaswag (CE loss)": "eval_hellaswag_loss",
-        "train/router 0 load imbalance": "load_imbalance",
+        "eval/downstream/boolq (CE loss)": "eval_boolq_loss",
+        "eval/downstream/mmlu_humanities_mc_5shot_test (CE loss)": "eval_mmlu_hum_loss",
+        "eval/downstream/mmlu_other_mc_5shot_test (CE loss)": "eval_mmlu_oth_loss",
+        "eval/downstream/mmlu_social_sciences_mc_5shot_test (CE loss)": "eval_mmlu_ss_loss",
+        "eval/downstream/mmlu_stem_mc_5shot_test (CE loss)": "eval_mmlu_stem_loss",
+        "eval/downstream/boolq (accuracy)": "eval_boolq_acc",
+        "eval/downstream/hellaswag (length-normalized accuracy)": "eval_hellaswag_acc",
+        "eval/downstream/mmlu_humanities_mc_5shot_test (length-normalized accuracy)": "eval_mmlu_hum_acc",
+        "eval/downstream/mmlu_other_mc_5shot_test (length-normalized accuracy)": "eval_mmlu_oth_acc",
+        "eval/downstream/mmlu_social_sciences_mc_5shot_test (length-normalized accuracy)": "eval_mmlu_ss_acc",
+        "eval/downstream/mmlu_stem_mc_5shot_test (length-normalized accuracy)": "eval_mmlu_stem_acc",
+        "train/router 0 load imbalance": "train_load_imbalance",
     }
     return (METRIC_SHORTNAMES,)
 
@@ -2777,8 +2829,8 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(arch_multiselect, metric_multiselect, mo):
-    sel_curve_olmo_80m = metric_multiselect(
+def _(arch_multiselect, history_metric_multiselect, mo):
+    sel_curve_olmo_80m = history_metric_multiselect(
         "curves: olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_curve_olmo_80m_arch = arch_multiselect("curves: olmo_mix 80M — architectures")
     mo.vstack([sel_curve_olmo_80m, sel_curve_olmo_80m_arch])
@@ -2805,8 +2857,8 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(arch_multiselect, metric_multiselect, mo):
-    sel_curve_olmo_200m = metric_multiselect(
+def _(arch_multiselect, history_metric_multiselect, mo):
+    sel_curve_olmo_200m = history_metric_multiselect(
         "curves: olmo_mix 200M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_curve_olmo_200m_arch = arch_multiselect("curves: olmo_mix 200M — architectures")
     mo.vstack([sel_curve_olmo_200m, sel_curve_olmo_200m_arch])
@@ -2841,8 +2893,8 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(arch_multiselect, metric_multiselect, mo):
-    sel_curve_dclm_80m = metric_multiselect(
+def _(arch_multiselect, history_metric_multiselect, mo):
+    sel_curve_dclm_80m = history_metric_multiselect(
         "curves: dclm 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_curve_dclm_80m_arch = arch_multiselect("curves: dclm 80M — architectures")
     mo.vstack([sel_curve_dclm_80m, sel_curve_dclm_80m_arch])
@@ -2869,8 +2921,8 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(arch_multiselect, metric_multiselect, mo):
-    sel_curve_starcoder_80m = metric_multiselect(
+def _(arch_multiselect, history_metric_multiselect, mo):
+    sel_curve_starcoder_80m = history_metric_multiselect(
         "curves: starcoder 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
     sel_curve_starcoder_80m_arch = arch_multiselect("curves: starcoder 80M — architectures")
     mo.vstack([sel_curve_starcoder_80m, sel_curve_starcoder_80m_arch])
@@ -2897,8 +2949,8 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(arch_multiselect, metric_multiselect, mo):
-    sel_curve_pes2o_80m = metric_multiselect(
+def _(arch_multiselect, history_metric_multiselect, mo):
+    sel_curve_pes2o_80m = history_metric_multiselect(
         "curves: pes2o 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
     sel_curve_pes2o_80m_arch = arch_multiselect("curves: pes2o 80M — architectures")
     mo.vstack([sel_curve_pes2o_80m, sel_curve_pes2o_80m_arch])
@@ -2925,8 +2977,8 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(arch_multiselect, metric_multiselect, mo):
-    sel_curve_wiki_80m = metric_multiselect(
+def _(arch_multiselect, history_metric_multiselect, mo):
+    sel_curve_wiki_80m = history_metric_multiselect(
         "curves: wiki 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_wiki-validation/CE loss"]
     )
     sel_curve_wiki_80m_arch = arch_multiselect("curves: wiki 80M — architectures")
