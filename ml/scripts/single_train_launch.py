@@ -67,6 +67,7 @@ MODEL_CONFIG_LOOKUP = {
     "olmo2_ml_200M": TransformerConfig.olmo2_ml_200M,
     "olmo2_ml_300M": TransformerConfig.olmo2_ml_300M,
     "olmo2_ml_500M": TransformerConfig.olmo2_ml_500M,
+    "olmo2_ml_1B": TransformerConfig.olmo2_ml_1B,
 }
 
 TOKENIZER_LOOKUP = {
@@ -165,7 +166,7 @@ def build_config(
     train_tokens: int = 200_000_000,
     save_interval: int = 200,
     ephemeral_save_interval: int = 50,
-    eval_interval: int = 100,
+    eval_interval: int = 1000,
     metrics_collect_interval: int = 10,
     lr: float = 4e-4,
     warmup_steps: int = 50,

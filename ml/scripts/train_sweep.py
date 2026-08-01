@@ -14,6 +14,7 @@ MODELS = [
     # 'olmo2_ml_10M',
     "olmo2_ml_80M",
     # "olmo2_ml_200M",
+    # "olmo2_ml_1B",
 ]
 
 
@@ -164,23 +165,24 @@ def main(
                     # "moe_lb_loss_weight": [0.0001],  # Weight for the lb-loss in MoE. Default 0.01
                     # "moe_jitter_eps": [0.1, 0.2],
                     # "moe_normalize_expert_weights": [1.0, 2.0],# None, 1.0=L1 or 2.0=L2 norma
-                    "moe_eom_prob": [0.1, 0.2],
-                    # "moe_fom_prob": [0.1, 0.2],
+                    # "moe_eom_prob": [0.1, 0.2],
+                    # "moe_fom_prob": [0.1],#, 0.2],
                     "train_module": {
                         "optim": {
                             "lr": [4e-4],
-                            # "weight_decay": [0.2, 0.4],
+                            # "weight_decay": [0.05], #[0.2, 0.4],
                         },
-                        # "max_grad_norm": [0.2, "null"],
+                        # "max_grad_norm": [2.0], #[0.2, "null"],
                     },
                     "trainer": {
                         "max_duration": {
-                            # "value": [2000000000], #just testing
+                            # "value": [6_400_000_000],
                         },
                     },
                     "model": {
                         "block": {
-                            # "dropout": [0.1, 0.2],
+                            # "dropout": [0.1, 0.2],#, 0.4],
+                            "expert_dropout": [0.1, 0.2, 0.4,],
                             # "feed_forward_moe": {
                             #     "routers_list": {
                             #         "0": {
@@ -381,7 +383,7 @@ def main(
                 ),
                 sweep_name=model_sweep_name,
                 specs=SPECS,
-                name_keys=SPECS.get("NAME_KEYS", []),
+                name_keys=["model.block.expert_dropout"], #SPECS.get("NAME_KEYS", []),#["train_module.max_grad_norm"],#
                 prefix=SPECS["COMMAND_PREFIX"],
                 gpus=SPECS["NUM_GPUS"],
                 cpus=SPECS["NUM_CPUS"],

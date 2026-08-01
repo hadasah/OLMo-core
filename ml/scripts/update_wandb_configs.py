@@ -7,29 +7,35 @@ import wandb
 # Rules for setting config values based on run name substrings.
 # Each entry: (substring_to_match, config_key, config_value)
 CONFIG_RULES = [
-    ("200M", "model_size_name", "200M"),
-    ("80M", "model_size_name", "80M"),
-    ("rep1x", "data_reps", "1"),
-    ("rep2x", "data_reps", "2"),
-    ("rep4x", "data_reps", "4"),
-    ("rep8x", "data_reps", "8"),
-    ("rep16x", "data_reps", "16"),
-    ("rep32x", "data_reps", "32"),
-    ("rep64x", "data_reps", "64"),
-    ("rep128x", "data_reps", "128"),
-    ("rep256x", "data_reps", "256"),
-    ("rep512x", "data_reps", "512"),
-    ("rep1024x", "data_reps", "1024"),
-    ("rep80x", "data_reps", "80"),
-    ("rep160x", "data_reps", "160"),
-    ("rep320x", "data_reps", "320"),
+    # ("200M", "model_size_name", "200M"),
+    # ("80M", "model_size_name", "80M"),
+    # ("rep1x", "data_reps", "1"),
+    # ("rep2x", "data_reps", "2"),
+    # ("rep4x", "data_reps", "4"),
+    # ("rep8x", "data_reps", "8"),
+    # ("rep16x", "data_reps", "16"),
+    # ("rep32x", "data_reps", "32"),
+    # ("rep64x", "data_reps", "64"),
+    # ("rep128x", "data_reps", "128"),
+    # ("rep256x", "data_reps", "256"),
+    # ("rep512x", "data_reps", "512"),
+    # ("rep1024x", "data_reps", "1024"),
+    # ("rep80x", "data_reps", "80"),
+    # ("rep160x", "data_reps", "160"),
+    # ("rep320x", "data_reps", "320"),
 ]
 
 # Rules for adding tags based on run name substrings.
 # Each entry: (substring_to_match, tag_to_add)
 TAG_RULES = [
-    ("moe64", "MoE64"),
-    ("moe32", "MoE32"),
+    # ("moe64", "MoE64"),
+    # ("moe32", "MoE32"),
+    ("AC_wiki", "wiki"),
+    ("AC_pes2o", "pes2o"),
+    ("AC_starcoder", "starcoder"),
+    ("AC_dclm", "dclm"),
+    # ("moe32", "MoE32"),
+    # ("moe32", "MoE32"),
 ]
 
 

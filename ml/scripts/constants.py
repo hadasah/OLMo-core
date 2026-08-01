@@ -135,6 +135,18 @@ MODEL_HP_DEFAULTS = {
             },
         },
     },
+    "olmo2_ml_1B": {
+        "train_module": {
+            "optim": {
+                "lr": [4e-3],
+            },
+        },
+        "trainer": {
+            "max_duration": {
+                "value": [20_000_000_000],
+            },
+        },
+    },
 }
 
 PROJECT_SPECS = {
@@ -287,6 +299,22 @@ HARDWARE_SPECS_DICT = {
             "per_gpu_batch_size": 16,
             "NUM_CPUS": 16,
             "MEM_GB": 240,
+        },
+    },
+    "olmo2_ml_1B": {
+        "all": {
+            "per_gpu_batch_size": 8,
+            "MEM_GB": 800,
+        },
+        "gpu-a40": {
+            "per_gpu_batch_size": 8,
+            "NUM_CPUS": 16,
+            "MEM_GB": 800,
+        },
+        "gpu-h200": {
+            "per_gpu_batch_size": 32,
+            "NUM_CPUS": 16,
+            "MEM_GB": 1920,
         },
     },
 }
