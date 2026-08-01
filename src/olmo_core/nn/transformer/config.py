@@ -181,6 +181,11 @@ class TransformerBlockConfig(ModuleConfig):
     """
     Dropout probability.
     """
+    expert_dropout: Optional[float] = None
+    """
+    Dropout probability for the MoE (expert) output, for MoE blocks only. Defaults to
+    :data:`dropout` when not set.
+    """
     attention_residual_alpha: Optional[float] = None
     """
     A scaling factor applied to the attention/recurrent output before adding it to the residual stream.
@@ -235,6 +240,10 @@ class TransformerBlockConfig(ModuleConfig):
             cache=cache,
         )
 
+        # `expert_dropout` only applies to MoE blocks.
+        expert_dropout = kwargs.pop("expert_dropout", None)
+        moe_kwargs = {**kwargs, "expert_dropout": expert_dropout}
+
         try:
             if self.name == TransformerBlockType.default:
                 return TransformerBlock(**kwargs)
@@ -247,13 +256,13 @@ class TransformerBlockConfig(ModuleConfig):
             elif self.name == TransformerBlockType.normalized:
                 return NormalizedTransformerBlock(**kwargs)
             elif self.name == TransformerBlockType.moe:
-                return MoETransformerBlock(**kwargs)
+                return MoETransformerBlock(**moe_kwargs)
             elif self.name == TransformerBlockType.moe_reordered_norm:
-                return MoEReorderedNormTransformerBlock(**kwargs)
+                return MoEReorderedNormTransformerBlock(**moe_kwargs)
             elif self.name == TransformerBlockType.moe_hybrid:
-                return MoEHybridTransformerBlock(**kwargs)
+                return MoEHybridTransformerBlock(**moe_kwargs)
             elif self.name == TransformerBlockType.moe_hybrid_reordered_norm:
-                return MoEHybridReorderedNormTransformerBlock(**kwargs)
+                return MoEHybridReorderedNormTransformerBlock(**moe_kwargs)
             else:
                 raise NotImplementedError(self.name)
         except TypeError as e:

@@ -512,6 +512,11 @@ class MoETransformerBlock(TransformerBlockBase):
     """
     Like :class:`TransformerBlock` except that the dense :class:`~olmo_core.nn.feed_forward.FeedForward`
     module is replaced with a mixture-of-experts (MoE).
+
+    :param dropout: Dropout probability for the non-expert sub-layer outputs (attention, and the
+        dense feed-forward of hybrid blocks).
+    :param expert_dropout: Dropout probability for the MoE (expert) output. Defaults to ``dropout``
+        when not set.
     """
 
     def __init__(
@@ -524,6 +529,7 @@ class MoETransformerBlock(TransformerBlockBase):
         feed_forward_moe: MoEConfig,
         layer_norm: LayerNormConfig,
         dropout: float = 0.0,
+        expert_dropout: Optional[float] = None,
         init_device: str = "cpu",
         cache: Optional[BufferCache] = None,
     ):
@@ -543,6 +549,10 @@ class MoETransformerBlock(TransformerBlockBase):
         )
         self.feed_forward_norm = layer_norm.build(d_model, init_device=init_device)
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        # The expert (MoE) output gets its own dropout so it can be set independently of the
+        # dropout applied to the rest of the block. Falls back to `dropout` when unset.
+        expert_dropout = dropout if expert_dropout is None else expert_dropout
+        self.expert_dropout = nn.Dropout(expert_dropout) if expert_dropout > 0.0 else nn.Identity()
         self._ep_enabled = False
         self._tp_enabled = False
 
@@ -590,7 +600,7 @@ class MoETransformerBlock(TransformerBlockBase):
         **kwargs,
     ) -> torch.Tensor:
         h = x + self.dropout(self.attention(self.attention_norm(x), **kwargs))
-        return h + self.dropout(
+        return h + self.expert_dropout(
             self.feed_forward_moe(self.feed_forward_norm(h), loss_div_factor=loss_div_factor)
         )
 
@@ -638,6 +648,9 @@ class MoETransformerBlock(TransformerBlockBase):
         )
 
         parallelize_module(self.dropout, device_mesh=tp_mesh, parallelize_plan=SequenceParallel())
+        parallelize_module(
+            self.expert_dropout, device_mesh=tp_mesh, parallelize_plan=SequenceParallel()
+        )
 
         self._tp_enabled = True
 
@@ -691,7 +704,7 @@ class MoEReorderedNormTransformerBlock(MoETransformerBlock):
         **kwargs,
     ) -> torch.Tensor:
         h = x + self.dropout(self.attention_norm(self.attention(x, **kwargs)))
-        return h + self.dropout(
+        return h + self.expert_dropout(
             self.feed_forward_norm(self.feed_forward_moe(h, loss_div_factor=loss_div_factor))
         )
 
@@ -897,7 +910,7 @@ class MoEHybridTransformerBlock(MoEHybridTransformerBlockBase):
     def sparse_forward(
         self, x: torch.Tensor, *, loss_div_factor: Optional[Union[torch.Tensor, float]] = None
     ) -> torch.Tensor:
-        return self.dropout(
+        return self.expert_dropout(
             self.feed_forward_moe(self.feed_forward_moe_norm(x), loss_div_factor=loss_div_factor)
         )
 
@@ -994,7 +1007,7 @@ class MoEHybridTransformerBlock(MoEHybridTransformerBlockBase):
             moe_shared_out = moe_shared_out / (self.top_k_sum + 1)
             x_moe = moe_shared_out.add(x_moe, alpha=self.top_k_sum / (self.top_k_sum + 1))
 
-        return h + self.dropout(x_moe)
+        return h + self.expert_dropout(x_moe)
 
 
 @beta_feature
@@ -1006,7 +1019,7 @@ class MoEHybridReorderedNormTransformerBlock(MoEHybridTransformerBlockBase):
     def sparse_forward(
         self, x: torch.Tensor, *, loss_div_factor: Optional[Union[torch.Tensor, float]] = None
     ) -> torch.Tensor:
-        return self.dropout(
+        return self.expert_dropout(
             self.feed_forward_moe_norm(self.feed_forward_moe(x, loss_div_factor=loss_div_factor))
         )
 
@@ -1103,4 +1116,4 @@ class MoEHybridReorderedNormTransformerBlock(MoEHybridTransformerBlockBase):
             moe_shared_out = moe_shared_out / (self.top_k_sum + 1)
             x_moe = moe_shared_out.add(x_moe, alpha=self.top_k_sum / (self.top_k_sum + 1))
 
-        return h + self.dropout(self.feed_forward_moe_norm(x_moe))
+        return h + self.expert_dropout(self.feed_forward_moe_norm(x_moe))
