@@ -90,7 +90,7 @@ def main(
             ),
             sweep_name=model_sweep_name,
             specs=SPECS,
-            name_keys=SPECS.get("NAME_KEYS", []),
+            name_keys=SPECS.get("NAME_KEYS", []), #["model.block.expert_dropout"],
             prefix=SPECS["COMMAND_PREFIX"],
             gpus=SPECS["NUM_GPUS"],
             cpus=SPECS["NUM_CPUS"],
@@ -163,10 +163,10 @@ def main(
                     # "train_datamix_name": ["pes2o_only"],
                     # "moe_bias_gamma": [0.001],  # Change in LB bias per step. Default is None
                     # "moe_lb_loss_weight": [0.0001],  # Weight for the lb-loss in MoE. Default 0.01
-                    # "moe_jitter_eps": [0.1, 0.2],
+                    # "moe_jitter_eps": [0.4],
                     # "moe_normalize_expert_weights": [1.0, 2.0],# None, 1.0=L1 or 2.0=L2 norma
-                    # "moe_eom_prob": [0.1, 0.2],
-                    # "moe_fom_prob": [0.1],#, 0.2],
+                    # "moe_eom_prob": [0.4],
+                    # "moe_fom_prob": [0.4],#, 0.2],
                     "train_module": {
                         "optim": {
                             "lr": [4e-4],
@@ -182,12 +182,12 @@ def main(
                     "model": {
                         "block": {
                             # "dropout": [0.1, 0.2],#, 0.4],
-                            "expert_dropout": [0.1, 0.2, 0.4,],
+                            # "expert_dropout": [0.1, 0.2, 0.4,],
                             # "feed_forward_moe": {
                             #     "routers_list": {
                             #         "0": {
-                            #             "jitter_eps": [0.01],
-                            #             "normalize_expert_weights": [1.0],
+                            #             "jitter_eps": [0.04],
+                            #             # "normalize_expert_weights": [1.0],
                             #         },
                             #     },
                             # },
@@ -203,34 +203,34 @@ def main(
                     "dense": {
                         "moe_num_experts_list": ["1"],
                         "subgrids": {
-                            "rep1x": {
-                               "unique_data_fraction": ["1.0"],
-                               "num_repetitions": ["1"],
-                            },
-                            "rep2x": {
-                                "unique_data_fraction": ["0.5"],
-                                "num_repetitions": ["2"],
-                            },
-                            "rep4x": {
-                                "unique_data_fraction": ["0.25"],
-                                "num_repetitions": ["4"],
-                            },
-                            "rep8x": {
-                                "unique_data_fraction": ["0.125"],
-                                "num_repetitions": ["8"],
-                            },
-                            "rep16x": {
-                                "unique_data_fraction": ["0.0625"],
-                                "num_repetitions": ["16"],
-                            },
-                            "rep32x": {
-                                "unique_data_fraction": ["0.03125"],
-                                "num_repetitions": ["32"],
-                            },
-                            "rep64x": {
-                                "unique_data_fraction": ["0.015625"],
-                                "num_repetitions": ["64"],
-                            },
+                            # "rep1x": {
+                            #    "unique_data_fraction": ["1.0"],
+                            #    "num_repetitions": ["1"],
+                            # },
+                            # "rep2x": {
+                            #     "unique_data_fraction": ["0.5"],
+                            #     "num_repetitions": ["2"],
+                            # },
+                            # "rep4x": {
+                            #     "unique_data_fraction": ["0.25"],
+                            #     "num_repetitions": ["4"],
+                            # },
+                            # "rep8x": {
+                            #     "unique_data_fraction": ["0.125"],
+                            #     "num_repetitions": ["8"],
+                            # },
+                            # "rep16x": {
+                            #     "unique_data_fraction": ["0.0625"],
+                            #     "num_repetitions": ["16"],
+                            # },
+                            # "rep32x": {
+                            #     "unique_data_fraction": ["0.03125"],
+                            #     "num_repetitions": ["32"],
+                            # },
+                            # "rep64x": {
+                            #     "unique_data_fraction": ["0.015625"],
+                            #     "num_repetitions": ["64"],
+                            # },
                             # "rep128x": {
                             #     "unique_data_fraction": ["0.0078125"], 
                             #     "num_repetitions": ["128"]
@@ -321,34 +321,150 @@ def main(
                         "moe_router_top_ks_list": ["4"],
                         "moe_generalist_hidden_multiplier": ["0"],
                         "subgrids": {
-                            "rep1x": {
-                                "unique_data_fraction": ["1.0"],
-                                "num_repetitions": ["1"],
-                            },
-                            "rep2x": {
-                                "unique_data_fraction": ["0.5"],
-                                "num_repetitions": ["2"],
-                            },
-                            "rep4x": {
-                                "unique_data_fraction": ["0.25"],
-                                "num_repetitions": ["4"],
-                            },
-                            "rep8x": {
-                                "unique_data_fraction": ["0.125"],
-                                "num_repetitions": ["8"],
-                            },
-                            "rep16x": {
-                                "unique_data_fraction": ["0.0625"],
-                                "num_repetitions": ["16"],
-                            },
-                            "rep32x": {
-                                "unique_data_fraction": ["0.03125"],
-                                "num_repetitions": ["32"],
-                            },
-                            "rep64x": {
-                                "unique_data_fraction": ["0.015625"],
-                                "num_repetitions": ["64"],
-                            },
+                            # "rep1x": {
+                            #     "unique_data_fraction": ["1.0"],
+                            #     "num_repetitions": ["1"],
+                            # },
+                            # "rep2x": {
+                            #     "unique_data_fraction": ["0.5"],
+                            #     "num_repetitions": ["2"],
+                            # },
+                            # "rep4x": {
+                            #     "unique_data_fraction": ["0.25"],
+                            #     "num_repetitions": ["4"],
+                            # },
+                            # "rep8x": {
+                            #     "unique_data_fraction": ["0.125"],
+                            #     "num_repetitions": ["8"],
+                            # },
+                            # "rep16x": {
+                            #     "unique_data_fraction": ["0.0625"],
+                            #     "num_repetitions": ["16"],
+                            # },
+                            # "rep32x": {
+                            #     "unique_data_fraction": ["0.03125"],
+                            #     "num_repetitions": ["32"],
+                            # },
+                            # "rep64x": {
+                            #     "unique_data_fraction": ["0.015625"],
+                            #     "num_repetitions": ["64"],
+                            # },
+                            # "rep128x": {
+                            #     "unique_data_fraction": ["0.0078125"], 
+                            #     "num_repetitions": ["128"]
+                            # },
+                            # "rep256x": {
+                            #     "unique_data_fraction": ["0.00390625"], 
+                            #     "num_repetitions": ["256"], 
+                            #     "global_batch_size": ["64"], 
+                            #     "per_gpu_batch_size": ["8"]
+                            # },
+                            # "rep512x": {
+                            #     "unique_data_fraction": ["0.001953125"], 
+                            #     "num_repetitions": ["512"], 
+                            #     "global_batch_size": ["64"], 
+                            #     "per_gpu_batch_size": ["8"]
+                            # },
+                            # "rep1024x": {
+                            #     "unique_data_fraction": ["0.0009765625"], 
+                            #     "num_repetitions": ["1024"], 
+                            #     "global_batch_size": ["64"], 
+                            #     "per_gpu_batch_size": ["8"]
+                            # },
+                        },
+                    },
+                    "moe64s8": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.125"],
+                        "moe_router_top_ks_list": ["8"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "subgrids": {
+                            # "rep1x": {
+                            #     "unique_data_fraction": ["1.0"],
+                            #     "num_repetitions": ["1"],
+                            # },
+                            # "rep2x": {
+                            #     "unique_data_fraction": ["0.5"],
+                            #     "num_repetitions": ["2"],
+                            # },
+                            # "rep4x": {
+                            #     "unique_data_fraction": ["0.25"],
+                            #     "num_repetitions": ["4"],
+                            # },
+                            # "rep8x": {
+                            #     "unique_data_fraction": ["0.125"],
+                            #     "num_repetitions": ["8"],
+                            # },
+                            # "rep16x": {
+                            #     "unique_data_fraction": ["0.0625"],
+                            #     "num_repetitions": ["16"],
+                            # },
+                            # "rep32x": {
+                            #     "unique_data_fraction": ["0.03125"],
+                            #     "num_repetitions": ["32"],
+                            # },
+                            # "rep64x": {
+                            #     "unique_data_fraction": ["0.015625"],
+                            #     "num_repetitions": ["64"],
+                            # },
+                            # "rep128x": {
+                            #     "unique_data_fraction": ["0.0078125"], 
+                            #     "num_repetitions": ["128"]
+                            # },
+                            # "rep256x": {
+                            #     "unique_data_fraction": ["0.00390625"], 
+                            #     "num_repetitions": ["256"], 
+                            #     "global_batch_size": ["64"], 
+                            #     "per_gpu_batch_size": ["8"]
+                            # },
+                            # "rep512x": {
+                            #     "unique_data_fraction": ["0.001953125"], 
+                            #     "num_repetitions": ["512"], 
+                            #     "global_batch_size": ["64"], 
+                            #     "per_gpu_batch_size": ["8"]
+                            # },
+                            # "rep1024x": {
+                            #     "unique_data_fraction": ["0.0009765625"], 
+                            #     "num_repetitions": ["1024"], 
+                            #     "global_batch_size": ["64"], 
+                            #     "per_gpu_batch_size": ["8"]
+                            # },
+                        },
+                    },
+                    "moe64s32": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.5"],
+                        "moe_router_top_ks_list": ["2"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "subgrids": {
+                            # "rep1x": {
+                            #     "unique_data_fraction": ["1.0"],
+                            #     "num_repetitions": ["1"],
+                            # },
+                            # "rep2x": {
+                            #     "unique_data_fraction": ["0.5"],
+                            #     "num_repetitions": ["2"],
+                            # },
+                            # "rep4x": {
+                            #     "unique_data_fraction": ["0.25"],
+                            #     "num_repetitions": ["4"],
+                            # },
+                            # "rep8x": {
+                            #     "unique_data_fraction": ["0.125"],
+                            #     "num_repetitions": ["8"],
+                            # },
+                            # "rep16x": {
+                            #     "unique_data_fraction": ["0.0625"],
+                            #     "num_repetitions": ["16"],
+                            # },
+                            # "rep32x": {
+                            #     "unique_data_fraction": ["0.03125"],
+                            #     "num_repetitions": ["32"],
+                            # },
+                            # "rep64x": {
+                            #     "unique_data_fraction": ["0.015625"],
+                            #     "num_repetitions": ["64"],
+                            # },
                             # "rep128x": {
                             #     "unique_data_fraction": ["0.0078125"], 
                             #     "num_repetitions": ["128"]
@@ -383,7 +499,7 @@ def main(
                 ),
                 sweep_name=model_sweep_name,
                 specs=SPECS,
-                name_keys=["model.block.expert_dropout"], #SPECS.get("NAME_KEYS", []),#["train_module.max_grad_norm"],#
+                name_keys=["moe_fom_prob"], #["model.block.expert_dropout"], #SPECS.get("NAME_KEYS", []),#["train_module.max_grad_norm"],#
                 prefix=SPECS["COMMAND_PREFIX"],
                 gpus=SPECS["NUM_GPUS"],
                 cpus=SPECS["NUM_CPUS"],
