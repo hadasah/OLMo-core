@@ -10,6 +10,7 @@ Most techniques below are **training-only** (they are no-ops during eval) and ar
 | Technique | Scope | CLI arg (`single_train_launch.py`) | Config path |
 |---|---|---|---|
 | Dropout | Any transformer block | `--dropout` *(see note)* | `model.block.dropout` |
+| Expert dropout | MoE block (expert output) | *(see note)* | `model.block.expert_dropout` |
 | Weight decay | Optimizer | `--weight_decay` | `train_module.optim.weight_decay` |
 | Gradient clipping | Train module | `--max_grad_norm` *(see note)* | `train_module.max_grad_norm` |
 | Router jitter | MoE router | `--moe_jitter_eps` | `model.block.feed_forward_moe.routers_list.0.jitter_eps` |
@@ -27,7 +28,9 @@ but are not strictly regularizers.
 
 **What it does.** Standard dropout applied to the sub-layer outputs (attention and
 feed-forward) before they are added back to the residual stream. For MoE blocks, dropout
-is applied to the attention and MoE outputs.
+is applied to the attention and MoE outputs — unless
+[expert dropout](#expert-dropout) is set, in which case the MoE output uses that value
+instead.
 
 **Mechanism.** During training, each activation element is independently zeroed with
 probability `p`, and surviving elements are rescaled by `1 / (1 - p)` (standard
@@ -55,6 +58,51 @@ model is built. In `train_sweep.py` set it as a nested `model` key in the grid:
 ```
 
 To sweep multiple values: `"dropout": [0.0, 0.1, 0.2]`.
+
+---
+
+## Expert Dropout
+
+**What it does.** Uses a separate dropout probability for the **MoE (expert) output** of MoE
+blocks, so the expert path can be regularized more (or less) heavily than the rest of the
+network. Everything else in the block — the attention output, and the dense feed-forward
+output of hybrid blocks — keeps using the regular [dropout](#dropout) value.
+
+**Mechanism.** Identical to dropout (standard inverted dropout via `nn.Dropout`), just with
+its own probability and applied only at the MoE output. When `expert_dropout` is unset, the
+expert output falls back to the regular `dropout` value, which is exactly the pre-existing
+behavior.
+
+Which tensor gets it, per block type:
+
+| Block type | `dropout` applies to | `expert_dropout` applies to |
+|---|---|---|
+| `moe`, `moe_reordered_norm` | attention output | MoE output |
+| `moe_hybrid`, `moe_hybrid_reordered_norm` | attention output, dense FF output | MoE output |
+| dense blocks | all sub-layer outputs | *(ignored — no experts)* |
+
+**Where it lives.**
+- `TransformerBlockConfig.expert_dropout` (`src/olmo_core/nn/transformer/config.py`) — the config field.
+- `MoETransformerBlock.expert_dropout` (`src/olmo_core/nn/transformer/block.py`) — the module,
+  used by all MoE block variants (including the expert-parallel `combined_forward` paths).
+
+**Default.** `None` (fall back to `dropout`).
+
+**How to set it.** Like [dropout](#dropout), it lives on the block config, so set it as a
+nested `model` key in the grid:
+
+```python
+"main_grid": {
+    "model": {
+        "block": {
+            "dropout": [0.1],
+            "expert_dropout": [0.2, 0.4],
+        },
+    },
+},
+```
+
+Setting `expert_dropout` without `dropout` gives dropout on the expert path only.
 
 ---
 

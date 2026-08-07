@@ -134,6 +134,9 @@ class WandBCallback(Callback):
             self.wandb
             wandb_dir = self.trainer.work_dir / "wandb"
             wandb_dir.mkdir(parents=True, exist_ok=True)
+            wandb_id = self.name # type: ignore
+            if wandb_id.startswith("2026_07_31-23_36_15_"):
+                wandb_id  = wandb_id + "_resync"
             self.wandb.init(
                 dir=wandb_dir,
                 project=self.project,
@@ -143,7 +146,7 @@ class WandBCallback(Callback):
                 tags=self.tags,
                 notes=self.notes,
                 resume=self.resume,
-                id=self.name,  # type: ignore
+                id=wandb_id,  # type: ignore
                 config=self.config,
             )
             self._run_path = self.run.path  # type: ignore

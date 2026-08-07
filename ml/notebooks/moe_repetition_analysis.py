@@ -18,22 +18,44 @@ def _(mo):
     - **Knockout** — importance of each expert (loss increase when disabled)
     - **Ossification** — how quickly routing decisions lock in during training
     - **Co-activation** — which expert pairs tend to fire together
+
+    **Styling.** Line/scatter/bar plots follow the conventions of
+    `regularization_figures.py`: the swept factor is encoded as **color** (viridis
+    palette), the **architecture** (moe32/moe64) is encoded as **line style + shade**
+    (moe32 dashed/darker, moe64 dotted/lighter), repetition axes use **power-of-2
+    ticks**, and legends are single boxes with bold section headers. Each such figure
+    is also exported to `ml/figures/` as a PDF. Heatmaps, the co-activation matrix
+    explorer, box plots, and the pairs table stay in plotly (with the viridis palette)
+    since they have no matplotlib analog in the reference notebook.
     """)
     return
 
 
 @app.cell(hide_code=True)
 def _():
-    import marimo as mo
-    import pandas as pd
-    import numpy as np
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
     import json
     import os
     import re
 
-    return go, json, make_subplots, mo, np, os, pd, re
+    import matplotlib
+
+    matplotlib.use("Agg")  # non-interactive backend: static, browser-free rendering
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    import plotly.graph_objects as go
+    import seaborn as sns
+    from plotly.subplots import make_subplots
+
+    sns.set_theme(style="whitegrid", context="notebook")
+    return go, json, make_subplots, np, os, pd, plt, re
+
+
+@app.cell(hide_code=True)
+def _():
+    import marimo as mo
+
+    return (mo,)
 
 
 @app.cell(hide_code=True)
@@ -166,6 +188,196 @@ def _(json, np, os, pd, re):
 
 
 @app.cell(hide_code=True)
+def _(DATASETS, REP_LEVELS, os, plt):
+    # ------------------------------------------------------------------
+    # Shared styling helpers, mirroring regularization_figures.py.
+    #   - color  -> the swept factor (viridis palette)
+    #   - moe32/moe64 -> line style + shade
+    #   - repetition axis -> power-of-2 ticks (log2)
+    #   - single-box legends with bold section headers
+    #   - every matplotlib figure is exported to ml/figures/
+    # ------------------------------------------------------------------
+    from matplotlib.colors import to_hex
+    from matplotlib.lines import Line2D
+
+    REP_INT = {"1x": 1, "2x": 2, "4x": 4, "8x": 8, "16x": 16, "32x": 32}
+
+    # Per-architecture lightening (moe32 darker, moe64 lighter) + line style, matching
+    # the moe entries in regularization_figures.py.
+    MODEL_SHADE = {"moe32": 0.15, "moe64": 0.35}
+    ARCH_DASH = {"moe32": "--", "moe64": ":"}
+
+    def shade_color(hex_color, lighten):
+        """Positive `lighten` blends toward white, negative toward black; clamped."""
+        h = hex_color.lstrip("#")
+        r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+        t = max(-1.0, min(1.0, lighten))
+        if t >= 0:
+            r, g, b = (round(c + (255 - c) * t) for c in (r, g, b))
+        else:
+            r, g, b = (round(c * (1 + t)) for c in (r, g, b))
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def arch_dash(mc):
+        return ARCH_DASH.get(mc, "-")
+
+    def arch_color(base_color, mc):
+        """Shade a per-factor base color by architecture."""
+        return shade_color(base_color, MODEL_SHADE.get(mc, 0.0))
+
+    def factor_palette(keys, high_end=0.8):
+        """Distinct color per key (in order) across viridis; single key -> mid-palette.
+
+        `high_end` caps how far toward yellow we go (0.8 = stop 80% of the way, so the
+        bright-yellow end of viridis is never used).
+        """
+        keys = list(keys)
+        n = len(keys)
+        cmap = plt.get_cmap("viridis")
+        if n == 0:
+            return {}
+        if n == 1:
+            return {keys[0]: to_hex(cmap(0.35))}
+        return {k: to_hex(cmap(i * high_end / (n - 1))) for i, k in enumerate(keys)}
+
+    # Fixed palettes for the recurring factors.
+    DATASET_COLORS = factor_palette(DATASETS)
+    REP_COLORS = factor_palette(REP_LEVELS)
+    MOE_COLORS = factor_palette(["moe32", "moe64"])  # for plotly box/heatmap accents
+
+    # Truncated viridis for plotly heatmaps: 0 -> 0.8 of the colormap, so the bright
+    # yellow end is never used (matches the matplotlib factor_palette cap).
+    _cs_cmap = plt.get_cmap("viridis")
+    VIRIDIS_CAPPED = [
+        [_i / 8, to_hex(_cs_cmap(_i / 8 * 0.8))] for _i in range(9)
+    ]
+
+    def pow2_ticks(max_reps):
+        if max_reps is None or max_reps < 1:
+            return [1], ["1"]
+        vals = []
+        p = 1
+        while p < max_reps:
+            vals.append(p)
+            p *= 2
+        vals.append(p)
+        return vals, [str(v) for v in vals]
+
+    def apply_pow2_xaxis(ax, max_reps, any_data=True):
+        if not any_data:
+            return
+        tickvals, ticktext = pow2_ticks(max_reps)
+        ax.set_xscale("log", base=2)
+        ax.set_xticks(tickvals)
+        ax.set_xticklabels(ticktext)
+        ax.minorticks_off()
+
+    def _header():
+        return Line2D([0], [0], linestyle="none", marker="", label="")
+
+    def legend_sections(color_section=None, style_section=None, marker_section=None):
+        """Build (handles, labels, titles) for a single-box multi-section legend.
+
+        Each section is ``(title, [(label, spec), ...])``: color -> hex, style -> dash
+        (drawn grey), marker -> matplotlib marker (drawn grey). Titles are returned so
+        the caller can bold them after placing the legend.
+        """
+        handles, labels, titles = [], [], []
+        if color_section:
+            title, items = color_section
+            titles.append(title)
+            handles.append(_header())
+            labels.append(title)
+            for lbl, col in items:
+                handles.append(Line2D([0], [0], color=col, linewidth=2))
+                labels.append(str(lbl))
+        if style_section:
+            title, items = style_section
+            titles.append(title)
+            handles.append(_header())
+            labels.append(title)
+            for lbl, dash in items:
+                handles.append(
+                    Line2D([0], [0], color="#333333", linewidth=1.5, linestyle=dash)
+                )
+                labels.append(str(lbl))
+        if marker_section:
+            title, items = marker_section
+            titles.append(title)
+            handles.append(_header())
+            labels.append(title)
+            for lbl, mk in items:
+                handles.append(
+                    Line2D([0], [0], color="#333333", marker=mk, linestyle="none")
+                )
+                labels.append(str(lbl))
+        return handles, labels, titles
+
+    def place_legend(target, handles, labels, titles, on_fig=False):
+        """Place a legend on an Axes (right of plot) or a Figure (center-right)."""
+        if on_fig:
+            leg = target.legend(
+                handles, labels, fontsize=7, handlelength=2.2,
+                loc="center left", bbox_to_anchor=(1.0, 0.5), borderaxespad=0.0,
+            )
+        else:
+            leg = target.legend(
+                handles, labels, fontsize=7, handlelength=2.2,
+                loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0,
+            )
+        for txt in leg.get_texts():
+            if txt.get_text() in titles:
+                txt.set_fontweight("bold")
+        return leg
+
+    # PDF export (matches regularization_figures.py: static, browser-free).
+    def _figures_dir():
+        _this_dir = (
+            os.path.dirname(os.path.abspath(__file__))
+            if "__file__" in dir()
+            else os.getcwd()
+        )
+        _candidates = [
+            os.path.join(_this_dir, "..", "figures"),
+            os.path.join(_this_dir, "ml", "figures"),
+        ]
+        for d in _candidates:
+            if os.path.isdir(os.path.dirname(os.path.normpath(d))):
+                return os.path.normpath(d)
+        return os.path.normpath(_candidates[0])
+
+    FIGURES_DIR = _figures_dir()
+
+    def _sanitize(name):
+        return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in name).strip("_")
+
+    def save_pdf(fig, name):
+        """Write `fig` to ml/figures/moe_rep__<name>.pdf (failures are non-fatal)."""
+        os.makedirs(FIGURES_DIR, exist_ok=True)
+        path = os.path.join(FIGURES_DIR, f"moe_rep__{_sanitize(name)}.pdf")
+        try:
+            fig.savefig(path, bbox_inches="tight")
+        except Exception as e:  # pragma: no cover - env dependent
+            print(f"NOTE: could not save PDF '{path}': {type(e).__name__}: {e}")
+        return fig
+
+    return (
+        DATASET_COLORS,
+        MOE_COLORS,
+        REP_COLORS,
+        REP_INT,
+        VIRIDIS_CAPPED,
+        apply_pow2_xaxis,
+        arch_color,
+        arch_dash,
+        factor_palette,
+        legend_sections,
+        place_legend,
+        save_pdf,
+    )
+
+
+@app.cell(hide_code=True)
 def _(DATASETS, mo):
     """Global controls for filtering across all sections."""
     dataset_selector = mo.ui.multiselect(
@@ -212,111 +424,83 @@ def _(mo):
     - **End-of-training routing stability**: fraction of tokens whose top-expert assignment
       at the final checkpoint matches their assignment at the second-to-last checkpoint.
       Values near 1.0 mean routing decisions have fully locked in.
+
+    Color = dataset; line style + shade = expert count (moe32 dashed, moe64 dotted).
     """)
     return
 
 
 @app.cell(hide_code=True)
 def _(
+    DATASET_COLORS,
+    REP_INT,
     active_datasets,
     active_moe,
+    apply_pow2_xaxis,
+    arch_color,
+    arch_dash,
     df_coactivation,
     df_knockout,
     df_ossification,
-    go,
-    make_subplots,
+    legend_sections,
+    place_legend,
+    plt,
+    save_pdf,
 ):
     """Plot 1 — Key Metrics vs. Repetition (3 stacked subplots)."""
 
-    DATASET_COLORS = {"pes2o": "#1f77b4", "starcoder": "#ff7f0e", "wiki_v2": "#2ca02c"}
-    MOE_DASHES = {"moe32": "solid", "moe64": "dash"}
+    def _xy(series_by_rep):
+        pts = [(REP_INT[str(r)], v) for r, v in series_by_rep.items() if v == v]
+        pts.sort()
+        return [p[0] for p in pts], [p[1] for p in pts]
 
-    _fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.08,
-        subplot_titles=[
-            "Mean Knockout Impact (loss increase)",
-            "Mean Co-Activation Entropy",
-            "End-of-Training Routing Stability",
-        ],
-    )
-
+    _fig1, _axes = plt.subplots(3, 1, figsize=(7.0, 10.0), sharex=True)
+    _titles = [
+        "Mean Knockout Impact (loss increase)",
+        "Mean Co-Activation Entropy",
+        "End-of-Training Routing Stability",
+    ]
+    _ylabels = ["Mean Δloss", "Entropy (nats)", "Stability rate"]
+    _max_reps = 1
     for _ds in active_datasets:
         for _mc in active_moe:
-            _label = f"{_ds} / {_mc}"
-            _color = DATASET_COLORS[_ds]
-            _dash = MOE_DASHES[_mc]
+            _col = arch_color(DATASET_COLORS[_ds], _mc)
+            _dash = arch_dash(_mc)
 
-            # Knockout: mean loss_increase per rep_level
-            _ko_sub = df_knockout[
-                (df_knockout["dataset"] == _ds) & (df_knockout["moe_config"] == _mc)
-            ]
-            _ko_agg = _ko_sub.groupby("rep_level", observed=True)["loss_increase"].mean()
+            _ko = df_knockout[(df_knockout["dataset"] == _ds) & (df_knockout["moe_config"] == _mc)]
+            _ko_agg = _ko.groupby("rep_level", observed=True)["loss_increase"].mean()
 
-            _fig.add_trace(
-                go.Scatter(
-                    x=[str(_r) for _r in _ko_agg.index],
-                    y=_ko_agg.values,
-                    mode="lines+markers",
-                    name=_label,
-                    line=dict(color=_color, dash=_dash),
-                    legendgroup=_label,
-                    showlegend=True,
-                ),
-                row=1, col=1,
-            )
+            _ca = df_coactivation[(df_coactivation["dataset"] == _ds) & (df_coactivation["moe_config"] == _mc)]
+            _ca_agg = _ca.groupby("rep_level", observed=True)["co_activation_entropy"].mean()
 
-            # Co-activation entropy: mean per rep_level
-            _ca_sub = df_coactivation[
-                (df_coactivation["dataset"] == _ds) & (df_coactivation["moe_config"] == _mc)
-            ]
-            _ca_agg = _ca_sub.groupby("rep_level", observed=True)["co_activation_entropy"].mean()
-
-            _fig.add_trace(
-                go.Scatter(
-                    x=[str(_r) for _r in _ca_agg.index],
-                    y=_ca_agg.values,
-                    mode="lines+markers",
-                    name=_label,
-                    line=dict(color=_color, dash=_dash),
-                    legendgroup=_label,
-                    showlegend=False,
-                ),
-                row=2, col=1,
-            )
-
-            # Ossification: final stability (max step) averaged across layers
-            _oss_sub = df_ossification[
-                (df_ossification["dataset"] == _ds) & (df_ossification["moe_config"] == _mc)
-            ]
-            _oss_final = _oss_sub[_oss_sub["step"] == _oss_sub["step"].max()]
+            _oss = df_ossification[(df_ossification["dataset"] == _ds) & (df_ossification["moe_config"] == _mc)]
+            _oss_final = _oss[_oss["step"] == _oss["step"].max()]
             _oss_agg = _oss_final.groupby("rep_level", observed=True)["stability_rate"].mean()
 
-            _fig.add_trace(
-                go.Scatter(
-                    x=[str(_r) for _r in _oss_agg.index],
-                    y=_oss_agg.values,
-                    mode="lines+markers",
-                    name=_label,
-                    line=dict(color=_color, dash=_dash),
-                    legendgroup=_label,
-                    showlegend=False,
-                ),
-                row=3, col=1,
-            )
+            for _ax, _agg in zip(_axes, [_ko_agg, _ca_agg, _oss_agg]):
+                _xs, _ys = _xy(_agg)
+                if not _xs:
+                    continue
+                _max_reps = max(_max_reps, max(_xs))
+                _ax.plot(_xs, _ys, marker="o", markersize=4, linewidth=1.5,
+                         linestyle=_dash, color=_col)
 
-    _fig.update_layout(
-        height=800,
-        title_text="Key Metrics vs. Data Repetition",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+    for _ax, _t, _yl in zip(_axes, _titles, _ylabels):
+        _ax.set_title(_t, fontsize=10)
+        _ax.set_ylabel(_yl)
+        apply_pow2_xaxis(_ax, _max_reps)
+    _axes[-1].set_xlabel("repetition count")
+    _fig1.suptitle("Key Metrics vs. Data Repetition", fontsize=12)
+
+    _h, _l, _t = legend_sections(
+        color_section=("Dataset", [(_ds, DATASET_COLORS[_ds]) for _ds in active_datasets]),
+        style_section=("Expert count", [(_mc, arch_dash(_mc)) for _mc in active_moe]),
     )
-    _fig.update_xaxes(title_text="Repetition level", row=3, col=1)
-    _fig.update_yaxes(title_text="Mean Δloss", row=1, col=1)
-    _fig.update_yaxes(title_text="Entropy (nats)", row=2, col=1)
-    _fig.update_yaxes(title_text="Stability rate", row=3, col=1)
-    _fig
-    return DATASET_COLORS, MOE_DASHES
+    place_legend(_fig1, _h, _l, _t, on_fig=True)
+    _fig1.tight_layout(rect=(0, 0, 0.85, 0.97))
+    save_pdf(_fig1, "key_metrics_vs_rep")
+    _fig1
+    return
 
 
 @app.cell(hide_code=True)
@@ -333,40 +517,45 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     DATASET_COLORS,
-    MOE_DASHES,
+    REP_INT,
     active_datasets,
     active_moe,
+    apply_pow2_xaxis,
+    arch_color,
+    arch_dash,
     df_knockout,
-    go,
+    legend_sections,
+    place_legend,
+    plt,
+    save_pdf,
 ):
     """Plot 2 — Baseline Loss vs. Repetition."""
 
-    _fig = go.Figure()
-
+    _fig2, _ax = plt.subplots(figsize=(6.5, 4.5))
+    _max_reps = 1
     for _ds in active_datasets:
         for _mc in active_moe:
-            _sub = df_knockout[
-                (df_knockout["dataset"] == _ds) & (df_knockout["moe_config"] == _mc)
-            ]
+            _sub = df_knockout[(df_knockout["dataset"] == _ds) & (df_knockout["moe_config"] == _mc)]
             _agg = _sub.groupby("rep_level", observed=True)["baseline_loss"].first()
-            _fig.add_trace(
-                go.Scatter(
-                    x=[str(_r) for _r in _agg.index],
-                    y=_agg.values,
-                    mode="lines+markers",
-                    name=f"{_ds} / {_mc}",
-                    line=dict(color=DATASET_COLORS[_ds], dash=MOE_DASHES[_mc]),
-                )
-            )
+            _pts = sorted((REP_INT[str(r)], v) for r, v in _agg.items() if v == v)
+            if not _pts:
+                continue
+            _max_reps = max(_max_reps, _pts[-1][0])
+            _ax.plot([p[0] for p in _pts], [p[1] for p in _pts], marker="o", markersize=4,
+                     linewidth=1.5, linestyle=arch_dash(_mc), color=arch_color(DATASET_COLORS[_ds], _mc))
 
-    _fig.update_layout(
-        title="Baseline Loss vs. Data Repetition",
-        xaxis_title="Repetition level",
-        yaxis_title="Baseline loss",
-        height=400,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+    apply_pow2_xaxis(_ax, _max_reps)
+    _ax.set_xlabel("repetition count")
+    _ax.set_ylabel("Baseline loss")
+    _ax.set_title("Baseline Loss vs. Data Repetition", fontsize=10)
+    _h, _l, _t = legend_sections(
+        color_section=("Dataset", [(_ds, DATASET_COLORS[_ds]) for _ds in active_datasets]),
+        style_section=("Expert count", [(_mc, arch_dash(_mc)) for _mc in active_moe]),
     )
-    _fig
+    place_legend(_ax, _h, _l, _t)
+    _fig2.tight_layout()
+    save_pdf(_fig2, "baseline_loss_vs_rep")
+    _fig2
     return
 
 
@@ -408,7 +597,15 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(REP_LEVELS, active_datasets, active_moe, df_knockout, go, make_subplots):
+def _(
+    REP_LEVELS,
+    VIRIDIS_CAPPED,
+    active_datasets,
+    active_moe,
+    df_knockout,
+    go,
+    make_subplots,
+):
     """Plot 3 — Per-Layer Knockout Heatmap (Layer × Rep)."""
 
     _n_moe = len(active_moe)
@@ -445,7 +642,7 @@ def _(REP_LEVELS, active_datasets, active_moe, df_knockout, go, make_subplots):
                         z=_heat.values,
                         x=[f"L{_c}" for _c in _heat.columns],
                         y=[str(_r) for _r in _heat.index],
-                        colorscale="YlOrRd",
+                        colorscale=VIRIDIS_CAPPED,
                         showscale=(_r_idx == 0 and _c_idx == _n_ds - 1),
                         text=_heat.values.round(4),
                         texttemplate="%{text:.4f}",
@@ -481,6 +678,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    MOE_COLORS,
     active_datasets,
     active_moe,
     df_knockout,
@@ -517,7 +715,7 @@ def _(
                         name=_mc,
                         legendgroup=_mc,
                         showlegend=(_c_idx == 0),
-                        marker_color={"moe32": "#636EFA", "moe64": "#EF553B"}.get(_mc, "#000"),
+                        marker_color=MOE_COLORS.get(_mc, "#000"),
                     ),
                     row=1, col=_c_idx + 1,
                 )
@@ -543,26 +741,28 @@ def _(mo):
     experts (ranked by knockout Δloss at 1× repetition) change rank as repetition increases.
     Parallel lines mean the same experts stay dominant regardless of repetition.
     Crossing lines indicate that repetition reshuffles which experts the model relies on.
-    Uses the first active dataset and expert count.
+    Uses the first active dataset and expert count. Color = expert (viridis).
     """)
     return
 
 
 @app.cell(hide_code=True)
 def _(
+    REP_INT,
     active_datasets,
     active_moe,
+    apply_pow2_xaxis,
     df_knockout,
-    go,
+    factor_palette,
     ko_layer_slider,
     ko_topk_slider,
+    plt,
+    save_pdf,
 ):
     """Plot 5 — Expert Importance Ranking (Bump Chart)."""
 
     _layer = ko_layer_slider.value
     _topk = ko_topk_slider.value
-
-    # Use first active dataset/moe_config for the bump chart
     _ds = active_datasets[0] if active_datasets else "starcoder"
     _mc = active_moe[0] if active_moe else "moe64"
 
@@ -571,42 +771,33 @@ def _(
         & (df_knockout["moe_config"] == _mc)
         & (df_knockout["layer"] == _layer)
     ].copy()
-
-    # Rank experts within each rep_level (higher loss_increase = rank 1)
     _sub["rank"] = _sub.groupby("rep_level", observed=True)["loss_increase"].rank(
         ascending=False, method="min"
     )
-
-    # Find top-K experts at the baseline (rep1x)
     _baseline = _sub[_sub["rep_level"] == "1x"].nsmallest(_topk, "rank")
     _top_experts = _baseline["expert_idx"].tolist()
 
-    _fig = go.Figure()
+    _expert_color = factor_palette([str(e) for e in _top_experts])
+    _fig5, _ax = plt.subplots(figsize=(6.5, 5.0))
+    _max_reps = 1
     for _expert_id in _top_experts:
-        _expert_data = _sub[_sub["expert_idx"] == _expert_id].sort_values("rep_int")
-        _fig.add_trace(
-            go.Scatter(
-                x=[str(_r) for _r in _expert_data["rep_level"]],
-                y=_expert_data["rank"],
-                mode="lines+markers",
-                name=f"Expert {_expert_id}",
-                hovertemplate=(
-                    f"Expert {_expert_id}<br>"
-                    "Rep: %{x}<br>"
-                    "Rank: %{y}<br>"
-                    "<extra></extra>"
-                ),
-            )
-        )
+        _ed = _sub[_sub["expert_idx"] == _expert_id].sort_values("rep_int")
+        _xs = [REP_INT[str(r)] for r in _ed["rep_level"]]
+        if not _xs:
+            continue
+        _max_reps = max(_max_reps, max(_xs))
+        _ax.plot(_xs, _ed["rank"], marker="o", markersize=5, linewidth=1.5,
+                 color=_expert_color[str(_expert_id)], label=f"Expert {_expert_id}")
 
-    _fig.update_layout(
-        title=f"Expert Importance Ranking — {_ds} / {_mc} / Layer {_layer} (Top {_topk} at 1x)",
-        xaxis_title="Repetition level",
-        yaxis_title="Rank (1 = most important)",
-        yaxis=dict(autorange="reversed"),
-        height=500,
-    )
-    _fig
+    apply_pow2_xaxis(_ax, _max_reps)
+    _ax.set_xlabel("repetition count")
+    _ax.set_ylabel("Rank (1 = most important)")
+    _ax.invert_yaxis()
+    _ax.set_title(f"Expert Importance Ranking — {_ds} / {_mc} / Layer {_layer} (Top {_topk} at 1x)", fontsize=10)
+    _ax.legend(fontsize=6, loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, title="Expert")
+    _fig5.tight_layout()
+    save_pdf(_fig5, f"bump_L{_layer}_{_ds}_{_mc}")
+    _fig5
     return
 
 
@@ -626,17 +817,22 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     DATASET_COLORS,
-    MOE_DASHES,
+    REP_INT,
     active_datasets,
     active_moe,
+    apply_pow2_xaxis,
+    arch_color,
+    arch_dash,
     df_knockout,
-    go,
+    legend_sections,
     np,
+    place_legend,
+    plt,
+    save_pdf,
 ):
     """Plot 6 — Expert Importance Inequality (Gini Coefficient)."""
 
     def _gini(values):
-        """Compute Gini coefficient of a 1-D array."""
         _v = np.sort(np.abs(values))
         _n = len(_v)
         if _n == 0 or _v.sum() == 0:
@@ -644,38 +840,31 @@ def _(
         _index = np.arange(1, _n + 1)
         return (2 * np.sum(_index * _v) - (_n + 1) * np.sum(_v)) / (_n * np.sum(_v))
 
-    _fig = go.Figure()
-
+    _fig6, _ax = plt.subplots(figsize=(6.5, 4.5))
+    _max_reps = 1
     for _ds in active_datasets:
         for _mc in active_moe:
-            _sub = df_knockout[
-                (df_knockout["dataset"] == _ds) & (df_knockout["moe_config"] == _mc)
-            ]
-            _gini_per_rep = (
-                _sub.groupby("rep_level", observed=True)["loss_increase"]
-                .apply(_gini)
-                .reset_index()
-            )
-            _gini_per_rep.columns = ["rep_level", "gini"]
+            _sub = df_knockout[(df_knockout["dataset"] == _ds) & (df_knockout["moe_config"] == _mc)]
+            _g = _sub.groupby("rep_level", observed=True)["loss_increase"].apply(_gini)
+            _pts = sorted((REP_INT[str(r)], v) for r, v in _g.items() if v == v)
+            if not _pts:
+                continue
+            _max_reps = max(_max_reps, _pts[-1][0])
+            _ax.plot([p[0] for p in _pts], [p[1] for p in _pts], marker="o", markersize=4,
+                     linewidth=1.5, linestyle=arch_dash(_mc), color=arch_color(DATASET_COLORS[_ds], _mc))
 
-            _fig.add_trace(
-                go.Scatter(
-                    x=_gini_per_rep["rep_level"].astype(str),
-                    y=_gini_per_rep["gini"],
-                    mode="lines+markers",
-                    name=f"{_ds} / {_mc}",
-                    line=dict(color=DATASET_COLORS[_ds], dash=MOE_DASHES[_mc]),
-                )
-            )
-
-    _fig.update_layout(
-        title="Expert Importance Inequality (Gini Coefficient) vs. Repetition",
-        xaxis_title="Repetition level",
-        yaxis_title="Gini coefficient",
-        height=450,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+    apply_pow2_xaxis(_ax, _max_reps)
+    _ax.set_xlabel("repetition count")
+    _ax.set_ylabel("Gini coefficient")
+    _ax.set_title("Expert Importance Inequality (Gini) vs. Repetition", fontsize=10)
+    _h, _l, _t = legend_sections(
+        color_section=("Dataset", [(_ds, DATASET_COLORS[_ds]) for _ds in active_datasets]),
+        style_section=("Expert count", [(_mc, arch_dash(_mc)) for _mc in active_moe]),
     )
-    _fig
+    place_legend(_ax, _h, _l, _t)
+    _fig6.tight_layout()
+    save_pdf(_fig6, "gini_vs_rep")
+    _fig6
     return
 
 
@@ -714,77 +903,69 @@ def _(mo):
     mo.md("""
     **Ossification Trajectories** — Mean stability rate (averaged across all 8 layers)
     over the course of training, with one curve per repetition level. Lines that rise
-    faster or plateau higher indicate earlier or stronger ossification. Darker colors
-    correspond to higher repetition levels.
+    faster or plateau higher indicate earlier or stronger ossification. Color = repetition
+    level (viridis, light→dark); facets are expert count (rows) × dataset (columns).
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(active_datasets, active_moe, df_ossification, go, make_subplots):
+def _(
+    REP_COLORS,
+    REP_LEVELS,
+    active_datasets,
+    active_moe,
+    df_ossification,
+    legend_sections,
+    mo,
+    place_legend,
+    plt,
+    save_pdf,
+):
     """Plot 7 — Ossification Trajectories (faceted by dataset × moe)."""
-
-    REP_COLORSCALE = {
-        "1x": "#ffffcc", "2x": "#c7e9b4", "4x": "#7fcdbb",
-        "8x": "#41b6c4", "16x": "#2c7fb8", "32x": "#253494",
-    }
 
     _n_moe = len(active_moe)
     _n_ds = len(active_datasets)
 
     if _n_moe == 0 or _n_ds == 0:
-        _fig = go.Figure()
-        _fig.update_layout(title="No data selected")
+        _out7 = mo.md("*No data selected.*")
     else:
-        _fig = make_subplots(
-            rows=_n_moe, cols=_n_ds,
-            subplot_titles=[f"{_ds} / {_mc}" for _mc in active_moe for _ds in active_datasets],
-            vertical_spacing=0.12,
-            horizontal_spacing=0.06,
+        _fig7, _axes = plt.subplots(
+            _n_moe, _n_ds, figsize=(4.2 * _n_ds, 3.4 * _n_moe), squeeze=False
         )
-
         for _r_idx, _mc in enumerate(active_moe):
             for _c_idx, _ds in enumerate(active_datasets):
+                _ax = _axes[_r_idx][_c_idx]
                 _sub = df_ossification[
                     (df_ossification["dataset"] == _ds) & (df_ossification["moe_config"] == _mc)
                 ]
-                # Average across layers
                 _mean_per_step = _sub.groupby(
                     ["rep_level", "step"], observed=True
                 )["stability_rate"].mean().reset_index()
-
-                for _rep in _mean_per_step["rep_level"].cat.categories:
-                    _rep_data = _mean_per_step[_mean_per_step["rep_level"] == _rep]
-                    if len(_rep_data) == 0:
+                for _rep in REP_LEVELS:
+                    _rd = _mean_per_step[_mean_per_step["rep_level"] == _rep].sort_values("step")
+                    if len(_rd) == 0:
                         continue
-                    _fig.add_trace(
-                        go.Scatter(
-                            x=_rep_data["step"],
-                            y=_rep_data["stability_rate"],
-                            mode="lines+markers",
-                            name=str(_rep),
-                            line=dict(color=REP_COLORSCALE.get(str(_rep), "#888")),
-                            legendgroup=str(_rep),
-                            showlegend=(_r_idx == 0 and _c_idx == 0),
-                        ),
-                        row=_r_idx + 1, col=_c_idx + 1,
-                    )
+                    _ax.plot(_rd["step"], _rd["stability_rate"], marker="o", markersize=3,
+                             linewidth=1.2, color=REP_COLORS[_rep])
+                if _r_idx == 0:
+                    _ax.set_title(_ds, fontsize=10, fontweight="bold")
+                if _c_idx == 0:
+                    _ax.set_ylabel(f"{_mc}\nstability rate", fontsize=9)
+                if _r_idx == _n_moe - 1:
+                    _ax.set_xlabel("training step")
 
-        _fig.update_layout(
-            height=350 * _n_moe + 100,
-            title_text="Ossification Trajectories — Mean Stability Over Training",
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
-                title_text="Rep level",
-            ),
+        _fig7.suptitle("Ossification Trajectories — Mean Stability Over Training", fontsize=12)
+        _h, _l, _t = legend_sections(
+            color_section=("Repetitions", [(_r, REP_COLORS[_r]) for _r in REP_LEVELS])
         )
-        for _c in range(1, _n_ds + 1):
-            _fig.update_xaxes(title_text="Training step", row=_n_moe, col=_c)
-        for _r in range(1, _n_moe + 1):
-            _fig.update_yaxes(title_text="Stability rate", row=_r, col=1)
+        place_legend(_fig7, _h, _l, _t, on_fig=True)
+        _fig7.tight_layout(rect=(0, 0, 0.9, 0.97))
+        save_pdf(_fig7, "ossification_trajectories")
+        _out7 = _fig7
 
-    _fig
-    return (REP_COLORSCALE,)
+    _out7
+    return
 
 
 @app.cell(hide_code=True)
@@ -800,13 +981,17 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
-    REP_COLORSCALE,
+    REP_COLORS,
+    REP_LEVELS,
     active_datasets,
     active_moe,
     df_ossification,
-    go,
-    make_subplots,
+    legend_sections,
+    mo,
     oss_layer_slider,
+    place_legend,
+    plt,
+    save_pdf,
 ):
     """Plot 8 — Per-Layer Ossification (single selected layer)."""
 
@@ -815,55 +1000,42 @@ def _(
     _n_ds = len(active_datasets)
 
     if _n_moe == 0 or _n_ds == 0:
-        _fig = go.Figure()
-        _fig.update_layout(title="No data selected")
+        _out8 = mo.md("*No data selected.*")
     else:
-        _fig = make_subplots(
-            rows=_n_moe, cols=_n_ds,
-            subplot_titles=[f"{_ds} / {_mc}" for _mc in active_moe for _ds in active_datasets],
-            vertical_spacing=0.15,
-            horizontal_spacing=0.06,
+        _fig8, _axes = plt.subplots(
+            _n_moe, _n_ds, figsize=(4.2 * _n_ds, 3.4 * _n_moe), squeeze=False
         )
-
         for _r_idx, _mc in enumerate(active_moe):
             for _c_idx, _ds in enumerate(active_datasets):
+                _ax = _axes[_r_idx][_c_idx]
                 _sub = df_ossification[
                     (df_ossification["dataset"] == _ds)
                     & (df_ossification["moe_config"] == _mc)
                     & (df_ossification["layer"] == _layer)
                 ]
-
-                for _rep in _sub["rep_level"].cat.categories:
-                    _rep_data = _sub[_sub["rep_level"] == _rep].sort_values("step")
-                    if len(_rep_data) == 0:
+                for _rep in REP_LEVELS:
+                    _rd = _sub[_sub["rep_level"] == _rep].sort_values("step")
+                    if len(_rd) == 0:
                         continue
-                    _fig.add_trace(
-                        go.Scatter(
-                            x=_rep_data["step"],
-                            y=_rep_data["stability_rate"],
-                            mode="lines+markers",
-                            name=str(_rep),
-                            line=dict(color=REP_COLORSCALE.get(str(_rep), "#888")),
-                            legendgroup=str(_rep),
-                            showlegend=(_r_idx == 0 and _c_idx == 0),
-                        ),
-                        row=_r_idx + 1, col=_c_idx + 1,
-                    )
+                    _ax.plot(_rd["step"], _rd["stability_rate"], marker="o", markersize=3,
+                             linewidth=1.2, color=REP_COLORS[_rep])
+                if _r_idx == 0:
+                    _ax.set_title(_ds, fontsize=10, fontweight="bold")
+                if _c_idx == 0:
+                    _ax.set_ylabel(f"{_mc}\nstability rate", fontsize=9)
+                if _r_idx == _n_moe - 1:
+                    _ax.set_xlabel("training step")
 
-        _fig.update_layout(
-            height=350 * _n_moe + 100,
-            title_text=f"Ossification Trajectories — Layer {_layer}",
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
-                title_text="Rep level",
-            ),
+        _fig8.suptitle(f"Ossification Trajectories — Layer {_layer}", fontsize=12)
+        _h, _l, _t = legend_sections(
+            color_section=("Repetitions", [(_r, REP_COLORS[_r]) for _r in REP_LEVELS])
         )
-        for _c in range(1, _n_ds + 1):
-            _fig.update_xaxes(title_text="Training step", row=_n_moe, col=_c)
-        for _r in range(1, _n_moe + 1):
-            _fig.update_yaxes(title_text="Stability rate", row=_r, col=1)
+        place_legend(_fig8, _h, _l, _t, on_fig=True)
+        _fig8.tight_layout(rect=(0, 0, 0.9, 0.97))
+        save_pdf(_fig8, f"ossification_layer_{_layer}")
+        _out8 = _fig8
 
-    _fig
+    _out8
     return
 
 
@@ -873,8 +1045,8 @@ def _(mo):
     **Steps to Reach Stability Threshold** — For each experiment, the training step at
     which mean stability (averaged across layers) first exceeds the threshold set by the
     slider above. Computed via linear interpolation between measured checkpoints. Lower
-    bars mean the model's routing decisions locked in earlier during training. Hatched
-    bars indicate moe64 configurations.
+    bars mean the model's routing decisions locked in earlier during training. Color =
+    dataset; hatched bars indicate moe64 configurations.
     """)
     return
 
@@ -882,19 +1054,24 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     DATASET_COLORS,
+    REP_LEVELS,
     active_datasets,
     active_moe,
+    arch_color,
     df_ossification,
-    go,
+    legend_sections,
+    mo,
+    np,
     oss_threshold_slider,
-    pd,
+    place_legend,
+    plt,
+    save_pdf,
 ):
-    """Plot 9 — Steps to Reach Stability Threshold."""
+    """Plot 9 — Steps to Reach Stability Threshold (grouped bars)."""
 
     _threshold = oss_threshold_slider.value
 
     def _steps_to_threshold(_group, _thresh):
-        """Linearly interpolate the step at which stability first exceeds thresh."""
         _group = _group.sort_values("step")
         _steps_arr = _group["step"].values
         _rates_arr = _group["stability_rate"].values
@@ -908,54 +1085,45 @@ def _(
                 return _s0 + _frac * (_s1 - _s0)
         return float("nan")
 
-    _threshold_rows = []
-    for _ds in active_datasets:
-        for _mc in active_moe:
+    _groups = [(_ds, _mc) for _ds in active_datasets for _mc in active_moe]
+    if not _groups:
+        _out9 = mo.md("*No data selected.*")
+    else:
+        _fig9, _ax = plt.subplots(figsize=(7.5, 4.5))
+        _x = np.arange(len(REP_LEVELS))
+        _w = 0.8 / max(1, len(_groups))
+        for _gi, (_ds, _mc) in enumerate(_groups):
             _sub = df_ossification[
                 (df_ossification["dataset"] == _ds) & (df_ossification["moe_config"] == _mc)
             ]
             _mean_by_step = _sub.groupby(
                 ["rep_level", "step"], observed=True
             )["stability_rate"].mean().reset_index()
+            _vals = []
+            for _rep in REP_LEVELS:
+                _rd = _mean_by_step[_mean_by_step["rep_level"] == _rep]
+                _vals.append(_steps_to_threshold(_rd, _threshold) if len(_rd) else float("nan"))
+            _ax.bar(
+                _x + (_gi - (len(_groups) - 1) / 2) * _w, _vals, _w,
+                color=arch_color(DATASET_COLORS[_ds], _mc),
+                hatch="//" if _mc == "moe64" else None,
+                edgecolor="white", linewidth=0.4,
+            )
+        _ax.set_xticks(_x)
+        _ax.set_xticklabels(REP_LEVELS)
+        _ax.set_xlabel("repetition level")
+        _ax.set_ylabel("training step")
+        _ax.set_title(f"Steps to Reach {_threshold:.0%} Mean Stability", fontsize=10)
+        _h, _l, _t = legend_sections(
+            color_section=("Dataset", [(_ds, DATASET_COLORS[_ds]) for _ds in active_datasets]),
+            style_section=("Expert count", [(_mc, "-") for _mc in active_moe]),
+        )
+        place_legend(_ax, _h, _l, _t)
+        _fig9.tight_layout()
+        save_pdf(_fig9, "steps_to_stability")
+        _out9 = _fig9
 
-            for _rep in _mean_by_step["rep_level"].cat.categories:
-                _rep_data = _mean_by_step[_mean_by_step["rep_level"] == _rep]
-                if len(_rep_data) == 0:
-                    continue
-                _s = _steps_to_threshold(_rep_data, _threshold)
-                _threshold_rows.append({
-                    "dataset": _ds, "moe_config": _mc,
-                    "rep_level": str(_rep), "steps_to_thresh": _s,
-                })
-
-    _fig = go.Figure()
-
-    if _threshold_rows:
-        _df_thresh = pd.DataFrame(_threshold_rows)
-        for _ds in active_datasets:
-            for _mc in active_moe:
-                _sub = _df_thresh[
-                    (_df_thresh["dataset"] == _ds) & (_df_thresh["moe_config"] == _mc)
-                ]
-                _fig.add_trace(
-                    go.Bar(
-                        x=_sub["rep_level"],
-                        y=_sub["steps_to_thresh"],
-                        name=f"{_ds} / {_mc}",
-                        marker_color=DATASET_COLORS[_ds],
-                        marker_pattern_shape="/" if _mc == "moe64" else "",
-                    )
-                )
-
-    _fig.update_layout(
-        title=f"Steps to Reach {_threshold:.0%} Mean Stability",
-        xaxis_title="Repetition level",
-        yaxis_title="Training step",
-        barmode="group",
-        height=450,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-    )
-    _fig
+    _out9
     return
 
 
@@ -999,74 +1167,72 @@ def _(DATASETS, MOE_CONFIGS, N_LAYERS, REP_LEVELS, mo):
 def _(mo):
     mo.md("""
     **Co-Activation Entropy vs. Repetition** — Per-layer co-activation entropy at each
-    repetition level. Each line represents one layer (colored by depth). Decreasing entropy
-    with repetition would indicate that repeated data causes experts to form more rigid,
-    fixed pairing patterns.
+    repetition level. Each line represents one layer (colored by depth, viridis).
+    Decreasing entropy with repetition would indicate that repeated data causes experts to
+    form more rigid, fixed pairing patterns. Facets are expert count (rows) × dataset (cols).
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(active_datasets, active_moe, df_coactivation, go, make_subplots):
+def _(
+    REP_INT,
+    active_datasets,
+    active_moe,
+    apply_pow2_xaxis,
+    df_coactivation,
+    factor_palette,
+    legend_sections,
+    mo,
+    place_legend,
+    plt,
+    save_pdf,
+):
     """Plot 10 — Co-Activation Entropy vs. Rep Level (per layer)."""
 
-    _LAYER_COLORS = [
-        "#440154", "#46327e", "#365c8d", "#277f8e",
-        "#1fa187", "#4ac16d", "#9fda3a", "#fde725",
-    ]
-
+    _layer_color = factor_palette([f"L{_i}" for _i in range(8)])
     _n_moe = len(active_moe)
     _n_ds = len(active_datasets)
 
     if _n_moe == 0 or _n_ds == 0:
-        _fig = go.Figure()
-        _fig.update_layout(title="No data selected")
+        _out10 = mo.md("*No data selected.*")
     else:
-        _fig = make_subplots(
-            rows=_n_moe, cols=_n_ds,
-            subplot_titles=[f"{_ds} / {_mc}" for _mc in active_moe for _ds in active_datasets],
-            vertical_spacing=0.12,
-            horizontal_spacing=0.06,
+        _fig10, _axes = plt.subplots(
+            _n_moe, _n_ds, figsize=(4.2 * _n_ds, 3.4 * _n_moe), squeeze=False
         )
-
+        _max_reps = 1
         for _r_idx, _mc in enumerate(active_moe):
             for _c_idx, _ds in enumerate(active_datasets):
+                _ax = _axes[_r_idx][_c_idx]
                 _sub = df_coactivation[
-                    (df_coactivation["dataset"] == _ds)
-                    & (df_coactivation["moe_config"] == _mc)
+                    (df_coactivation["dataset"] == _ds) & (df_coactivation["moe_config"] == _mc)
                 ]
-
                 for _layer_idx in range(8):
-                    _lsub = _sub[_sub["layer"] == _layer_idx].sort_values("rep_int")
-                    if len(_lsub) == 0:
+                    _ls = _sub[_sub["layer"] == _layer_idx].sort_values("rep_int")
+                    if len(_ls) == 0:
                         continue
-                    _fig.add_trace(
-                        go.Scatter(
-                            x=_lsub["rep_level"].astype(str),
-                            y=_lsub["co_activation_entropy"],
-                            mode="lines+markers",
-                            name=f"L{_layer_idx}",
-                            line=dict(color=_LAYER_COLORS[_layer_idx]),
-                            legendgroup=f"L{_layer_idx}",
-                            showlegend=(_r_idx == 0 and _c_idx == 0),
-                        ),
-                        row=_r_idx + 1, col=_c_idx + 1,
-                    )
+                    _xs = [REP_INT[str(r)] for r in _ls["rep_level"]]
+                    _max_reps = max(_max_reps, max(_xs))
+                    _ax.plot(_xs, _ls["co_activation_entropy"], marker="o", markersize=3,
+                             linewidth=1.2, color=_layer_color[f"L{_layer_idx}"])
+                apply_pow2_xaxis(_ax, _max_reps)
+                if _r_idx == 0:
+                    _ax.set_title(_ds, fontsize=10, fontweight="bold")
+                if _c_idx == 0:
+                    _ax.set_ylabel(f"{_mc}\nentropy (nats)", fontsize=9)
+                if _r_idx == _n_moe - 1:
+                    _ax.set_xlabel("repetition count")
 
-        _fig.update_layout(
-            height=350 * _n_moe + 100,
-            title_text="Per-Layer Co-Activation Entropy vs. Repetition",
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
-                title_text="Layer",
-            ),
+        _fig10.suptitle("Per-Layer Co-Activation Entropy vs. Repetition", fontsize=12)
+        _h, _l, _t = legend_sections(
+            color_section=("Layer", [(f"L{_i}", _layer_color[f"L{_i}"]) for _i in range(8)])
         )
-        for _c in range(1, _n_ds + 1):
-            _fig.update_xaxes(title_text="Rep level", row=_n_moe, col=_c)
-        for _r in range(1, _n_moe + 1):
-            _fig.update_yaxes(title_text="Entropy (nats)", row=_r, col=1)
+        place_legend(_fig10, _h, _l, _t, on_fig=True)
+        _fig10.tight_layout(rect=(0, 0, 0.92, 0.97))
+        save_pdf(_fig10, "coactivation_entropy_vs_rep")
+        _out10 = _fig10
 
-    _fig
+    _out10
     return
 
 
@@ -1084,6 +1250,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    VIRIDIS_CAPPED,
     ca_dataset_dd,
     ca_layer_slider,
     ca_moe_dd,
@@ -1103,7 +1270,7 @@ def _(
                 z=_mat,
                 x=list(range(_n_experts)),
                 y=list(range(_n_experts)),
-                colorscale="Viridis",
+                colorscale=VIRIDIS_CAPPED,
                 hovertemplate="Expert %{x} × Expert %{y}<br>Co-activation: %{z:.6f}<extra></extra>",
             )
         )
@@ -1139,6 +1306,7 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    VIRIDIS_CAPPED,
     ca_dataset_dd,
     ca_layer_slider,
     ca_moe_dd,
@@ -1171,7 +1339,7 @@ def _(
             _fig.add_trace(
                 go.Heatmap(
                     z=_mat,
-                    colorscale="Viridis",
+                    colorscale=VIRIDIS_CAPPED,
                     showscale=(_col_i == 1),
                     hovertemplate="Expert %{x} × Expert %{y}<br>Freq: %{z:.6f}<extra></extra>",
                 ),
@@ -1255,17 +1423,31 @@ def _(mo):
     which mean routing stability first reaches 90%, and the y-axis is the Gini
     coefficient of knockout impacts. A positive correlation would suggest that models
     whose routing locks in earlier also develop more unequal expert utilization.
-    Point labels show the repetition level; larger points indicate higher repetition.
+    Color = dataset; marker = expert count (moe32 circle, moe64 diamond); point size
+    grows with repetition; text labels show the repetition level.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(DATASET_COLORS, df_knockout, df_ossification, go, np):
+def _(
+    DATASET_COLORS,
+    active_datasets,
+    active_moe,
+    arch_color,
+    df_knockout,
+    df_ossification,
+    legend_sections,
+    mo,
+    np,
+    place_legend,
+    plt,
+    save_pdf,
+):
     """Plot 14 — Ossification Speed vs. Knockout Inequality."""
 
     _THRESHOLD = 0.90
-    _SYMBOL_MAP = {"moe32": "circle", "moe64": "diamond"}
+    _MARKER = {"moe32": "o", "moe64": "D"}
 
     def _gini14(values):
         _v = np.sort(np.abs(values))
@@ -1289,57 +1471,57 @@ def _(DATASET_COLORS, df_knockout, df_ossification, go, np):
                 return _s0 + _frac * (_s1 - _s0)
         return float("nan")
 
-    _scatter_rows = []
+    _rows = []
     for (_ds, _mc, _rep), _ko_group in df_knockout.groupby(
         ["dataset", "moe_config", "rep_level"], observed=True
     ):
-        _gini_val = _gini14(_ko_group["loss_increase"].values)
-
+        if _ds not in active_datasets or _mc not in active_moe:
+            continue
         _oss_sub = df_ossification[
             (df_ossification["dataset"] == _ds)
             & (df_ossification["moe_config"] == _mc)
             & (df_ossification["rep_level"] == _rep)
         ]
         _mean_by_step = _oss_sub.groupby("step")["stability_rate"].mean().reset_index()
-        _s2t = _steps_to_thresh14(_mean_by_step, _THRESHOLD)
-        _rep_int = _ko_group["rep_int"].iloc[0]
-
-        _scatter_rows.append({
+        _rows.append({
             "dataset": _ds, "moe_config": _mc, "rep_level": str(_rep),
-            "rep_int": _rep_int, "gini": _gini_val, "steps_to_thresh": _s2t,
+            "rep_int": _ko_group["rep_int"].iloc[0],
+            "gini": _gini14(_ko_group["loss_increase"].values),
+            "steps_to_thresh": _steps_to_thresh14(_mean_by_step, _THRESHOLD),
         })
 
-    _fig = go.Figure()
-    for _ds in DATASET_COLORS:
-        for _mc in _SYMBOL_MAP:
-            _sub = [_r for _r in _scatter_rows if _r["dataset"] == _ds and _r["moe_config"] == _mc]
-            if not _sub:
-                continue
-            _fig.add_trace(
-                go.Scatter(
-                    x=[_r["steps_to_thresh"] for _r in _sub],
-                    y=[_r["gini"] for _r in _sub],
-                    mode="markers+text",
-                    text=[_r["rep_level"] for _r in _sub],
-                    textposition="top center",
-                    textfont=dict(size=9),
-                    name=f"{_ds} / {_mc}",
-                    marker=dict(
-                        color=DATASET_COLORS[_ds],
-                        symbol=_SYMBOL_MAP[_mc],
-                        size=[6 + _r["rep_int"] * 0.8 for _r in _sub],
-                    ),
+    if not _rows:
+        _out14 = mo.md("*No data selected.*")
+    else:
+        _fig14, _ax = plt.subplots(figsize=(6.5, 5.0))
+        for _ds in active_datasets:
+            for _mc in active_moe:
+                _sub = [r for r in _rows if r["dataset"] == _ds and r["moe_config"] == _mc]
+                if not _sub:
+                    continue
+                _ax.scatter(
+                    [_pt["steps_to_thresh"] for _pt in _sub],
+                    [_pt["gini"] for _pt in _sub],
+                    s=[30 + _pt["rep_int"] * 6 for _pt in _sub],
+                    color=arch_color(DATASET_COLORS[_ds], _mc),
+                    marker=_MARKER[_mc], edgecolor="white", linewidth=0.5, zorder=3,
                 )
-            )
+                for _pt in _sub:
+                    _ax.annotate(_pt["rep_level"], (_pt["steps_to_thresh"], _pt["gini"]),
+                                 xytext=(4, 4), textcoords="offset points", fontsize=6)
+        _ax.set_xlabel(f"steps to reach {_THRESHOLD:.0%} stability")
+        _ax.set_ylabel("Gini coefficient of knockout impacts")
+        _ax.set_title(f"Ossification Speed vs. Knockout Inequality (threshold={_THRESHOLD:.0%})", fontsize=10)
+        _h, _l, _t = legend_sections(
+            color_section=("Dataset", [(_ds, DATASET_COLORS[_ds]) for _ds in active_datasets]),
+            marker_section=("Expert count", [(_mc, _MARKER[_mc]) for _mc in active_moe]),
+        )
+        place_legend(_ax, _h, _l, _t)
+        _fig14.tight_layout()
+        save_pdf(_fig14, "ossification_vs_gini")
+        _out14 = _fig14
 
-    _fig.update_layout(
-        title=f"Ossification Speed vs. Knockout Inequality (threshold={_THRESHOLD:.0%})",
-        xaxis_title=f"Steps to reach {_THRESHOLD:.0%} stability",
-        yaxis_title="Gini coefficient of knockout impacts",
-        height=500,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-    )
-    _fig
+    _out14
     return
 
 
@@ -1350,67 +1532,80 @@ def _(mo):
     The x-axis is mean co-activation entropy (how uniform expert pairings are) and the
     y-axis is mean knockout Δloss (how critical individual experts are). A negative
     correlation would suggest that more rigid expert pairings (low entropy) go hand-in-hand
-    with higher individual expert importance.
+    with higher individual expert importance. Color = dataset; marker = expert count;
+    point size grows with repetition.
     """)
     return
 
 
 @app.cell(hide_code=True)
-def _(DATASET_COLORS, df_coactivation, df_knockout, go):
+def _(
+    DATASET_COLORS,
+    active_datasets,
+    active_moe,
+    arch_color,
+    df_coactivation,
+    df_knockout,
+    legend_sections,
+    mo,
+    place_legend,
+    plt,
+    save_pdf,
+):
     """Plot 15 — Entropy vs. Knockout Impact."""
 
-    _SYMBOL_MAP = {"moe32": "circle", "moe64": "diamond"}
+    _MARKER = {"moe32": "o", "moe64": "D"}
 
-    _scatter_rows = []
+    _rows = []
     for (_ds, _mc, _rep), _ko_group in df_knockout.groupby(
         ["dataset", "moe_config", "rep_level"], observed=True
     ):
-        _mean_ko = _ko_group["loss_increase"].mean()
-        _rep_int = _ko_group["rep_int"].iloc[0]
-
+        if _ds not in active_datasets or _mc not in active_moe:
+            continue
         _ca_sub = df_coactivation[
             (df_coactivation["dataset"] == _ds)
             & (df_coactivation["moe_config"] == _mc)
             & (df_coactivation["rep_level"] == _rep)
         ]
-        _mean_entropy = _ca_sub["co_activation_entropy"].mean()
-
-        _scatter_rows.append({
+        _rows.append({
             "dataset": _ds, "moe_config": _mc, "rep_level": str(_rep),
-            "rep_int": _rep_int, "mean_ko": _mean_ko, "mean_entropy": _mean_entropy,
+            "rep_int": _ko_group["rep_int"].iloc[0],
+            "mean_ko": _ko_group["loss_increase"].mean(),
+            "mean_entropy": _ca_sub["co_activation_entropy"].mean(),
         })
 
-    _fig = go.Figure()
-    for _ds in DATASET_COLORS:
-        for _mc in _SYMBOL_MAP:
-            _sub = [_r for _r in _scatter_rows if _r["dataset"] == _ds and _r["moe_config"] == _mc]
-            if not _sub:
-                continue
-            _fig.add_trace(
-                go.Scatter(
-                    x=[_r["mean_entropy"] for _r in _sub],
-                    y=[_r["mean_ko"] for _r in _sub],
-                    mode="markers+text",
-                    text=[_r["rep_level"] for _r in _sub],
-                    textposition="top center",
-                    textfont=dict(size=9),
-                    name=f"{_ds} / {_mc}",
-                    marker=dict(
-                        color=DATASET_COLORS[_ds],
-                        symbol=_SYMBOL_MAP[_mc],
-                        size=[6 + _r["rep_int"] * 0.8 for _r in _sub],
-                    ),
+    if not _rows:
+        _out15 = mo.md("*No data selected.*")
+    else:
+        _fig15, _ax = plt.subplots(figsize=(6.5, 5.0))
+        for _ds in active_datasets:
+            for _mc in active_moe:
+                _sub = [r for r in _rows if r["dataset"] == _ds and r["moe_config"] == _mc]
+                if not _sub:
+                    continue
+                _ax.scatter(
+                    [_pt["mean_entropy"] for _pt in _sub],
+                    [_pt["mean_ko"] for _pt in _sub],
+                    s=[30 + _pt["rep_int"] * 6 for _pt in _sub],
+                    color=arch_color(DATASET_COLORS[_ds], _mc),
+                    marker=_MARKER[_mc], edgecolor="white", linewidth=0.5, zorder=3,
                 )
-            )
+                for _pt in _sub:
+                    _ax.annotate(_pt["rep_level"], (_pt["mean_entropy"], _pt["mean_ko"]),
+                                 xytext=(4, 4), textcoords="offset points", fontsize=6)
+        _ax.set_xlabel("mean co-activation entropy (nats)")
+        _ax.set_ylabel("mean knockout Δloss")
+        _ax.set_title("Co-Activation Entropy vs. Mean Knockout Impact", fontsize=10)
+        _h, _l, _t = legend_sections(
+            color_section=("Dataset", [(_ds, DATASET_COLORS[_ds]) for _ds in active_datasets]),
+            marker_section=("Expert count", [(_mc, _MARKER[_mc]) for _mc in active_moe]),
+        )
+        place_legend(_ax, _h, _l, _t)
+        _fig15.tight_layout()
+        save_pdf(_fig15, "entropy_vs_knockout")
+        _out15 = _fig15
 
-    _fig.update_layout(
-        title="Co-Activation Entropy vs. Mean Knockout Impact",
-        xaxis_title="Mean co-activation entropy (nats)",
-        yaxis_title="Mean knockout Δloss",
-        height=500,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-    )
-    _fig
+    _out15
     return
 
 

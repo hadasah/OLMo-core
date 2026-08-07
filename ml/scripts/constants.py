@@ -14,6 +14,7 @@ MODEL_HP_DEFAULTS = {
         "sequence_length": [2048],
         "train_module": {
             "optim": {
+                "lr": [4e-4],
                 "weight_decay": [0.1],
             },
             "scheduler": {
@@ -28,11 +29,6 @@ MODEL_HP_DEFAULTS = {
         },
     },
     "olmo2_ml_10M": {
-        "train_module": {
-            "optim": {
-                "lr": [4e-3],
-            },
-        },
         "trainer": {
             "max_duration": {
                 "value": [200_000_000],
@@ -40,11 +36,6 @@ MODEL_HP_DEFAULTS = {
         },
     },
     "olmo2_ml_20M": {
-        "train_module": {
-            "optim": {
-                "lr": [4e-3],
-            },
-        },
         "trainer": {
             "max_duration": {
                 "value": [400_000_000],
@@ -52,11 +43,6 @@ MODEL_HP_DEFAULTS = {
         },
     },
     "olmo2_ml_50M": {
-        "train_module": {
-            "optim": {
-                "lr": [4e-3],
-            },
-        },
         "trainer": {
             "max_duration": {
                 "value": [1_000_000_000],
@@ -64,11 +50,6 @@ MODEL_HP_DEFAULTS = {
         },
     },
     "olmo2_ml_80M": {
-        "train_module": {
-            "optim": {
-                "lr": [4e-3],
-            },
-        },
         "trainer": {
             "max_duration": {
                 "value": [1_600_000_000],
@@ -76,11 +57,6 @@ MODEL_HP_DEFAULTS = {
         },
     },
     "olmo2_ml_100M": {
-        "train_module": {
-            "optim": {
-                "lr": [4e-3],
-            },
-        },
         "trainer": {
             "max_duration": {
                 "value": [2_000_000_000],
@@ -88,11 +64,6 @@ MODEL_HP_DEFAULTS = {
         },
     },
     "olmo2_ml_110M": {
-        "train_module": {
-            "optim": {
-                "lr": [4e-3],
-            },
-        },
         "trainer": {
             "max_duration": {
                 "value": [2_200_000_000],
@@ -100,11 +71,6 @@ MODEL_HP_DEFAULTS = {
         },
     },
     "olmo2_ml_200M": {
-        "train_module": {
-            "optim": {
-                "lr": [4e-3],
-            },
-        },
         "trainer": {
             "max_duration": {
                 "value": [4_000_000_000],
@@ -112,11 +78,6 @@ MODEL_HP_DEFAULTS = {
         },
     },
     "olmo2_ml_300M": {
-        "train_module": {
-            "optim": {
-                "lr": [4e-3],
-            },
-        },
         "trainer": {
             "max_duration": {
                 "value": [6_000_000_000],
@@ -124,14 +85,16 @@ MODEL_HP_DEFAULTS = {
         },
     },
     "olmo2_ml_500M": {
-        "train_module": {
-            "optim": {
-                "lr": [4e-3],
-            },
-        },
         "trainer": {
             "max_duration": {
                 "value": [10_000_000_000],
+            },
+        },
+    },
+    "olmo2_ml_1B": {
+        "trainer": {
+            "max_duration": {
+                "value": [20_000_000_000],
             },
         },
     },
@@ -287,6 +250,22 @@ HARDWARE_SPECS_DICT = {
             "per_gpu_batch_size": 16,
             "NUM_CPUS": 16,
             "MEM_GB": 240,
+        },
+    },
+    "olmo2_ml_1B": {
+        "all": {
+            "per_gpu_batch_size": 8,
+            "MEM_GB": 800,
+        },
+        "gpu-a40": {
+            "per_gpu_batch_size": 8,
+            "NUM_CPUS": 16,
+            "MEM_GB": 800,
+        },
+        "gpu-h200": {
+            "per_gpu_batch_size": 32,
+            "NUM_CPUS": 16,
+            "MEM_GB": 1920,
         },
     },
 }
