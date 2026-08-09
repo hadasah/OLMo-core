@@ -133,7 +133,12 @@ export NCCL_MIN_CHANNELS=32
 
 # olmo-core specific
 export OLMO_SHARED_FS=1
-export OLMO_CORE_FS_CACHE_DIR=/gscratch/zlab/atindra/fs_cache
+# olmo_core's fs_cache does cache_dir.mkdir(parents=True) with no fallback, so a
+# path the cluster cannot create is fatal, not a degraded cache. /gscratch is
+# klone-only. Honor a value already exported by ~/.bashrc (Marlowe sets one) and
+# keep the klone path as the default so klone behavior is unchanged.
+# NB: braces doubled because this template goes through SH_TEMPLATE.format().
+export OLMO_CORE_FS_CACHE_DIR=${{OLMO_CORE_FS_CACHE_DIR:-/gscratch/zlab/atindra/fs_cache}}
 
 cd {NEW_DIR_PATH}
 export PYTHONPATH={SAVE_ROOT}/{repo_name}:$PYTHONPATH
