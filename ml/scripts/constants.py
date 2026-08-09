@@ -210,13 +210,17 @@ PROJECT_SPECS = {
     # and single_train_launch.py keys PROJECT_SPECS off $USER, so this entry is what
     # makes the launcher work on that cluster at all.
     # Storage: $HOME (/users/atj10) is only 32 GB, so everything heavy lives on
-    # /scratch/m000137 (10 TB, Lustre, NOT backed up).
+    # scratch (Lustre, NOT backed up).
+    # NOTE the path is /scratch/m000137-pm06, named after the ALLOCATION, not
+    # /scratch/m000137, which is named after the parent project. atj10 is in group
+    # marlowe-m000137-pm06 but NOT marlowe-m000137, and /scratch/m000137 is mode
+    # drwxrws--- group marlowe-m000137, so that path gives Permission denied.
     # VALID_DATA_DIR must hold the v3_small_ppl_validation shards; stage them once
     # (11 files, ~27 MB total) rather than streaming them, since eval runs often.
     "atj10": {
-        "DEFAULT_SAVE_PATH": "/scratch/m000137/atj10/models",
-        "DATA_WORK_DIR": "/scratch/m000137/atj10/data/work",
-        "VALID_DATA_DIR": "/scratch/m000137/atj10/data/preprocessed",
+        "DEFAULT_SAVE_PATH": "/scratch/m000137-pm06/atj10/models",
+        "DATA_WORK_DIR": "/scratch/m000137-pm06/atj10/data/work",
+        "VALID_DATA_DIR": "/scratch/m000137-pm06/atj10/data/preprocessed",
         "WANDB_PROJECT": "data_rep_moe",
         "WANDB_ENTITY": "ml-moe",
         "CONDA_ENV_NAME": "olmoe-core",
@@ -229,7 +233,7 @@ PROJECT_SPECS = {
         "NUM_GPUS": 4,
         "MODEL": [],
         "DATAROOT": "https://olmo-data.org/",
-        "DATA_DIR": "/scratch/m000137/atj10/data/",
+        "DATA_DIR": "/scratch/m000137-pm06/atj10/data/",
         "NAME_KEYS": [],
     },
     "rohan_sanda": {
