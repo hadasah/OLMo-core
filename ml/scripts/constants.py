@@ -206,6 +206,32 @@ PROJECT_SPECS = {
         "DATA_DIR": "/gscratch/zlab/atindra/data/",
         "NAME_KEYS": [],
     },
+    # Marlowe (Stanford SRCC). $USER there is the SUNet id `atj10`, not `atindra`,
+    # and single_train_launch.py keys PROJECT_SPECS off $USER, so this entry is what
+    # makes the launcher work on that cluster at all.
+    # Storage: $HOME (/users/atj10) is only 32 GB, so everything heavy lives on
+    # /scratch/m000137 (10 TB, Lustre, NOT backed up).
+    # VALID_DATA_DIR must hold the v3_small_ppl_validation shards; stage them once
+    # (11 files, ~27 MB total) rather than streaming them, since eval runs often.
+    "atj10": {
+        "DEFAULT_SAVE_PATH": "/scratch/m000137/atj10/models",
+        "DATA_WORK_DIR": "/scratch/m000137/atj10/data/work",
+        "VALID_DATA_DIR": "/scratch/m000137/atj10/data/preprocessed",
+        "WANDB_PROJECT": "data_rep_moe",
+        "WANDB_ENTITY": "ml-moe",
+        "CONDA_ENV_NAME": "olmoe-core",
+        "PROJECT_DIR": DEFAULT_DIR_PATH,
+        # `batch` charges the suffixed allocation account; `preempt` must use the
+        # bare `marlowe-m000137` or it bills GPU-hours for what should be free.
+        "SLURM_ACCOUNT": "marlowe-m000137-pm06",
+        "SLURM_PARTITION": "batch",
+        "COMMAND_PREFIX": f"{DEFAULT_DIR_PATH}/ml/scripts/single_train_launch.py",
+        "NUM_GPUS": 4,
+        "MODEL": [],
+        "DATAROOT": "https://olmo-data.org/",
+        "DATA_DIR": "/scratch/m000137/atj10/data/",
+        "NAME_KEYS": [],
+    },
     "rohan_sanda": {
         "DEFAULT_SAVE_PATH": "/m-coriander/coriander/rohan_sanda/models",
         "DATA_WORK_DIR": "/m-coriander/coriander/rohan_sanda/OLMo-core/ml/data",
