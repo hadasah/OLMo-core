@@ -105,6 +105,7 @@ def get_wandb_tags(
     moe_type,
     unique_data_fraction=1.0,
     num_repetitions=1,
+    moe_router_top_ks_list=None,
 ):
     """
     Returns a list of tags for W&B runs based on the current configuration.
@@ -119,6 +120,20 @@ def get_wandb_tags(
         wandb_tags.append("dense")
     else:
         raise ValueError("moe_num_experts_list must contain at least one element")
+
+    # Expert count alone does not identify the architecture: moe64, moe64s8 and
+    # moe64s32 all have 64 experts and differ only in top-k (4 / 8 / 2). Tagging
+    # on num_experts alone makes them indistinguishable, so any pivot on
+    # (arch, reps) silently keeps one of the three. Emit both the expert-count
+    # tag and a sparsity-qualified tag, which is unique across the whole grid:
+    #   moe16->MoE16s4  moe32->MoE32s8  moe64->MoE64s16
+    #   moe64s8->MoE64s8  moe64s32->MoE64s32  moe128->MoE128s32
+    if len(moe_num_experts_list) == 1 and moe_num_experts_list[0] > 1:
+        num_experts = moe_num_experts_list[0]
+        wandb_tags.append(f"MoE{num_experts}")
+        top_k = moe_router_top_ks_list[0] if moe_router_top_ks_list else None
+        if top_k and num_experts % top_k == 0:
+            wandb_tags.append(f"MoE{num_experts}s{num_experts // top_k}")
     if moe_type == "dropless":
         wandb_tags.append("dropless")
     if "5XD" in run_name:
@@ -130,7 +145,9 @@ def get_wandb_tags(
     else:
         wandb_tags.append("nogen")
 
-    wandb_tags.append(model_name.split("_")[1])  # e.g., "100M", "1B"
+    # "olmo2_ml_80M".split("_")[1] is "ml", not the size -- every run was tagged
+    # with the literal string "ml" instead of its parameter count.
+    wandb_tags.append(model_name.split("_")[-1])  # e.g., "100M", "1B"
 
     if unique_data_fraction < 1.0:
         wandb_tags.append(f"frac{unique_data_fraction}")
@@ -592,6 +609,7 @@ def build_config(
                     moe_type,
                     unique_data_fraction,
                     num_repetitions,
+                    moe_router_top_ks_list,
                 ),
                 enabled=True,  # NOTE: change to true to enable
             ),
