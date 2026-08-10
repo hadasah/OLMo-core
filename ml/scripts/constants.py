@@ -135,6 +135,17 @@ MODEL_HP_DEFAULTS = {
             },
         },
     },
+    # 1B = 20B tokens (D/N = 20), matching the klone 1B sweeps exactly
+    # (--trainer.max_duration.value=20000000000 in their wandb-logged args).
+    # No per-model lr override here: the sweep's main_grid pins lr=4e-4 for
+    # every run, and the klone 1B configs confirm optim.lr == 0.0004.
+    "olmo2_ml_1B": {
+        "trainer": {
+            "max_duration": {
+                "value": [20_000_000_000],
+            },
+        },
+    },
 }
 
 PROJECT_SPECS = {
@@ -316,6 +327,22 @@ HARDWARE_SPECS_DICT = {
             "per_gpu_batch_size": 16,
             "NUM_CPUS": 16,
             "MEM_GB": 240,
+        },
+    },
+    # Marlowe 1B settings. Keyed "all" (reachable now that train_sweep merges the
+    # model-level "all" block); klone's 1B runs used 8 GPUs per job (gpu_count=8
+    # in every run's wandb metadata), so NUM_GPUS=8 replicates that layout on one
+    # H100 node. 47:59:59 rides just under the batch partition's 2-day cap;
+    # requeue=True + load_strategy "if_available" resume from the latest
+    # checkpoint if a job times out anyway. per_gpu_batch_size is deliberately
+    # NOT set here: train_sweep never forwards it to the launch command (the
+    # parser default of 16 is what klone ran with), and the moe64 arm's H100
+    # memory override is passed explicitly in its subgrids instead.
+    "olmo2_ml_1B": {
+        "all": {
+            "NUM_GPUS": 8,
+            "MEM_GB": 800,
+            "JOBTIME": "47:59:59",
         },
     },
 }
