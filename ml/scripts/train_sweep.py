@@ -564,6 +564,46 @@ def main(
                     # "moe64_rep256x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.00390625"], "num_repetitions": ["256"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "moe64_rep512x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.001953125"], "num_repetitions": ["512"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "moe64_rep1024x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0009765625"], "num_repetitions": ["1024"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
+                    ## === 1B missing rungs (dense + moe64 x R{2,32}) ===
+                    ## The two rungs absent from the klone 1B ladder, launched into the
+                    ## same sweep dir via --add-time-to-name none. Same contract as the
+                    ## other 1B cells: identical args to the klone convention, moe64
+                    ## carries per_gpu_batch_size=8 for the H100-80GB fit.
+                    "dense_rep2x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.5"],
+                        "num_repetitions": ["2"],
+                    },
+                    "dense_rep32x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.03125"],
+                        "num_repetitions": ["32"],
+                    },
+                    "moe64_rep2x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "per_gpu_batch_size": ["8"],
+                        "unique_data_fraction": ["0.5"],
+                        "num_repetitions": ["2"],
+                    },
+                    "moe64_rep32x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "per_gpu_batch_size": ["8"],
+                        "unique_data_fraction": ["0.03125"],
+                        "num_repetitions": ["32"],
+                    },
+                    ## The 10-cell relaunch below went out 2026-08-09 as sweep
+                    ## 2026_08_09-17_02_22_data_rep_AC_olmo2_ml_1B (job arrays 419453,
+                    ## 419468). dense_rep16x and moe64_rep64x were cancelled 2026-08-10
+                    ## (their klone counterparts are the two COMPLETE wandb runs); the
+                    ## other 8 rungs' klone runs are crashed/truncated, so those jobs
+                    ## were kept running. Commented so the 2x/32x add-launch cannot
+                    ## resubmit any of them.
                     ## === 1B ladder (dense + moe64 x R{1,4,8,16,64}) ===
                     ## Replicates the klone 1B sweeps (2026_07_31-01_20_02 moe64,
                     ## 2026_07_31-23_36_15 dense) cell for cell -- same ladder, same
@@ -572,76 +612,76 @@ def main(
                     ## reserved 86.8 GiB on H200-141GB, over the H100's 80 GB; halving
                     ## the microbatch doubles grad-accumulation steps over the same
                     ## 512-sequence global batch and changes no hyperparameter.
-                    "dense_rep1x": {
-                        "moe_num_experts_list": ["1"],
-                        "unique_data_fraction": ["1.0"],
-                        "num_repetitions": ["1"],
-                    },
-                    "dense_rep4x": {
-                        "moe_num_experts_list": ["1"],
-                        "unique_data_fraction": ["0.25"],
-                        "num_repetitions": ["4"],
-                    },
-                    "dense_rep8x": {
-                        "moe_num_experts_list": ["1"],
-                        "unique_data_fraction": ["0.125"],
-                        "num_repetitions": ["8"],
-                    },
-                    "dense_rep16x": {
-                        "moe_num_experts_list": ["1"],
-                        "unique_data_fraction": ["0.0625"],
-                        "num_repetitions": ["16"],
-                    },
-                    "dense_rep64x": {
-                        "moe_num_experts_list": ["1"],
-                        "unique_data_fraction": ["0.015625"],
-                        "num_repetitions": ["64"],
-                    },
-                    "moe64_rep1x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.25"],
-                        "moe_router_top_ks_list": ["4"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "per_gpu_batch_size": ["8"],
-                        "unique_data_fraction": ["1.0"],
-                        "num_repetitions": ["1"],
-                    },
-                    "moe64_rep4x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.25"],
-                        "moe_router_top_ks_list": ["4"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "per_gpu_batch_size": ["8"],
-                        "unique_data_fraction": ["0.25"],
-                        "num_repetitions": ["4"],
-                    },
-                    "moe64_rep8x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.25"],
-                        "moe_router_top_ks_list": ["4"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "per_gpu_batch_size": ["8"],
-                        "unique_data_fraction": ["0.125"],
-                        "num_repetitions": ["8"],
-                    },
-                    "moe64_rep16x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.25"],
-                        "moe_router_top_ks_list": ["4"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "per_gpu_batch_size": ["8"],
-                        "unique_data_fraction": ["0.0625"],
-                        "num_repetitions": ["16"],
-                    },
-                    "moe64_rep64x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.25"],
-                        "moe_router_top_ks_list": ["4"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "per_gpu_batch_size": ["8"],
-                        "unique_data_fraction": ["0.015625"],
-                        "num_repetitions": ["64"],
-                    },
+#                    "dense_rep1x": {
+#                        "moe_num_experts_list": ["1"],
+#                        "unique_data_fraction": ["1.0"],
+#                        "num_repetitions": ["1"],
+#                    },
+#                    "dense_rep4x": {
+#                        "moe_num_experts_list": ["1"],
+#                        "unique_data_fraction": ["0.25"],
+#                        "num_repetitions": ["4"],
+#                    },
+#                    "dense_rep8x": {
+#                        "moe_num_experts_list": ["1"],
+#                        "unique_data_fraction": ["0.125"],
+#                        "num_repetitions": ["8"],
+#                    },
+#                    "dense_rep16x": {
+#                        "moe_num_experts_list": ["1"],
+#                        "unique_data_fraction": ["0.0625"],
+#                        "num_repetitions": ["16"],
+#                    },
+#                    "dense_rep64x": {
+#                        "moe_num_experts_list": ["1"],
+#                        "unique_data_fraction": ["0.015625"],
+#                        "num_repetitions": ["64"],
+#                    },
+#                    "moe64_rep1x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.25"],
+#                        "moe_router_top_ks_list": ["4"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "per_gpu_batch_size": ["8"],
+#                        "unique_data_fraction": ["1.0"],
+#                        "num_repetitions": ["1"],
+#                    },
+#                    "moe64_rep4x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.25"],
+#                        "moe_router_top_ks_list": ["4"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "per_gpu_batch_size": ["8"],
+#                        "unique_data_fraction": ["0.25"],
+#                        "num_repetitions": ["4"],
+#                    },
+#                    "moe64_rep8x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.25"],
+#                        "moe_router_top_ks_list": ["4"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "per_gpu_batch_size": ["8"],
+#                        "unique_data_fraction": ["0.125"],
+#                        "num_repetitions": ["8"],
+#                    },
+#                    "moe64_rep16x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.25"],
+#                        "moe_router_top_ks_list": ["4"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "per_gpu_batch_size": ["8"],
+#                        "unique_data_fraction": ["0.0625"],
+#                        "num_repetitions": ["16"],
+#                    },
+#                    "moe64_rep64x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.25"],
+#                        "moe_router_top_ks_list": ["4"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "per_gpu_batch_size": ["8"],
+#                        "unique_data_fraction": ["0.015625"],
+#                        "num_repetitions": ["64"],
+#                    },
                     ## Granularity sweep (moe64s8, moe64s32): DONE 2026-08-09 on
                     ## Marlowe, sweep 2026_08_09-03_14_34_data_rep_AC_olmo2_ml_80M,
                     ## all 12 finished at step 1526. Commented out for the 1B ladder.
