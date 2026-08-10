@@ -67,6 +67,7 @@ MODEL_CONFIG_LOOKUP = {
     "olmo2_ml_200M": TransformerConfig.olmo2_ml_200M,
     "olmo2_ml_300M": TransformerConfig.olmo2_ml_300M,
     "olmo2_ml_500M": TransformerConfig.olmo2_ml_500M,
+    "olmo2_ml_1B": TransformerConfig.olmo2_ml_1B,
 }
 
 TOKENIZER_LOOKUP = {
@@ -106,6 +107,7 @@ def get_wandb_tags(
     unique_data_fraction=1.0,
     num_repetitions=1,
     moe_router_top_ks_list=None,
+    train_datamix_name=None,
 ):
     """
     Returns a list of tags for W&B runs based on the current configuration.
@@ -154,6 +156,18 @@ def get_wandb_tags(
         wandb_tags.append(f"rep{num_repetitions}x")
     else:
         wandb_tags.append("rep1x")
+
+    # Datamix tag, replicating the atindra_exps convention so tag-based filters
+    # keep working across both branches' runs: there, runs that used the default
+    # mix (train_datamix_name never passed) got the tag "olmo_mix" -- the klone
+    # 80M baselines and both klone 1B sweeps all carry it. This sweep passes
+    # --train_datamix_name=OLMoE_mix_0824 explicitly, which IS that default mix,
+    # so map it to the same historical tag rather than minting a second name.
+    if not train_datamix_name or train_datamix_name == "OLMoE_mix_0824":
+        wandb_tags.append("olmo_mix")
+    else:
+        for t in train_datamix_name.split(","):
+            wandb_tags.append(t)
 
     return wandb_tags
 
@@ -610,6 +624,7 @@ def build_config(
                     unique_data_fraction,
                     num_repetitions,
                     moe_router_top_ks_list,
+                    train_datamix_name,
                 ),
                 enabled=True,  # NOTE: change to true to enable
             ),
@@ -686,6 +701,9 @@ def main(args: argparse.Namespace, overrides: List[str]) -> None:
             global_batch_size=args.global_batch_size,
             scheduler=args.scheduler,
             per_gpu_batch_size=args.per_gpu_batch_size,
+            eval_interval=args.eval_interval,
+            save_interval=args.save_interval,
+            ephemeral_save_interval=args.ephemeral_save_interval,
             moe_hidden_multipliers_list=[
                 float(v) for v in args.moe_hidden_multipliers_list.split(",")
             ],
@@ -802,6 +820,23 @@ if __name__ == "__main__":
         help="Scheduler type to use",
     )
     parser.add_argument("--per_gpu_batch_size", type=int, default=16, help="Batch size per GPU")
+    # Cadence knobs. These already existed as build_config parameters but were
+    # never reachable from the command line, so every run silently used the
+    # defaults (eval 100 / save 200 / ephemeral 50). They must be real argparse
+    # flags: unknown args fall through parse_known_args into the config-override
+    # list, and none of these is an ExperimentConfig field.
+    parser.add_argument(
+        "--eval_interval", type=int, default=100,
+        help="Steps between in-loop evals (lm_evaluator and downstream_evaluator)",
+    )
+    parser.add_argument(
+        "--save_interval", type=int, default=200,
+        help="Steps between permanent checkpoints",
+    )
+    parser.add_argument(
+        "--ephemeral_save_interval", type=int, default=50,
+        help="Steps between ephemeral checkpoints (only the latest is kept)",
+    )
     parser.add_argument(
         "--moe_num_experts_list",
         type=str,
