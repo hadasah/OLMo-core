@@ -12,8 +12,12 @@ SWEEP_NAME_DEFAULT = "data_rep_AC"
 project = "moe"
 MODELS = [
     # 'olmo2_ml_10M',
-    "olmo2_ml_80M",
+    # "olmo2_ml_80M",
     # 'olmo2_ml_200M',
+    # 1B relaunch of the broken klone ladder (see MARLOWE_HANDOFF §5): dense +
+    # moe64 x R{1,4,8,16,64} on the OLMoE mix, 20B tokens each, replicated on
+    # Marlowe because the klone checkpoints are unreachable from here.
+    "olmo2_ml_1B",
 ]
 
 # === Family A / A+rep / B: two-domain data-mixing sweeps (additive) ===
@@ -235,6 +239,11 @@ def main(
         SPECS = copy(USER_SPECS)
         SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT.get("all", {}))
         SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT.get(partition, {}))
+        # Merge the model-level "all" block before the model-level partition block.
+        # Without the first line, a model's "all" sub-block was unreachable on any
+        # partition not literally named in it (e.g. Marlowe's "batch"), so models
+        # silently fell back to the global defaults.
+        SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT[model].get("all", {}))
         SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT[model].get(partition, {}))
         SPECS["NUM_GPUS"] = gpus or SPECS["NUM_GPUS"]
         SPECS["NUM_CPUS"] = cpus or SPECS["NUM_CPUS"]
@@ -300,6 +309,8 @@ def main(
             SPECS = copy(USER_SPECS)
             SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT.get("all", {}))
             SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT.get(partition, {}))
+            # Same model-level "all" merge as the relaunch path above.
+            SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT[model].get("all", {}))
             SPECS = dict_update(SPECS, HARDWARE_SPECS_DICT[model].get(partition, {}))
             SPECS["NUM_GPUS"] = gpus or SPECS["NUM_GPUS"]
             SPECS["NUM_CPUS"] = cpus or SPECS["NUM_CPUS"]
@@ -324,6 +335,18 @@ def main(
                     # directly comparable to it. Leaving this set to a single domain
                     # would have trained every arm on that domain instead.
                     "train_datamix_name": ["OLMoE_mix_0824"],
+                    # 1B eval/checkpoint cadence. eval_interval=1000 matches the klone
+                    # 1B runs exactly (both their lm_evaluator and downstream_evaluator
+                    # ran every 1000 steps; this branch's build_config default is 100,
+                    # which at 19,074 steps would be ~190 eval passes). save_interval
+                    # 2000 (vs klone's 200) and ephemeral 250 (vs 50) are Marlowe disk
+                    # sanity: a moe64-1B checkpoint is ~100 GB, and 95 permanents per
+                    # run is ~10 TB nobody will read. Checkpoint cadence does not
+                    # affect the training math; ephemeral 250 bounds a requeue's lost
+                    # work to ~30-80 min.
+                    "eval_interval": [1000],
+                    "save_interval": [2000],
+                    "ephemeral_save_interval": [250],
                     # "train_datamix_name": ["starcoder_only"],
                     # "train_datamix_name": ["dclm_only"],
                     # "train_datamix_name": ["wikipedia_only"],
@@ -541,104 +564,185 @@ def main(
                     # "moe64_rep256x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.00390625"], "num_repetitions": ["256"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "moe64_rep512x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.001953125"], "num_repetitions": ["512"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "moe64_rep1024x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0009765625"], "num_repetitions": ["1024"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
+                    ## === 1B ladder (dense + moe64 x R{1,4,8,16,64}) ===
+                    ## Replicates the klone 1B sweeps (2026_07_31-01_20_02 moe64,
+                    ## 2026_07_31-23_36_15 dense) cell for cell -- same ladder, same
+                    ## fractions, same arch args as their wandb-logged commands.
+                    ## moe64 additionally passes per_gpu_batch_size=8: klone's 16/GPU
+                    ## reserved 86.8 GiB on H200-141GB, over the H100's 80 GB; halving
+                    ## the microbatch doubles grad-accumulation steps over the same
+                    ## 512-sequence global batch and changes no hyperparameter.
+                    "dense_rep1x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["1.0"],
+                        "num_repetitions": ["1"],
+                    },
+                    "dense_rep4x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.25"],
+                        "num_repetitions": ["4"],
+                    },
+                    "dense_rep8x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.125"],
+                        "num_repetitions": ["8"],
+                    },
+                    "dense_rep16x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.0625"],
+                        "num_repetitions": ["16"],
+                    },
+                    "dense_rep64x": {
+                        "moe_num_experts_list": ["1"],
+                        "unique_data_fraction": ["0.015625"],
+                        "num_repetitions": ["64"],
+                    },
+                    "moe64_rep1x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "per_gpu_batch_size": ["8"],
+                        "unique_data_fraction": ["1.0"],
+                        "num_repetitions": ["1"],
+                    },
+                    "moe64_rep4x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "per_gpu_batch_size": ["8"],
+                        "unique_data_fraction": ["0.25"],
+                        "num_repetitions": ["4"],
+                    },
+                    "moe64_rep8x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "per_gpu_batch_size": ["8"],
+                        "unique_data_fraction": ["0.125"],
+                        "num_repetitions": ["8"],
+                    },
+                    "moe64_rep16x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "per_gpu_batch_size": ["8"],
+                        "unique_data_fraction": ["0.0625"],
+                        "num_repetitions": ["16"],
+                    },
+                    "moe64_rep64x": {
+                        "moe_num_experts_list": ["64"],
+                        "moe_hidden_multipliers_list": ["0.25"],
+                        "moe_router_top_ks_list": ["4"],
+                        "moe_generalist_hidden_multiplier": ["0"],
+                        "per_gpu_batch_size": ["8"],
+                        "unique_data_fraction": ["0.015625"],
+                        "num_repetitions": ["64"],
+                    },
+                    ## Granularity sweep (moe64s8, moe64s32): DONE 2026-08-09 on
+                    ## Marlowe, sweep 2026_08_09-03_14_34_data_rep_AC_olmo2_ml_80M,
+                    ## all 12 finished at step 1526. Commented out for the 1B ladder.
                     ## MoE 64 experts of g=1/8 at different repetition levels
-                    "moe64s8_rep1x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.125"],
-                        "moe_router_top_ks_list": ["8"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["1.0"],
-                        "num_repetitions": ["1"],
-                    },
-                    "moe64s8_rep2x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.125"],
-                        "moe_router_top_ks_list": ["8"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.5"],
-                        "num_repetitions": ["2"],
-                    },
-                    "moe64s8_rep4x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.125"],
-                        "moe_router_top_ks_list": ["8"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.25"],
-                        "num_repetitions": ["4"],
-                    },
-                    "moe64s8_rep8x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.125"],
-                        "moe_router_top_ks_list": ["8"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.125"],
-                        "num_repetitions": ["8"],
-                    },
-                    "moe64s8_rep16x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.125"],
-                        "moe_router_top_ks_list": ["8"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.0625"],
-                        "num_repetitions": ["16"],
-                    },
-                    "moe64s8_rep32x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.125"],
-                        "moe_router_top_ks_list": ["8"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.03125"],
-                        "num_repetitions": ["32"],
-                    },
+#                    "moe64s8_rep1x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.125"],
+#                        "moe_router_top_ks_list": ["8"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["1.0"],
+#                        "num_repetitions": ["1"],
+#                    },
+#                    "moe64s8_rep2x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.125"],
+#                        "moe_router_top_ks_list": ["8"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.5"],
+#                        "num_repetitions": ["2"],
+#                    },
+#                    "moe64s8_rep4x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.125"],
+#                        "moe_router_top_ks_list": ["8"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.25"],
+#                        "num_repetitions": ["4"],
+#                    },
+#                    "moe64s8_rep8x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.125"],
+#                        "moe_router_top_ks_list": ["8"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.125"],
+#                        "num_repetitions": ["8"],
+#                    },
+#                    "moe64s8_rep16x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.125"],
+#                        "moe_router_top_ks_list": ["8"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.0625"],
+#                        "num_repetitions": ["16"],
+#                    },
+#                    "moe64s8_rep32x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.125"],
+#                        "moe_router_top_ks_list": ["8"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.03125"],
+#                        "num_repetitions": ["32"],
+#                    },
                     ## MoE 64 experts of g = 1/2 at different repetition levels
-                    "moe64s32_rep1x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.5"],
-                        "moe_router_top_ks_list": ["2"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["1.0"],
-                        "num_repetitions": ["1"],
-                    },
-                    "moe64s32_rep2x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.5"],
-                        "moe_router_top_ks_list": ["2"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.5"],
-                        "num_repetitions": ["2"],
-                    },
-                    "moe64s32_rep4x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.5"],
-                        "moe_router_top_ks_list": ["2"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.25"],
-                        "num_repetitions": ["4"],
-                    },
-                    "moe64s32_rep8x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.5"],
-                        "moe_router_top_ks_list": ["2"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.125"],
-                        "num_repetitions": ["8"],
-                    },
-                    "moe64s32_rep16x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.5"],
-                        "moe_router_top_ks_list": ["2"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.0625"],
-                        "num_repetitions": ["16"],
-                    },
-                    "moe64s32_rep32x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.5"],
-                        "moe_router_top_ks_list": ["2"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.03125"],
-                        "num_repetitions": ["32"],
-                    },
+#                    "moe64s32_rep1x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.5"],
+#                        "moe_router_top_ks_list": ["2"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["1.0"],
+#                        "num_repetitions": ["1"],
+#                    },
+#                    "moe64s32_rep2x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.5"],
+#                        "moe_router_top_ks_list": ["2"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.5"],
+#                        "num_repetitions": ["2"],
+#                    },
+#                    "moe64s32_rep4x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.5"],
+#                        "moe_router_top_ks_list": ["2"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.25"],
+#                        "num_repetitions": ["4"],
+#                    },
+#                    "moe64s32_rep8x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.5"],
+#                        "moe_router_top_ks_list": ["2"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.125"],
+#                        "num_repetitions": ["8"],
+#                    },
+#                    "moe64s32_rep16x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.5"],
+#                        "moe_router_top_ks_list": ["2"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.0625"],
+#                        "num_repetitions": ["16"],
+#                    },
+#                    "moe64s32_rep32x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.5"],
+#                        "moe_router_top_ks_list": ["2"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.03125"],
+#                        "num_repetitions": ["32"],
+#                    },
                     ## MoE 128 experts at different repetition levels
 #                     "moe128_rep1x": {
 #                         "moe_num_experts_list": ["128"],
