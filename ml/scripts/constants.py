@@ -307,6 +307,10 @@ HARDWARE_SPECS_DICT = {
         "all": {
             "per_gpu_batch_size": 16,
             "MEM_GB": 220,
+            # 4B-token runs measure ~15-30h on 4 GPUs; the 24:00:00 default is
+            # too tight for the moe64 arm, so ride just under the batch cap
+            # (requeue + if_available resume covers the tail).
+            "JOBTIME": "47:59:59",
         },
     },
     "olmo2_ml_300M": {
