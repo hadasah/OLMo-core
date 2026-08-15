@@ -343,12 +343,12 @@ def main(
                     "eval_interval": [250],
                     "save_interval": [1000],
                     "ephemeral_save_interval": [250],
-                    # The dropout axis, crossed with every subgrid cell. Same knob and
-                    # override path as the klone 80M dropout sweep
-                    # (--model.block.dropout=X); two values, so every run name carries
-                    # a "dropout=X" token. Phase B (the two dropout=0 R=64 baselines)
-                    # omits this key entirely to match the April baselines' None.
-                    "model": {"block": {"dropout": [0.1, 0.4]}},
+                    # Phase B (2026-08-15): dropout axis REMOVED -- these two rep64x
+                    # cells are the missing dropout=0 baselines, and omitting the key
+                    # keeps model.block.dropout=None exactly like the April-23 klone
+                    # baselines. Phase A (20 dropout runs, jobs 429592 + 430242) was
+                    # submitted with the axis present:
+                    # "model": {"block": {"dropout": [0.1, 0.4]}},
                     # "train_datamix_name": ["starcoder_only"],
                     # "train_datamix_name": ["dclm_only"],
                     # "train_datamix_name": ["wikipedia_only"],
@@ -567,63 +567,63 @@ def main(
                     # "moe64_rep512x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.001953125"], "num_repetitions": ["512"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     # "moe64_rep1024x": {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"], "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"], "unique_data_fraction": ["0.0009765625"], "num_repetitions": ["1024"], "global_batch_size": ["64"], "per_gpu_batch_size": ["8"]},
                     ## === 200M ladder cells (crossed with the dropout axis above) ===
-                    "dense_rep1x": {
-                        "moe_num_experts_list": ["1"],
-                        "unique_data_fraction": ["1.0"],
-                        "num_repetitions": ["1"],
-                    },
-                    "dense_rep8x": {
-                        "moe_num_experts_list": ["1"],
-                        "unique_data_fraction": ["0.125"],
-                        "num_repetitions": ["8"],
-                    },
-                    "dense_rep16x": {
-                        "moe_num_experts_list": ["1"],
-                        "unique_data_fraction": ["0.0625"],
-                        "num_repetitions": ["16"],
-                    },
-                    "dense_rep32x": {
-                        "moe_num_experts_list": ["1"],
-                        "unique_data_fraction": ["0.03125"],
-                        "num_repetitions": ["32"],
-                    },
+#                    "dense_rep1x": {
+#                        "moe_num_experts_list": ["1"],
+#                        "unique_data_fraction": ["1.0"],
+#                        "num_repetitions": ["1"],
+#                    },
+#                    "dense_rep8x": {
+#                        "moe_num_experts_list": ["1"],
+#                        "unique_data_fraction": ["0.125"],
+#                        "num_repetitions": ["8"],
+#                    },
+#                    "dense_rep16x": {
+#                        "moe_num_experts_list": ["1"],
+#                        "unique_data_fraction": ["0.0625"],
+#                        "num_repetitions": ["16"],
+#                    },
+#                    "dense_rep32x": {
+#                        "moe_num_experts_list": ["1"],
+#                        "unique_data_fraction": ["0.03125"],
+#                        "num_repetitions": ["32"],
+#                    },
                     "dense_rep64x": {
                         "moe_num_experts_list": ["1"],
                         "unique_data_fraction": ["0.015625"],
                         "num_repetitions": ["64"],
                     },
-                    "moe64_rep1x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.25"],
-                        "moe_router_top_ks_list": ["4"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["1.0"],
-                        "num_repetitions": ["1"],
-                    },
-                    "moe64_rep8x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.25"],
-                        "moe_router_top_ks_list": ["4"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.125"],
-                        "num_repetitions": ["8"],
-                    },
-                    "moe64_rep16x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.25"],
-                        "moe_router_top_ks_list": ["4"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.0625"],
-                        "num_repetitions": ["16"],
-                    },
-                    "moe64_rep32x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.25"],
-                        "moe_router_top_ks_list": ["4"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.03125"],
-                        "num_repetitions": ["32"],
-                    },
+#                    "moe64_rep1x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.25"],
+#                        "moe_router_top_ks_list": ["4"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["1.0"],
+#                        "num_repetitions": ["1"],
+#                    },
+#                    "moe64_rep8x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.25"],
+#                        "moe_router_top_ks_list": ["4"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.125"],
+#                        "num_repetitions": ["8"],
+#                    },
+#                    "moe64_rep16x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.25"],
+#                        "moe_router_top_ks_list": ["4"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.0625"],
+#                        "num_repetitions": ["16"],
+#                    },
+#                    "moe64_rep32x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.25"],
+#                        "moe_router_top_ks_list": ["4"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.03125"],
+#                        "num_repetitions": ["32"],
+#                    },
                     "moe64_rep64x": {
                         "moe_num_experts_list": ["64"],
                         "moe_hidden_multipliers_list": ["0.25"],
