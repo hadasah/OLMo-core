@@ -181,8 +181,8 @@ def main(
                     },
                     "model": {
                         "block": {
-                            # "dropout": [0.1, 0.2],#, 0.4],
-                            # "expert_dropout": [0.1, 0.2, 0.4,],
+                            # "dropout": [0.1, 0.2, 0.4],
+                            "expert_dropout": [0.1, 0.2, 0.4,],
                             # "feed_forward_moe": {
                             #     "routers_list": {
                             #         "0": {
@@ -262,34 +262,34 @@ def main(
                         "moe_router_top_ks_list": ["4"],
                         "moe_generalist_hidden_multiplier": ["0"],
                         "subgrids": {
-                            # "rep1x": {
-                            #     "unique_data_fraction": ["1.0"],
-                            #     "num_repetitions": ["1"],
-                            # },
-                            # "rep2x": {
-                            #     "unique_data_fraction": ["0.5"],
-                            #     "num_repetitions": ["2"],
-                            # },
-                            # "rep4x": {
-                            #     "unique_data_fraction": ["0.25"],
-                            #     "num_repetitions": ["4"],
-                            # },
-                            # "rep8x": {
-                            #     "unique_data_fraction": ["0.125"],
-                            #     "num_repetitions": ["8"],
-                            # },
-                            # "rep16x": {
-                            #     "unique_data_fraction": ["0.0625"],
-                            #     "num_repetitions": ["16"],
-                            # },
-                            # "rep32x": {
-                            #     "unique_data_fraction": ["0.03125"],
-                            #     "num_repetitions": ["32"],
-                            # },
-                            # "rep64x": {
-                            #     "unique_data_fraction": ["0.015625"],
-                            #     "num_repetitions": ["64"],
-                            # },
+                            "rep1x": {
+                                "unique_data_fraction": ["1.0"],
+                                "num_repetitions": ["1"],
+                            },
+                            "rep2x": {
+                                "unique_data_fraction": ["0.5"],
+                                "num_repetitions": ["2"],
+                            },
+                            "rep4x": {
+                                "unique_data_fraction": ["0.25"],
+                                "num_repetitions": ["4"],
+                            },
+                            "rep8x": {
+                                "unique_data_fraction": ["0.125"],
+                                "num_repetitions": ["8"],
+                            },
+                            "rep16x": {
+                                "unique_data_fraction": ["0.0625"],
+                                "num_repetitions": ["16"],
+                            },
+                            "rep32x": {
+                                "unique_data_fraction": ["0.03125"],
+                                "num_repetitions": ["32"],
+                            },
+                            "rep64x": {
+                                "unique_data_fraction": ["0.015625"],
+                                "num_repetitions": ["64"],
+                            },
                             # "rep128x": {
                             #     "unique_data_fraction": ["0.0078125"], 
                             #     "num_repetitions": ["128"]
@@ -499,7 +499,7 @@ def main(
                 ),
                 sweep_name=model_sweep_name,
                 specs=SPECS,
-                name_keys=["moe_fom_prob"], #["model.block.expert_dropout"], #SPECS.get("NAME_KEYS", []),#["train_module.max_grad_norm"],#
+                name_keys=SPECS.get("NAME_KEYS", []),#["train_module.max_grad_norm"],#["expert_dropout"], 
                 prefix=SPECS["COMMAND_PREFIX"],
                 gpus=SPECS["NUM_GPUS"],
                 cpus=SPECS["NUM_CPUS"],
