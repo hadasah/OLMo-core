@@ -87,6 +87,7 @@ FLATTEN_KEYS = (
     "eom_prob",
     "fom_prob",
     "dropout",
+    "expert_dropout",
     "max_grad_norm",
     "lr",
     "weight_decay",

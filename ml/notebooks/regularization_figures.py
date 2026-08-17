@@ -24,13 +24,19 @@ def _(mo):
     **Figure groups**
 
     1. Final loss vs. repetition count (log X), for Dense, MoE32 & MoE64 baseline
-       runs on the `olmo_mix` mixture — one figure per model scale (80M, 200M).
+       runs on the `olmo_mix` mixture — one figure per model scale (10M, 80M, 200M,
+       1B). The 1B figure is wired up but empty until those runs finish *and* are
+       tagged `baseline`.
+    1b. Off-axis run families, each in its own frame and excluded from every other
+       group: the **4C** token-budget runs (`data_rep_AC_x4`, tagged `Data=4C`) at
+       80M, the **small-batch** 10M runs (global batch 131072), and the
+       **high-LR** 10M runs (`lr=1e-2`).
     2. The same, repeated for each single-source data mixture: `dclm`,
        `starcoder`, `pes2o`, `wiki`.
     3. Regularizer sweeps (**dropout**, **weight decay**, **max grad norm**) —
        color = model type, line style = regularizer value; loss vs. repetition (log X).
-    3b. MoE-only regularizer sweeps (**jitter_eps**, **EOM**, **FOM**) — same encoding,
-       Dense excluded.
+    3b. MoE-only regularizer sweeps (**jitter_eps**, **EOM**, **FOM**,
+       **expert_dropout**) — same encoding, Dense excluded.
     4. All `famA` runs: loss vs. `%dclm` (0/25/50/75/100 from the run name).
     5. `famB` runs: single-source mixes into `olmo_mix` vs. repetition.
     """)
@@ -41,6 +47,7 @@ def _(mo):
 def _():
     import glob
     import json
+    import math
     import os
     import re
 
@@ -54,7 +61,7 @@ def _():
     import seaborn as sns
 
     sns.set_theme(style="whitegrid", context="notebook")
-    return glob, json, os, pd, plt, re
+    return glob, json, math, mticker, os, pd, plt, re
 
 
 @app.cell(hide_code=True)
@@ -124,6 +131,7 @@ def _(json, pd):
     # Column names in the wandb export.
     LOSS_COL = "train/CE loss"
     DROPOUT_COL = "model.block.dropout"
+    EXPERT_DROPOUT_COL = "model.block.expert_dropout"
     WD_COL = "train_module.optim.weight_decay"
     MGN_COL = "train_module.max_grad_norm"
     FOM_COL = "model.block.feed_forward_moe.fom_prob"
@@ -163,26 +171,48 @@ def _(json, pd):
         return tag in parse_tags(row.get("Tags"))
 
     def get_scale(row) -> str:
-        """Model scale is encoded in the run name, e.g. 'olmo2_ml_80M'."""
+        """Model scale is encoded in the run name, e.g. 'olmo2_ml_80M'.
+
+        The 10M check is underscore-anchored on purpose: a bare ``"10M" in name``
+        would also match ``olmo2_ml_110M``.
+        """
         name = str(row.get("Name", ""))
+        if "1B" in name:
+            return "1B"
         if "200M" in name:
             return "200M"
         if "80M" in name:
             return "80M"
+        if "_10M" in name:
+            return "10M"
         return "other"
 
     def get_model_type(row) -> str:
-        """Classify a run as 'dense', 'moe64', 'moe32', or 'other' from its tags."""
+        """Classify a run's architecture from its tags.
+
+        The expert-size variants (``MoE64s8`` = 64 experts at 1/8 the dense FFN,
+        ``MoE64s32`` = 1/2) must be checked *before* plain ``MoE64``: some of those
+        runs carry both tags, and the narrower one is the truthful label.
+        """
         tags = parse_tags(row.get("Tags"))
         if "dense" in tags:
             return "dense"
+        if "MoE64s8" in tags:
+            return "moe64s8"
+        if "MoE64s32" in tags:
+            return "moe64s32"
         if "MoE64" in tags:
             return "moe64"
         if "MoE32" in tags:
             return "moe32"
         return "other"
 
+    MIX_COL = "dataset.mix"
     MAX_DUR_COL = "trainer.max_duration.value"
+    LR_COL = "train_module.optim.lr"
+    BATCH_COL = "data_loader.global_batch_size"
+    MIX_BATCH_COL = "dataset.source_mixture_config.global_batch_size"
+    SEQ_LEN_COL = "dataset.sequence_length"
     REQ_TOKENS_COL = "dataset.source_mixture_config.requested_tokens"
     SOURCES_COL = "dataset.source_mixture_config.source_list.sources"
 
@@ -268,7 +298,13 @@ def _(json, pd):
     # Per-model-type lightening: dense = darkest, moe64 = lightest. Positive values
     # blend toward white; negative toward black. moe64 now sits at the old moe32
     # level and dense goes slightly below pure base color.
-    MODEL_SHADE = {"dense": -0.2, "moe32": -0.1, "moe64": 0.05}
+    MODEL_SHADE = {
+        "dense": -0.2,
+        "moe32": -0.1,
+        "moe64s8": -0.05,
+        "moe64": 0.05,
+        "moe64s32": 0.1,
+    }
 
     def shade_color(hex_color: str, lighten: float) -> str:
         """Shade a hex color. Positive `lighten` blends toward white, negative blends
@@ -371,27 +407,58 @@ def _(json, pd):
         """Fallback data-mix signature, used only when the run has no
         ``source_mixture_config`` (e.g. pure single-source mixes and plain-datamix
         runs record no sources). Combines the data-source tag (olmo_mix / dclm /
-        starcoder / pes2o / wiki) with any ``dclm{N}`` percentage from the name, so
-        e.g. wiki vs olmo_mix, and dclm0 vs dclm100, aren't merged just because they
-        all lack a sources config."""
+        starcoder / pes2o / wiki), the ``dataset.mix`` config field, and any
+        ``dclm{N}`` percentage from the name, so e.g. wiki vs olmo_mix, and dclm0 vs
+        dclm100, aren't merged just because they all lack a sources config.
+
+        ``dataset.mix`` is what makes this reliable for the older (pre-2026-05)
+        single-source runs: they are tagged ``ml, dropless, 1.0gen, ...`` with no
+        data-source tag at all, so the tag alone reads as ``None`` for every one of
+        them and a pes2o rep1x run collides with a starcoder rep1x run that matches
+        on every other field."""
         if _sources_key(row) is not None:
             return None
         import re as _re
 
         m = _re.search(r"dclm(\d+)", str(row.get("Name", "")))
-        return (get_data_tag(row), int(m.group(1)) if m else None)
+        return (
+            get_data_tag(row),
+            _norm(row.get(MIX_COL)),
+            int(m.group(1)) if m else None,
+        )
 
     def _dedup_key(row):
-        """Identity key for de-duplicating runs that are the same experiment."""
+        """Identity key for de-duplicating runs that are the same experiment.
+
+        ``max_duration`` (the total training token budget) is part of the identity:
+        the same unique data at the same ``requested_tokens`` trained for a different
+        number of total tokens is a *different* experiment. Without it the 4C
+        (``data_rep_AC_x4``) runs collide with the 1C runs — e.g. 4C/rep8x and
+        1C/rep2x both read 800M unique tokens — and get dropped as false duplicates.
+
+        Batch size and sequence length are likewise part of the identity: the
+        ``new_bs_256plus`` sweep re-runs earlier configs at a larger batch, and
+        without them those runs collide with the originals they were meant to be
+        compared against.
+
+        NOTE: this key is an explicit allowlist, so any *new* config knob is
+        invisible to it and its runs will silently vanish as false duplicates. Add
+        the field here whenever you add a swept hyperparameter.
+        """
         return (
             _sources_key(row),
             _namemix_key(row),
             _norm(row.get("dataset.source_mixture_config.requested_tokens")),
+            _norm(row.get(MAX_DUR_COL)),
+            _norm(row.get(BATCH_COL)),
+            _norm(row.get(MIX_BATCH_COL)),
+            _norm(row.get(SEQ_LEN_COL)),
             _norm(row.get("model.d_model")),
             _norm(row.get(DROPOUT_COL)),
+            _norm(row.get(EXPERT_DROPOUT_COL)),
             _norm(row.get(WD_COL)),
             _norm(row.get(MGN_COL)),
-            _norm(row.get("train_module.optim.lr")),
+            _norm(row.get(LR_COL)),
             _norm(router_field(row, "jitter_eps")),
             _norm(router_field(row, "eom_prob")),
             _norm(row.get(FOM_COL)),
@@ -416,14 +483,102 @@ def _(json, pd):
             keep_idx.append(idx)
         return df.loc[keep_idx].copy()
 
+    # The 4C ("x4" token budget) repetition family. These runs share the mixture and
+    # tags of the 1C runs but train for 4x the tokens, so they must not be mixed into
+    # any of the 1C plots — they are split out of `finished_df` into `x4_df` and
+    # plotted on their own in Group 1b.
+    X4_NAME_MARKER = "data_rep_AC_x4"
+    X4_TAG = "Data=4C"
+
+    def is_x4_run(row) -> bool:
+        """True for the 4C repetition family (name marker, tag as a fallback)."""
+        return X4_NAME_MARKER in str(row.get("Name", "")) or has_tag(row, X4_TAG)
+
+    def split_x4(df: pd.DataFrame):
+        """Split a frame into (everything else, the 4C family)."""
+        mask = pd.Series(
+            [is_x4_run(row) for _, row in df.iterrows()], index=df.index, dtype=bool
+        )
+        return df[~mask].copy(), df[mask].copy()
+
+    # The small-batch ("bs 256") family: the `new_bs_256plus` 10M sweep re-ran the
+    # extreme repetition counts (256x/512x/1024x) at a global batch of 131072 tokens
+    # instead of the usual 1048576. Same treatment as the 4C family — a different
+    # batch size is a different experiment, so they get their own frame rather than
+    # sharing an axis with the regular-batch runs.
+    #
+    # NOTE: only `data_loader.global_batch_size` is used. The same sweep also varies
+    # `source_mixture_config.global_batch_size` across several values at the regular
+    # 1048576 data-loader batch; those runs stay in `finished_df`.
+    SMALL_BS_VALUE = 131072
+
+    def is_small_bs_run(row) -> bool:
+        """True for runs at the reduced 131072-token global batch."""
+        try:
+            return float(row.get(BATCH_COL)) == float(SMALL_BS_VALUE)
+        except (TypeError, ValueError):
+            return False
+
+    def split_small_bs(df: pd.DataFrame):
+        """Split a frame into (everything else, the small-batch family)."""
+        mask = pd.Series(
+            [is_small_bs_run(row) for _, row in df.iterrows()], index=df.index, dtype=bool
+        )
+        return df[~mask].copy(), df[mask].copy()
+
+    # The high-LR family: a 10M sweep at lr=1e-2 (`data_rep_AC_lr1e-2` in the run
+    # name) against the 4e-4 used everywhere else. At 10M that reaches ~6.5 train CE
+    # vs ~9.3, so it dwarfs every other effect and cannot share an axis. Splitting on
+    # the LR value rather than the name marker: the two select exactly the same 9
+    # runs, and every other run in the project is at 4e-4.
+    OFF_AXIS_LR = 0.01
+
+    def is_high_lr_run(row) -> bool:
+        """True for runs at the off-axis 1e-2 learning rate."""
+        try:
+            return float(row.get(LR_COL)) == float(OFF_AXIS_LR)
+        except (TypeError, ValueError):
+            return False
+
+    def split_high_lr(df: pd.DataFrame):
+        """Split a frame into (everything else, the lr=1e-2 family)."""
+        mask = pd.Series(
+            [is_high_lr_run(row) for _, row in df.iterrows()], index=df.index, dtype=bool
+        )
+        return df[~mask].copy(), df[mask].copy()
+
+    def expert_size_frame(df: pd.DataFrame):
+        """80M baselines for the expert-size comparison.
+
+        A *view*, not a split: the olmo_mix dense/moe64 baselines stay in
+        `finished_df` for Group 1 as well. The MoE64s8 / MoE64s32 runs carry no
+        mixture tag, so the figure has to be drawn with the mixture filter off
+        (`data_tag=None`); restricting the frame here is what stops the dense and
+        moe64 lines from picking up dclm/starcoder/pes2o/wiki runs as well.
+        """
+        keep = [
+            idx
+            for idx, row in df.iterrows()
+            if get_scale(row) == "80M"
+            and has_tag(row, "baseline")
+            and (
+                has_tag(row, "olmo_mix")
+                or get_model_type(row) in ("moe64s8", "moe64s32")
+            )
+        ]
+        return df.loc[keep].copy()
+
     return (
         DROPOUT_COL,
+        EXPERT_DROPOUT_COL,
         FOM_COL,
         MGN_COL,
         MODEL_SHADE,
         WD_COL,
+        X4_TAG,
         arch_of_run,
         dedupe_runs,
+        expert_size_frame,
         filter_finished,
         filter_rep_points,
         get_model_type,
@@ -434,19 +589,51 @@ def _(json, pd):
         pow2_ticks,
         router_field,
         shade_color,
+        split_high_lr,
+        split_small_bs,
+        split_x4,
     )
 
 
 @app.cell
-def _(dedupe_runs, filter_finished, raw_df):
+def _(
+    dedupe_runs,
+    expert_size_frame,
+    filter_finished,
+    raw_df,
+    split_high_lr,
+    split_small_bs,
+    split_x4,
+):
     # Single filtered frame reused by every figure below. Duplicate runs (same
     # experiment identity) are dropped up front so no plot double-counts them.
-    finished_df = dedupe_runs(filter_finished(raw_df))
-    return (finished_df,)
+    #
+    # The 4C repetition family is then split off into its own frame: `finished_df`
+    # (used by every group except 1b) never sees it, so those runs cannot leak into
+    # the 1C plots — notably the Group 3/3b baseline bucket, which selects on
+    # 80M + olmo_mix + knobs-at-default rather than on a tag.
+    #
+    # The small-batch (131072-token) and high-LR (1e-2) 10M runs are split off the
+    # same way, so the regular 10M plot in Group 1 and the two off-axis ones in
+    # Group 1b never share an axis.
+    finished_df, x4_df = split_x4(dedupe_runs(filter_finished(raw_df)))
+    finished_df, small_bs_df = split_small_bs(finished_df)
+    finished_df, high_lr_df = split_high_lr(finished_df)
+    # Derived view (not a split) for the Group 1b expert-size comparison.
+    expert_size_df = expert_size_frame(finished_df)
+    return expert_size_df, finished_df, high_lr_df, small_bs_df, x4_df
 
 
 @app.cell(hide_code=True)
-def _(MODEL_SHADE, plt, shade_color):
+def _(
+    ARCH_ORDER_DEFAULT,
+    MODEL_DISPLAY_NAME,
+    MODEL_SHADE,
+    math,
+    mticker,
+    plt,
+    shade_color,
+):
     # ------------------------------------------------------------------
     # Shared visual encoding used by EVERY figure:
     #   - architecture -> line style + shade (dense solid/darkest,
@@ -457,7 +644,13 @@ def _(MODEL_SHADE, plt, shade_color):
     from matplotlib.colors import to_hex
     from matplotlib.lines import Line2D
 
-    ARCH_DASH = {"dense": "-", "moe32": "--", "moe64": ":"}
+    ARCH_DASH = {
+        "dense": "-",
+        "moe32": "--",
+        "moe64": ":",
+        "moe64s8": "-.",
+        "moe64s32": (0, (5, 1)),
+    }
     # Per-architecture base color, used only by plots where architecture is the sole
     # variable (Groups 1 & 2). These are the viridis endpoints (purple / greenish-blue
     # / yellow) so they match the factor palette used everywhere else. Elsewhere color
@@ -465,8 +658,15 @@ def _(MODEL_SHADE, plt, shade_color):
     _viridis = plt.get_cmap("viridis")
     ARCH_COLOR = {
         "dense": to_hex(_viridis(0.0)),
-        "moe32": to_hex(_viridis(0.3)),
+        "moe16": to_hex(_viridis(0.3)),
+        "moe32": to_hex(_viridis(0.45)),
+        # The three 64-expert variants run monotonically up the colormap by
+        # expert size (1/8 -> 1/4 -> 1/2), so the largest experts read as the
+        # most yellow-green. 0.8 is the cap — the yellow end is never used.
+        "moe64s8": to_hex(_viridis(0.45)),
         "moe64": to_hex(_viridis(0.75)),
+        "moe64s32": to_hex(_viridis(0.95)),
+        "moe128": to_hex(_viridis(0.95)),
     }
 
     def arch_dash(model_type):
@@ -500,6 +700,7 @@ def _(MODEL_SHADE, plt, shade_color):
         factor_color=None,
         key_fmt=str,
         arch_colored=False,
+        arch_order=None,
     ):
         """Single-box legend. Section 1: line style + shade -> architecture. When
         ``arch_colored`` is set, the architecture swatches also use each arch's base
@@ -509,7 +710,9 @@ def _(MODEL_SHADE, plt, shade_color):
         def _header():
             return Line2D([0], [0], linestyle="none", marker="", label="")
 
-        arch_order = [a for a in ["dense", "moe32", "moe64"] if a in shown_archs]
+        arch_order = [
+            a for a in (arch_order or ARCH_ORDER_DEFAULT) if a in shown_archs
+        ]
         arch_handles = [
             Line2D(
                 [0],
@@ -525,7 +728,9 @@ def _(MODEL_SHADE, plt, shade_color):
             for a in arch_order
         ]
         handles = [_header()] + arch_handles
-        labels = ["Model type"] + arch_order
+        # Show the human-readable architecture names (e.g. "MoE (64 x 1/4)"), falling
+        # back to the raw key for any arch not listed in MODEL_DISPLAY_NAME.
+        labels = ["Model type"] + [MODEL_DISPLAY_NAME.get(a, a) for a in arch_order]
         factor_keys = list(factor_keys)
         if factor_keys and factor_color is not None:
             factor_handles = [
@@ -547,8 +752,65 @@ def _(MODEL_SHADE, plt, shade_color):
             if text.get_text() in ("Model type", factor_title):
                 text.set_fontweight("bold")
 
+    def _plain_num(y, _pos=None):
+        """Tick label as a plain number: 5, 0.9, 0.002 — never 10^0 or 6.000."""
+        if y <= 0:
+            return ""
+        s = f"{y:g}"
+        if "e" in s or "E" in s:  # keep extreme values out of scientific notation
+            s = f"{y:.10f}".rstrip("0").rstrip(".")
+        return s
+
+    def apply_log_yaxis(ax):
+        """Log-scale the y axis but keep plain-number tick labels.
+
+        Matplotlib's default log formatter writes powers of ten (``10^0``, ``10^1``),
+        which is unreadable for loss values. We label with plain numbers instead.
+
+        Two things adapt to how many decades the data spans, tracked separately:
+
+        - ``grid_subs`` — which sub-decade ticks *exist*, and therefore where the
+          horizontal rules are drawn. Decade-only gridlines are far too sparse (a
+          half-decade range gets a single rule), so there is always something
+          between the decades.
+        - ``label_subs`` — which of those get a text label. Labelling 2..9 inside
+          every decade only reads well over a narrow span; across ~4 decades (a
+          train loss collapsing from 5 to 0.002) it becomes a wall of overlapping
+          text, so wide ranges keep the rules but drop the sub-decade labels.
+        """
+        ax.set_yscale("log")
+        ymin, ymax = ax.get_ylim()
+        decades = (
+            math.log10(ymax) - math.log10(ymin) if ymin > 0 and ymax > ymin else 1.0
+        )
+        if decades <= 1.5:
+            grid_subs = label_subs = tuple(range(2, 10))
+        elif decades <= 3.0:
+            grid_subs = label_subs = (2, 3, 5)
+        else:
+            grid_subs, label_subs = (2, 5), ()
+
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(_plain_num))
+        ax.yaxis.set_minor_locator(
+            mticker.LogLocator(base=10.0, subs=grid_subs, numticks=15)
+        )
+        if label_subs:
+            ax.yaxis.set_minor_formatter(mticker.FuncFormatter(_plain_num))
+        else:
+            ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+        # Sub-decade labels are ordinary tick labels, not annotations: keep them the
+        # same size as the decade ones so the axis doesn't read as two tiers.
+        ax.tick_params(axis="y", which="both", labelsize=plt.rcParams["ytick.labelsize"])
+
+        # Horizontal rules at every tick, with the sub-decade ones lighter so the
+        # decade boundaries still read as the primary reference.
+        ax.grid(True, which="major", axis="y", linewidth=0.8, alpha=0.7)
+        ax.grid(True, which="minor", axis="y", linewidth=0.5, alpha=0.35)
+        ax.set_axisbelow(True)
+
     return (
         ARCH_COLOR,
+        apply_log_yaxis,
         arch_color,
         arch_dash,
         arch_factor_legend,
@@ -557,7 +819,7 @@ def _(MODEL_SHADE, plt, shade_color):
 
 
 @app.cell(hide_code=True)
-def _(json, os):
+def _(METRIC_DISPLAY_NAMES, json, os):
     # ------------------------------------------------------------------
     # Per-step training history (for the training-curve column, and for the
     # smoothed train loss in the column-1 plots).
@@ -699,9 +961,10 @@ def _(json, os):
                 return sm
         return row.get(metric)
 
-    def axis_label(metric):
+    def axis_label(raw_metric):
         """Y-axis / legend label for a metric (annotates the smoothed train metrics)."""
-        if is_smoothed_metric(metric):
+        metric = METRIC_DISPLAY_NAMES.get(raw_metric, raw_metric)
+        if is_smoothed_metric(raw_metric):
             return f"{metric} (last-{SMOOTH_WINDOW}-step avg)"
         return metric
 
@@ -759,11 +1022,13 @@ def _(METRIC_SHORTNAMES, mo, os, plt):
     #   data source __ model scale __ architectures __ varied feature
     # with the metric appended last for the training-history columns.
     # ------------------------------------------------------------------
-    ARCH_ORDER = ["dense", "moe32", "moe64"]
+    # Canonical architecture ordering, shared by the legend, the per-figure arch
+    # loops and the export filenames. Individual plots may override the order.
+    ARCH_ORDER_DEFAULT = ["dense", "moe32", "moe64s8", "moe64", "moe64s32"]
 
     def arch_tag(archs):
         """Canonical architecture part of a filename, e.g. ``dense_moe32_moe64``."""
-        sel = [a for a in ARCH_ORDER if a in (archs or [])]
+        sel = [a for a in ARCH_ORDER_DEFAULT if a in (archs or [])]
         return "_".join(sel) if sel else "none"
 
     def metric_tag(metric):
@@ -801,7 +1066,7 @@ def _(METRIC_SHORTNAMES, mo, os, plt):
         listing = "\n".join(f"- `{p}`" for p in paths)
         return mo.md(f"**Exported {len(paths)} figure(s) to `ml/figures/`:**\n\n{listing}")
 
-    return arch_tag, export_pdf, export_report, metric_tag
+    return ARCH_ORDER_DEFAULT, arch_tag, export_pdf, export_report, metric_tag
 
 
 @app.cell(hide_code=True)
@@ -983,7 +1248,96 @@ def _():
         "eval/downstream/mmlu_stem_mc_5shot_test (length-normalized accuracy)": "eval_mmlu_stem_acc",
         "train/router 0 load imbalance": "train_load_imbalance",
     }
-    return (METRIC_SHORTNAMES,)
+
+    # Human-readable names for the data mixtures, used in figure titles.
+    # Keyed by the identifiers the plotting code already passes to
+    # `make_repetition_figure`: the `DATA_TAGS` values for Groups 1 & 2, and the
+    # `data_label` strings for the Group 1b off-axis families.
+    DATA_DISPLAY_NAMES = {
+        # Data-source tags (DATA_TAGS).
+        "olmo_mix": "OLMoE mix",
+        "dclm": "DCLM",
+        "starcoder": "StarCoder",
+        "pes2o": "peS2o",
+        "wiki": "Wikipedia",
+        # Group 1b off-axis families — all the OLMoE mix, so the name carries the
+        # axis that makes them non-comparable to the Group 1 runs.
+        "olmo_mix (bs 131072)": "OLMoE mix (batch 131k)",
+        "olmo_mix (lr 1e-2)": "OLMoE mix (lr 1e-2)",
+        "olmo_mix (expert size)": "OLMoE mix (expert size)",
+    }
+
+    # Short, human-readable metric names for axis and legend labels. Suffix
+    # convention: "CE" for cross-entropy losses, "acc" for accuracies, so the two
+    # downstream variants of the same task stay distinguishable.
+    #
+    # The per-block router metrics (`train/block NN/router 0 ...`, 30 of them and
+    # layer-count dependent) are deliberately absent — they fall back to their raw
+    # names rather than being enumerated here.
+    METRIC_DISPLAY_NAMES = {
+        "train/CE loss": "Train CE",
+        # Held-out LM validation sets.
+        "eval/lm/c4_en-validation/CE loss": "C4 CE",
+        "eval/lm/dolma_books-validation/CE loss": "Books CE",
+        "eval/lm/dolma_common-crawl-validation/CE loss": "Common Crawl CE",
+        "eval/lm/dolma_pes2o-validation/CE loss": "peS2o CE",
+        "eval/lm/dolma_reddit-validation/CE loss": "Reddit CE",
+        "eval/lm/dolma_stack-validation/CE loss": "Stack CE",
+        "eval/lm/dolma_wiki-validation/CE loss": "Wikipedia CE",
+        "eval/lm/ice-validation/CE loss": "ICE CE",
+        "eval/lm/m2d2_s2orc-validation/CE loss": "S2ORC CE",
+        "eval/lm/pile-validation/CE loss": "Pile CE",
+        "eval/lm/wikitext_103-validation/CE loss": "WikiText-103 CE",
+        # Downstream tasks, CE loss.
+        "eval/downstream/boolq (CE loss)": "BoolQ CE",
+        "eval/downstream/hellaswag (CE loss)": "HellaSwag CE",
+        "eval/downstream/mmlu_humanities_mc_5shot_test (CE loss)": "MMLU humanities CE",
+        "eval/downstream/mmlu_other_mc_5shot_test (CE loss)": "MMLU other CE",
+        "eval/downstream/mmlu_social_sciences_mc_5shot_test (CE loss)": "MMLU social sci CE",
+        "eval/downstream/mmlu_stem_mc_5shot_test (CE loss)": "MMLU STEM CE",
+        # Downstream tasks, accuracy.
+        "eval/downstream/boolq (accuracy)": "BoolQ acc",
+        "eval/downstream/hellaswag (length-normalized accuracy)": "HellaSwag acc",
+        "eval/downstream/mmlu_humanities_mc_5shot_test (length-normalized accuracy)": "MMLU humanities acc",
+        "eval/downstream/mmlu_other_mc_5shot_test (length-normalized accuracy)": "MMLU other acc",
+        "eval/downstream/mmlu_social_sciences_mc_5shot_test (length-normalized accuracy)": "MMLU social sci acc",
+        "eval/downstream/mmlu_stem_mc_5shot_test (length-normalized accuracy)": "MMLU STEM acc",
+        # MoE router load metrics (aggregate).
+        "train/router 0 load imbalance": "Router load imbalance",
+        "train/router 0 load balancing loss unscaled": "Router LB loss",
+    }
+
+    # Short names for the swept regularizers, used as the Group 3/3b figure title
+    # and as the legend's factor-section header — both tight on space, so these stay
+    # brief. Keys are the `factor_label` values passed to `make_factor_figure`.
+    FACTOR_DISPLAY_NAMES = {
+        "dropout": "Dropout",
+        "expert_dropout": "Expert Dropout",
+        "weight_decay": "Weight Decay",
+        "max_grad_norm": "Max Grad Norm",
+        "jitter_eps": "Router Jitter",
+        "eom_prob": "EOM",
+        "fom_prob": "FOM",
+    }
+
+    # Human-readable architecture names, used for the "Model type" legend section.
+    # Format is (num experts x expert size relative to the dense FFN).
+    MODEL_DISPLAY_NAME = {
+        "dense": "Dense (1 x 1)",
+        "moe16": "MoE (16 x 1/4)",
+        "moe32": "MoE (32 x 1/4)",
+        "moe64": "MoE (64 x 1/4)",
+        "moe128": "MoE (128 x 1/4)",
+        "moe64s8": "MoE (64 x 1/8)",
+        "moe64s32": "MoE (64 x 1/2)",
+    }
+    return (
+        DATA_DISPLAY_NAMES,
+        FACTOR_DISPLAY_NAMES,
+        METRIC_DISPLAY_NAMES,
+        METRIC_SHORTNAMES,
+        MODEL_DISPLAY_NAME,
+    )
 
 
 @app.cell(hide_code=True)
@@ -993,11 +1347,16 @@ def _(
     export_pdf,
     export_report,
     finished_df,
+    log_y_g12,
     make_repetition_figure,
     metric_tag,
     mo,
     sel_dclm_80m,
     sel_dclm_80m_arch,
+    sel_olmo_10m,
+    sel_olmo_10m_arch,
+    sel_olmo_1b,
+    sel_olmo_1b_arch,
     sel_olmo_200m,
     sel_olmo_200m_arch,
     sel_olmo_80m,
@@ -1016,8 +1375,10 @@ def _(
         _out = mo.md("*Click **Export images** to write this column's PDFs.*")
     else:
         _specs = [
+            ("olmoe_mix", "olmo_mix", "10M", sel_olmo_10m, sel_olmo_10m_arch),
             ("olmoe_mix", "olmo_mix", "80M", sel_olmo_80m, sel_olmo_80m_arch),
             ("olmoe_mix", "olmo_mix", "200M", sel_olmo_200m, sel_olmo_200m_arch),
+            ("olmoe_mix", "olmo_mix", "1B", sel_olmo_1b, sel_olmo_1b_arch),
             ("single_domain", "dclm", "80M", sel_dclm_80m, sel_dclm_80m_arch),
             ("single_domain", "starcoder", "80M", sel_starcoder_80m, sel_starcoder_80m_arch),
             ("single_domain", "pes2o", "80M", sel_pes2o_80m, sel_pes2o_80m_arch),
@@ -1029,7 +1390,8 @@ def _(
             # short metric name.
             for _m in _sel.value:
                 _fig = make_repetition_figure(
-                    finished_df, _tag, _scale, _m, include_archs=_arch.value
+                    finished_df, _tag, _scale, _m, include_archs=_arch.value,
+                    log_y=log_y_g12.value,
                 )
                 _paths.append(
                     export_pdf(
@@ -1045,6 +1407,7 @@ def _(
 @app.cell(hide_code=True)
 def _(
     DROPOUT_COL,
+    EXPERT_DROPOUT_COL,
     FOM_COL,
     MGN_COL,
     WD_COL,
@@ -1053,6 +1416,7 @@ def _(
     export_pdf,
     export_report,
     finished_df,
+    log_y_g3,
     make_factor_figure,
     metric_tag,
     mo,
@@ -1063,6 +1427,8 @@ def _(
     sel_max_grad_norm_arch,
     sel_moe_eom,
     sel_moe_eom_arch,
+    sel_moe_expert_dropout,
+    sel_moe_expert_dropout_arch,
     sel_moe_fom,
     sel_moe_fom_arch,
     sel_moe_jitter,
@@ -1078,7 +1444,8 @@ def _(
         # (varied feature, selector, arch selector, extra make_factor_figure kwargs)
         _specs = [
             ("dropout", sel_dropout, sel_dropout_arch,
-             dict(factor_col=DROPOUT_COL, baseline_value=None, factor_key="dropout")),
+             dict(factor_col=DROPOUT_COL, baseline_value=None, factor_key="dropout",
+                  baseline_label="None (disabled)")),
             ("weight_decay", sel_weight_decay, sel_weight_decay_arch,
              dict(factor_col=WD_COL, baseline_value=0.1, factor_key="weight_decay")),
             ("max_grad_norm", sel_max_grad_norm, sel_max_grad_norm_arch,
@@ -1092,6 +1459,9 @@ def _(
                   value_getter=lambda row: router_field(row, "eom_prob"))),
             ("fom_prob", sel_moe_fom, sel_moe_fom_arch,
              dict(factor_col=FOM_COL, baseline_value=None, factor_key="fom_prob")),
+            ("expert_dropout", sel_moe_expert_dropout, sel_moe_expert_dropout_arch,
+             dict(factor_col=EXPERT_DROPOUT_COL, baseline_value=None,
+                  factor_key="expert_dropout")),
         ]
         _paths = []
         for _feature, _sel, _arch, _kw in _specs:
@@ -1107,8 +1477,10 @@ def _(
                     include_archs=_arch.value,
                     exclude_reps=[128, 256],
                     nan_label=_kw.get("nan_label"),
+                    baseline_label=_kw.get("baseline_label"),
                     value_getter=_kw.get("value_getter"),
                     factor_key=_kw["factor_key"],
+                    log_y=log_y_g3.value,
                 )
                 _paths.append(
                     export_pdf(
@@ -1128,6 +1500,7 @@ def _(
     export_pdf,
     export_report,
     finished_df,
+    log_y_g4,
     make_famA_figure,
     make_famA_rep_figure,
     metric_tag,
@@ -1151,7 +1524,10 @@ def _(
             # One separate image per selected metric, always suffixed with the
             # short metric name.
             for _m in _sel.value:
-                _fig = _builder(finished_df, _m, include_archs=_arch.value)
+                _fig = _builder(
+                    finished_df, _m, include_archs=_arch.value,
+                    log_y=log_y_g4.value,
+                )
                 _paths.append(
                     export_pdf(
                         _fig, "filtering", "famA", "80M",
@@ -1170,6 +1546,7 @@ def _(
     export_pdf,
     export_report,
     finished_df,
+    log_y_curves,
     make_training_curve_figure,
     metric_tag,
     mo,
@@ -1204,7 +1581,8 @@ def _(
         for _tag, _scale, _sel, _arch in _specs:
             for _m in _sel.value:
                 _fig = make_training_curve_figure(
-                    finished_df, _tag, _scale, [_m], include_archs=_arch.value
+                    finished_df, _tag, _scale, [_m], include_archs=_arch.value,
+                    log_y=True if log_y_curves.value else None,
                 )
                 _paths.append(
                     export_pdf(
@@ -1224,6 +1602,7 @@ def _(
     export_pdf,
     export_report,
     finished_df,
+    log_y_load,
     make_training_curve_figure,
     metric_tag,
     mo,
@@ -1258,7 +1637,8 @@ def _(
         for _tag, _scale, _sel, _arch in _specs:
             for _m in _sel.value:
                 _fig = make_training_curve_figure(
-                    finished_df, _tag, _scale, [_m], include_archs=_arch.value
+                    finished_df, _tag, _scale, [_m], include_archs=_arch.value,
+                    log_y=True if log_y_load.value else None,
                 )
                 _paths.append(
                     export_pdf(
@@ -1274,6 +1654,7 @@ def _(
 @app.cell(column=1, hide_code=True)
 def _(mo):
     export_btn_g12 = mo.ui.run_button(label="Export images")
+    log_y_g12 = mo.ui.checkbox(label="Log y axis")
     mo.vstack([
         mo.md(r"""
     ## Group 1 & 2 — Final loss vs. repetition (baseline runs)
@@ -1283,17 +1664,38 @@ def _(mo):
     log X axis. If more than one baseline run exists at the same repetition count, a
     warning is printed and the **lowest** value is kept.
 
+    Group 1 covers the `olmo_mix` mixture at 10M, 80M, 200M and 1B.
+
+    The 10M figure excludes the small-batch (131072-token) runs, which are plotted
+    separately in Group 1b.
+
+    > **10M caveat.** The separate `lr=1e-2` 10M sweep (`data_rep_AC_lr1e-2`) is
+    > also tagged `baseline`, and at 10M it reaches ~6.5 train CE against ~9.3 for
+    > the `lr=4e-4` runs plotted here. It is split out into `high_lr_df` and shown
+    > in Group 1b, so it cannot reach this figure. One visible consequence: the 10M
+    > dense series has **no rep=1 point**, because the only 10M dense rep1x run
+    > belongs to that sweep.
+
+    > **1B is wired but empty.** The sweep is still in flight, and separately the 1B
+    > runs launched so far carry tags like `1B, Data=1C, MoE64, olmo_mix, rep1x` with
+    > **no `baseline` tag**, which is what `collect_baseline_points` selects on. Tag
+    > them `baseline` at launch (as the 80M/200M runs are) or the figure stays blank
+    > even after they finish.
+
     **Export images** writes Group 1 to `ml/figures/olmoe_mix/` and Group 2 to
     `ml/figures/single_domain/`.
     """),
-        export_btn_g12,
+        mo.hstack([export_btn_g12, log_y_g12], justify="start", gap=1),
     ])
-    return (export_btn_g12,)
+    return export_btn_g12, log_y_g12
 
 
 @app.cell(hide_code=True)
 def _(
     ARCH_COLOR,
+    ARCH_ORDER_DEFAULT,
+    DATA_DISPLAY_NAMES,
+    apply_log_yaxis,
     arch_dash,
     arch_factor_legend,
     axis_label,
@@ -1309,12 +1711,26 @@ def _(
     pow2_ticks,
 ):
     def collect_baseline_points(
-        df: pd.DataFrame, data_tag: str, scale: str, model_type: str, metric: str
+        df: pd.DataFrame,
+        data_tag: str,
+        scale: str,
+        model_type: str,
+        metric: str,
+        series_tag: str = "baseline",
     ):
-        """Return sorted (reps, value) points for baseline runs of one series.
+        """Return sorted (reps, value) points for one series.
 
-        Prints a warning when multiple baseline runs share a repetition count, and
-        keeps the run with the lowest metric value.
+        ``series_tag`` is the tag that selects the run family: ``"baseline"`` for
+        Groups 1 & 2, ``"Data=4C"`` for the Group 1b (4C token budget) family.
+
+        ``data_tag`` of ``None`` skips the data-mixture filter entirely. That is
+        needed for the 10M sweeps: they are all ``olmo_mix`` in substance, but most
+        of them (and *all* of the small-batch ones) were launched before the
+        ``olmo_mix`` tag was applied, so filtering on it would drop them. No 10M run
+        carries any other data-source tag, so nothing foreign can slip in.
+
+        Prints a warning when multiple runs share a repetition count, and keeps the
+        run with the lowest metric value.
         """
         rows = []
         for _, row in df.iterrows():
@@ -1322,9 +1738,9 @@ def _(
                 continue
             if get_model_type(row) != model_type:
                 continue
-            if not has_tag(row, "baseline"):
+            if not has_tag(row, series_tag):
                 continue
-            if not has_tag(row, data_tag):
+            if data_tag is not None and not has_tag(row, data_tag):
                 continue
             reps = get_reps(row)
             loss = metric_value(row, metric)
@@ -1342,7 +1758,7 @@ def _(
             entries = by_reps[reps]
             if len(entries) > 1:
                 print(
-                    f"WARNING: {len(entries)} baseline runs for "
+                    f"WARNING: {len(entries)} {series_tag} runs for "
                     f"{data_tag}/{scale}/{model_type} at rep={reps:g}; "
                     f"keeping lowest value. Runs: {[n for _, n in entries]}"
                 )
@@ -1367,6 +1783,11 @@ def _(
         exclude_archs=None,
         include_reps=None,
         exclude_reps=None,
+        series_tag="baseline",
+        series_label=None,
+        data_label=None,
+        log_y=False,
+        arch_order=None,
     ):
         """One figure: Dense + MoE32 + MoE64 baseline, metric vs reps (log X).
 
@@ -1374,20 +1795,34 @@ def _(
         moe32 = greenish-blue, moe64 = yellow, i.e. the viridis palette used by the
         factor plots) as well as line style (solid/dashed/dotted).
 
+        Set ``log_y=True`` for a log-scaled y axis (X is always log/power-of-2).
+
         Filters (all default to no-op):
 
         - ``include_archs`` / ``exclude_archs``: keep/drop architectures
           (``"dense"``, ``"moe32"``, ``"moe64"``).
         - ``include_reps`` / ``exclude_reps``: keep/drop repetition counts.
+
+        ``series_tag`` selects which run family to plot (``"baseline"`` for Groups
+        1 & 2, ``"Data=4C"`` for Group 1b); ``series_label`` overrides how that
+        family is named in the title. ``data_tag=None`` disables the mixture filter
+        (see ``collect_baseline_points``); ``data_label`` then supplies the title
+        text in its place.
         """
+        label = series_label if series_label is not None else series_tag
+        mix_label = DATA_DISPLAY_NAMES.get(
+            data_label, DATA_DISPLAY_NAMES.get(data_tag, data_tag or "all data")
+        )
         fig, ax = plt.subplots(figsize=(5.0, 4.5))
         any_data = False
         max_reps = 0
         shown_archs = []
-        for model_type in ["dense", "moe32", "moe64"]:
+        for model_type in arch_order or ARCH_ORDER_DEFAULT:
             if not keep_arch(model_type, include_archs, exclude_archs):
                 continue
-            points = collect_baseline_points(df, data_tag, scale, model_type, metric)
+            points = collect_baseline_points(
+                df, data_tag, scale, model_type, metric, series_tag=series_tag
+            )
             points = filter_rep_points(points, include_reps, exclude_reps)
             if not points:
                 continue
@@ -1405,19 +1840,57 @@ def _(
                 linestyle=arch_dash(model_type),
                 color=ARCH_COLOR[model_type],
             )
-        title = f"{data_tag} — {scale}\n{metric} vs. repetition (baseline)"
+        title = f"{mix_label} — {scale}"
+        # title = f"{mix_label} — {scale}\n{metric} vs. repetition ({label})"
         if not any_data:
-            title += "  [no finished baseline runs]"
+            title += f"  [no finished {label} runs]"
         apply_pow2_xaxis(ax, max_reps, any_data)
+        if log_y:
+            apply_log_yaxis(ax)
         ax.set_xlabel("repetition count")
         ax.set_ylabel(axis_label(metric))
         ax.set_title(title, fontsize=10)
         if any_data:
-            arch_factor_legend(ax, shown_archs, arch_colored=True)
+            arch_factor_legend(
+                ax, shown_archs, arch_colored=True, arch_order=arch_order
+            )
         fig.tight_layout()
         return fig
 
     return apply_pow2_xaxis, collect_baseline_points, make_repetition_figure
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_olmo_10m = metric_multiselect("olmo_mix 10M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_olmo_10m_arch = arch_multiselect("olmo_mix 10M — architectures")
+    mo.vstack([sel_olmo_10m, sel_olmo_10m_arch])
+    return sel_olmo_10m, sel_olmo_10m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    log_y_g12,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_olmo_10m,
+    sel_olmo_10m_arch,
+):
+    # 10M, regular batch (1048576). Same call shape as the other Group 1 plots: the
+    # `olmo_mix` tag filter is what keeps the separate `lr1e-2` 10M sweep (also
+    # tagged `baseline`, ~2.8 nats better) out of this series. The small-batch
+    # (131072) runs are split out into Group 1b.
+    _out = render_side_by_side(
+        sel_olmo_10m.value,
+        lambda m: make_repetition_figure(
+            finished_df, "olmo_mix", "10M", m, include_archs=sel_olmo_10m_arch.value
+        , log_y=log_y_g12.value
+        ),
+        "olmo_mix_10M",
+    )
+    _out
+    return
 
 
 @app.cell(hide_code=True)
@@ -1431,6 +1904,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g12,
     make_repetition_figure,
     render_side_by_side,
     sel_olmo_80m,
@@ -1440,6 +1914,7 @@ def _(
         sel_olmo_80m.value,
         lambda m: make_repetition_figure(
             finished_df, "olmo_mix", "80M", m, include_archs=sel_olmo_80m_arch.value
+        , log_y=log_y_g12.value
         ),
         "olmo_mix_80M",
     )
@@ -1458,6 +1933,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g12,
     make_repetition_figure,
     render_side_by_side,
     sel_olmo_200m,
@@ -1467,8 +1943,40 @@ def _(
         sel_olmo_200m.value,
         lambda m: make_repetition_figure(
             finished_df, "olmo_mix", "200M", m, include_archs=sel_olmo_200m_arch.value
+        , log_y=log_y_g12.value
         ),
         "olmo_mix_200M",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_olmo_1b = metric_multiselect("olmo_mix 1B — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_olmo_1b_arch = arch_multiselect("olmo_mix 1B — architectures")
+    mo.vstack([sel_olmo_1b, sel_olmo_1b_arch])
+    return sel_olmo_1b, sel_olmo_1b_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    log_y_g12,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_olmo_1b,
+    sel_olmo_1b_arch,
+):
+    # 1B sweep. Stays empty until the runs finish AND carry the `baseline` tag —
+    # see the note in the Group 1 & 2 header.
+    _out = render_side_by_side(
+        sel_olmo_1b.value,
+        lambda m: make_repetition_figure(
+            finished_df, "olmo_mix", "1B", m, include_archs=sel_olmo_1b_arch.value
+        , log_y=log_y_g12.value
+        ),
+        "olmo_mix_1B",
     )
     _out
     return
@@ -1493,6 +2001,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g12,
     make_repetition_figure,
     render_side_by_side,
     sel_dclm_80m,
@@ -1502,6 +2011,7 @@ def _(
         sel_dclm_80m.value,
         lambda m: make_repetition_figure(
             finished_df, "dclm", "80M", m, include_archs=sel_dclm_80m_arch.value
+        , log_y=log_y_g12.value
         ),
         "dclm_80M",
     )
@@ -1520,6 +2030,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g12,
     make_repetition_figure,
     render_side_by_side,
     sel_starcoder_80m,
@@ -1529,6 +2040,7 @@ def _(
         sel_starcoder_80m.value,
         lambda m: make_repetition_figure(
             finished_df, "starcoder", "80M", m, include_archs=sel_starcoder_80m_arch.value
+        , log_y=log_y_g12.value
         ),
         "starcoder_80M",
     )
@@ -1547,6 +2059,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g12,
     make_repetition_figure,
     render_side_by_side,
     sel_pes2o_80m,
@@ -1556,6 +2069,7 @@ def _(
         sel_pes2o_80m.value,
         lambda m: make_repetition_figure(
             finished_df, "pes2o", "80M", m, include_archs=sel_pes2o_80m_arch.value
+        , log_y=log_y_g12.value
         ),
         "pes2o_80M",
     )
@@ -1574,6 +2088,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g12,
     make_repetition_figure,
     render_side_by_side,
     sel_wiki_80m,
@@ -1583,6 +2098,7 @@ def _(
         sel_wiki_80m.value,
         lambda m: make_repetition_figure(
             finished_df, "wiki", "80M", m, include_archs=sel_wiki_80m_arch.value
+        , log_y=log_y_g12.value
         ),
         "wiki_80M",
     )
@@ -1592,7 +2108,305 @@ def _(
 
 @app.cell(column=2, hide_code=True)
 def _(mo):
+    export_btn_g1b = mo.ui.run_button(label="Export images")
+    log_y_g1b = mo.ui.checkbox(label="Log y axis")
+    mo.vstack([
+        mo.md(r"""
+    ## Group 1b — Off-axis run families
+
+    Runs that share Group 1's axes but differ in a way that would make them
+    misleading if drawn on the same plot. Each is held in its own frame and
+    excluded from every other group.
+
+    **4C token budget** — `data_rep_AC_x4` in the run name, tagged `Data=4C`
+    (frame: `x4_df`). Same `olmo_mix` data as the 80M baselines but 4x the token
+    budget (6.4B vs. 1.6B), so it cannot share the baseline axis. Only dense and
+    MoE64 were run. Uses `series_tag="Data=4C"` in place of `baseline`.
+
+    **Small batch (bs 131072)** — the `new_bs_256plus` 10M sweep re-ran the extreme
+    repetition counts (256x / 512x / 1024x) at a 131072-token global batch instead
+    of the usual 1048576 (frame: `small_bs_df`). A different batch size is a
+    different experiment, so these are kept off the regular-batch 10M plot in
+    Group 1. This plot does not filter on the `olmo_mix` tag — none of these runs
+    carry it, and the frame is homogeneous, so nothing foreign can slip in.
+
+    **High LR (lr 1e-2)** — a 10M sweep at `lr=1e-2` (`data_rep_AC_lr1e-2`) against
+    the `4e-4` used by every other run in the project (frame: `high_lr_df`). Reps
+    1x / 8x / 32x, all three architectures. At 10M this reaches ~6.5 train CE vs
+    ~9.3 for `4e-4`, so plotting it alongside would flatten every other curve.
+    Same `data_tag=None` treatment and the same reasoning.
+
+    **Export images** writes this column to `ml/figures/olmoe_mix_4C/`,
+    `ml/figures/olmoe_mix_bs131072/` and `ml/figures/olmoe_mix_lr1e-2/`.
+    """),
+        mo.hstack([export_btn_g1b, log_y_g1b], justify="start", gap=1),
+    ])
+    return export_btn_g1b, log_y_g1b
+
+
+@app.cell(hide_code=True)
+def _(
+    X4_TAG,
+    arch_tag,
+    expert_size_df,
+    export_btn_g1b,
+    export_pdf,
+    export_report,
+    high_lr_df,
+    log_y_g1b,
+    make_repetition_figure,
+    metric_tag,
+    mo,
+    sel_expsize_80m,
+    sel_expsize_80m_arch,
+    sel_highlr_10m,
+    sel_highlr_10m_arch,
+    sel_smallbs_10m,
+    sel_smallbs_10m_arch,
+    sel_x4_80m,
+    sel_x4_80m_arch,
+    small_bs_df,
+    x4_df,
+):
+    # Export the Group 1b plots: the 4C family to olmoe_mix_4C/ and the small-batch
+    # 10M family to olmoe_mix_bs131072/.
+    # Name: <data source>__<scale>__<architectures>__<metric>.
+    if not export_btn_g1b.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _paths = []
+        for _m in sel_x4_80m.value:
+            _fig = make_repetition_figure(
+                x4_df,
+                "olmo_mix",
+                "80M",
+                _m,
+                include_archs=sel_x4_80m_arch.value,
+                series_tag=X4_TAG,
+             log_y=log_y_g1b.value
+            )
+            _paths.append(
+                export_pdf(
+                    _fig, "olmoe_mix_4C", "olmo_mix_4C", "80M",
+                    arch_tag(sel_x4_80m_arch.value), metric_tag(_m),
+                )
+            )
+        for _m in sel_smallbs_10m.value:
+            _fig = make_repetition_figure(
+                small_bs_df,
+                None,
+                "10M",
+                _m,
+                include_archs=sel_smallbs_10m_arch.value,
+                data_label="olmo_mix (bs 131072)",
+             log_y=log_y_g1b.value
+            )
+            _paths.append(
+                export_pdf(
+                    _fig, "olmoe_mix_bs131072", "olmo_mix_bs131072", "10M",
+                    arch_tag(sel_smallbs_10m_arch.value), metric_tag(_m),
+                )
+            )
+        for _m in sel_highlr_10m.value:
+            _fig = make_repetition_figure(
+                high_lr_df,
+                None,
+                "10M",
+                _m,
+                include_archs=sel_highlr_10m_arch.value,
+                data_label="olmo_mix (lr 1e-2)",
+             log_y=log_y_g1b.value
+            )
+            _paths.append(
+                export_pdf(
+                    _fig, "olmoe_mix_lr1e-2", "olmo_mix_lr1e-2", "10M",
+                    arch_tag(sel_highlr_10m_arch.value), metric_tag(_m),
+                )
+            )
+        for _m in sel_expsize_80m.value:
+            _fig = make_repetition_figure(
+                expert_size_df,
+                None,
+                "80M",
+                _m,
+                include_archs=sel_expsize_80m_arch.value,
+                include_reps=[1, 2, 4, 8, 16, 32],
+                data_label="olmo_mix (expert size)",
+                arch_order=["dense", "moe64s8", "moe64", "moe64s32"],
+                log_y=log_y_g1b.value,
+            )
+            _paths.append(
+                export_pdf(
+                    _fig, "olmoe_mix_expert_size", "olmo_mix_expert_size", "80M",
+                    arch_tag(sel_expsize_80m_arch.value), metric_tag(_m),
+                )
+            )
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_x4_80m = metric_multiselect("4C olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_x4_80m_arch = arch_multiselect(
+        "4C olmo_mix 80M — architectures", options=["dense", "moe64"]
+    )
+    mo.vstack([sel_x4_80m, sel_x4_80m_arch])
+    return sel_x4_80m, sel_x4_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    X4_TAG,
+    log_y_g1b,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_x4_80m,
+    sel_x4_80m_arch,
+    x4_df,
+):
+    _out = render_side_by_side(
+        sel_x4_80m.value,
+        lambda m: make_repetition_figure(
+            x4_df,
+            "olmo_mix",
+            "80M",
+            m,
+            include_archs=sel_x4_80m_arch.value,
+            series_tag=X4_TAG,
+         log_y=log_y_g1b.value
+        ),
+        "olmo_mix_80M_4C",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_highlr_10m = metric_multiselect("10M lr=1e-2 — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_highlr_10m_arch = arch_multiselect("10M lr=1e-2 — architectures")
+    mo.vstack([sel_highlr_10m, sel_highlr_10m_arch])
+    return sel_highlr_10m, sel_highlr_10m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    high_lr_df,
+    log_y_g1b,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_highlr_10m,
+    sel_highlr_10m_arch,
+):
+    # The `data_rep_AC_lr1e-2` 10M sweep. Same figure as the Group 1 10M plot, over
+    # `high_lr_df` instead of `finished_df`. Reps 1x / 8x / 32x only.
+    _out = render_side_by_side(
+        sel_highlr_10m.value,
+        lambda m: make_repetition_figure(
+            high_lr_df,
+            None,
+            "10M",
+            m,
+            include_archs=sel_highlr_10m_arch.value,
+            data_label="olmo_mix (lr 1e-2)",
+         log_y=log_y_g1b.value
+        ),
+        "olmo_mix_10M_lr1e-2",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_smallbs_10m = metric_multiselect("10M bs=131072 — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_smallbs_10m_arch = arch_multiselect("10M bs=131072 — architectures")
+    mo.vstack([sel_smallbs_10m, sel_smallbs_10m_arch])
+    return sel_smallbs_10m, sel_smallbs_10m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    log_y_g1b,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_smallbs_10m,
+    sel_smallbs_10m_arch,
+    small_bs_df,
+):
+    # The `new_bs_256plus` 10M runs at a 131072-token global batch. Same figure as
+    # the Group 1 10M plot, over `small_bs_df` instead of `finished_df`.
+    _out = render_side_by_side(
+        sel_smallbs_10m.value,
+        lambda m: make_repetition_figure(
+            small_bs_df,
+            None,
+            "10M",
+            m,
+            include_archs=sel_smallbs_10m_arch.value,
+            data_label="olmo_mix (bs 131072)",
+         log_y=log_y_g1b.value
+        ),
+        "olmo_mix_10M_bs131072",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_expsize_80m = metric_multiselect(
+        "80M expert size — metrics",
+        chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"],
+    )
+    # Only the architectures this comparison is about, all selected by default and
+    # listed in the order they are plotted (by expert size: 1, 1/8, 1/4, 1/2).
+    sel_expsize_80m_arch = arch_multiselect(
+        "80M expert size — architectures",
+        options=["dense", "moe64s8", "moe64", "moe64s32"],
+    )
+    mo.vstack([sel_expsize_80m, sel_expsize_80m_arch])
+    return sel_expsize_80m, sel_expsize_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    expert_size_df,
+    log_y_g1b,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_expsize_80m,
+    sel_expsize_80m_arch,
+):
+    # 80M expert-size sweep: the 64-expert model at 1/8, 1/4 and 1/2 the dense FFN,
+    # against dense. Same figure as the Group 1 80M plot, over `expert_size_df`.
+    # The MoE64s* runs only go to rep 32, so the axis is capped there rather than
+    # running out to 256 with only dense/moe64 present.
+    _out = render_side_by_side(
+        sel_expsize_80m.value,
+        lambda m: make_repetition_figure(
+            expert_size_df,
+            None,
+            "80M",
+            m,
+            include_archs=sel_expsize_80m_arch.value,
+            include_reps=[1, 2, 4, 8, 16, 32],
+            data_label="olmo_mix (expert size)",
+            arch_order=["dense", "moe64s8", "moe64", "moe64s32"],
+            log_y=log_y_g1b.value,
+        ),
+        "olmo_mix_80M_expert_size",
+    )
+    _out
+    return
+
+
+@app.cell(column=3, hide_code=True)
+def _(mo):
     export_btn_g3 = mo.ui.run_button(label="Export images")
+    log_y_g3 = mo.ui.checkbox(label="Log y axis")
     mo.vstack([
         mo.md(r"""
     ## Group 3 — Regularizer sweeps: dropout, weight decay & max grad norm
@@ -1607,17 +2421,21 @@ def _(mo):
     **Export images** writes this column (Groups 3 and 3b) to
     `ml/figures/regularizers/`.
     """),
-        export_btn_g3,
+        mo.hstack([export_btn_g3, log_y_g3], justify="start", gap=1),
     ])
-    return (export_btn_g3,)
+    return export_btn_g3, log_y_g3
 
 
 @app.cell(hide_code=True)
 def _(
     DROPOUT_COL,
+    EXPERT_DROPOUT_COL,
+    FACTOR_DISPLAY_NAMES,
     FOM_COL,
+    METRIC_DISPLAY_NAMES,
     MGN_COL,
     WD_COL,
+    apply_log_yaxis,
     apply_pow2_xaxis,
     arch_color,
     arch_dash,
@@ -1648,7 +2466,7 @@ def _(
     def make_factor_figure(
         df,
         factor_col,
-        factor_label,
+        raw_factor_label,
         baseline_value,
         metric,
         include_archs=None,
@@ -1658,8 +2476,12 @@ def _(
         nan_label=None,
         value_getter=None,
         factor_key=None,
+        log_y=False,
+        baseline_label=None,
     ):
         """color -> factor value; line style + shade -> architecture.
+
+        Set ``log_y=True`` for a log-scaled y axis (X is always log/power-of-2).
 
         `baseline_value` is the value that represents 'no regularization' for this
         column (e.g. dropout baseline = None/blank, weight-decay baseline = 0.1).
@@ -1673,8 +2495,13 @@ def _(
         nested inside JSON columns (e.g. MoE ``jitter_eps`` / ``eom_prob`` inside
         ``routers_list``).
 
+        `baseline_label`: overrides the legend text for the baseline bucket. Useful
+        where the numeric value is misleading — a dropout baseline is not really
+        "0.0", it is the knob being switched off.
+
         `factor_key`: which regularizer this plot sweeps (one of ``"dropout"``,
-        ``"weight_decay"``, ``"max_grad_norm"``, ``"fom_prob"``, ``"jitter_eps"``,
+        ``"expert_dropout"``, ``"weight_decay"``, ``"max_grad_norm"``,
+        ``"fom_prob"``, ``"jitter_eps"``,
         ``"eom_prob"``). Only runs whose *other* knobs are all at their defaults are
         included, so e.g. a dropout=0.2 run does not contaminate the weight-decay
         plot's baseline bucket. When None, no such filtering is applied.
@@ -1708,6 +2535,7 @@ def _(
 
         _knob_at_default = {
             "dropout": lambda row: _blank(row.get(DROPOUT_COL)),
+            "expert_dropout": lambda row: _blank(row.get(EXPERT_DROPOUT_COL)),
             "weight_decay": lambda row: _num_default(row.get(WD_COL), 0.1),
             "max_grad_norm": lambda row: _num_default(row.get(MGN_COL), 1.0),
             "fom_prob": lambda row: _blank(row.get(FOM_COL)),
@@ -1793,6 +2621,8 @@ def _(
 
         def _bucket_label(fval_key):
             if fval_key == "baseline":
+                if baseline_label is not None:
+                    return baseline_label
                 lbl = f"{baseline_display:.10g}"
                 return lbl if "." in lbl else f"{baseline_display:.1f}"
             if isinstance(fval_key, str):
@@ -1825,9 +2655,16 @@ def _(
                 color=arch_color(bucket_color[fval_key], model_type),
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
-        ax.set_xlabel("repetition count")
+        if log_y:
+            apply_log_yaxis(ax)
+        factor_label = FACTOR_DISPLAY_NAMES.get(raw_factor_label, raw_factor_label)
+        ax.set_xlabel("Repetition Count")
         ax.set_ylabel(axis_label(metric))
-        ax.set_title(f"{factor_label} — {metric} (olmo_mix, 80M)", fontsize=10)
+        ax.set_title(
+            f"{factor_label} — {METRIC_DISPLAY_NAMES.get(metric, metric)} "
+            f"(OLMoE Mix, 80M)",
+            fontsize=10,
+        )
         if any_data:
             bucket_order = [b for b in ordered_buckets if b in shown_buckets]
             arch_factor_legend(
@@ -1856,6 +2693,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 def _(
     DROPOUT_COL,
     finished_df,
+    log_y_g3,
     make_factor_figure,
     render_side_by_side,
     sel_dropout,
@@ -1868,6 +2706,8 @@ def _(
             finished_df, DROPOUT_COL, "dropout", None, m,
             include_archs=sel_dropout_arch.value, exclude_reps=[128,256],
             factor_key="dropout",
+            baseline_label="None (disabled)",
+         log_y=log_y_g3.value
         ),
         "dropout",
     )
@@ -1887,6 +2727,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 def _(
     WD_COL,
     finished_df,
+    log_y_g3,
     make_factor_figure,
     render_side_by_side,
     sel_weight_decay,
@@ -1899,6 +2740,7 @@ def _(
             finished_df, WD_COL, "weight_decay", 0.1, m,
             include_archs=sel_weight_decay_arch.value, exclude_reps=[128,256],
             factor_key="weight_decay",
+         log_y=log_y_g3.value
         ),
         "weight_decay",
     )
@@ -1918,6 +2760,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 def _(
     MGN_COL,
     finished_df,
+    log_y_g3,
     make_factor_figure,
     render_side_by_side,
     sel_max_grad_norm,
@@ -1931,6 +2774,7 @@ def _(
             finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="0 (no clip)",
             include_archs=sel_max_grad_norm_arch.value, exclude_reps=[128,256],
             factor_key="max_grad_norm",
+         log_y=log_y_g3.value
         ),
         "max_grad_norm",
     )
@@ -1941,15 +2785,52 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Group 3b — MoE-specific regularizer sweeps: jitter, EOM & FOM
+    ## Group 3b — MoE-specific regularizer sweeps: jitter, EOM, FOM & expert dropout
 
     Like Group 3, but for the **MoE-only** regularizers — router jitter
-    (`jitter_eps`), Expert Output Masking (`eom_prob`), and Final Output Masking
-    (`fom_prob`). Dense runs are excluded (these knobs only apply to MoE).
+    (`jitter_eps`), Expert Output Masking (`eom_prob`), Final Output Masking
+    (`fom_prob`), and expert dropout (`expert_dropout`, dropout on the MoE output
+    only). Dense runs are excluded (these knobs only apply to MoE).
 
     Color encodes model type; line style encodes the regularizer value (baseline =
     no regularizer set). `olmo_mix`, 80M, log X with power-of-2 ticks.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_moe_expert_dropout = metric_multiselect("MoE expert_dropout — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
+    sel_moe_expert_dropout_arch = arch_multiselect(
+        "MoE expert_dropout — architectures", options=["dense", "moe32", "moe64"]
+    )
+    mo.vstack([sel_moe_expert_dropout, sel_moe_expert_dropout_arch])
+    return sel_moe_expert_dropout, sel_moe_expert_dropout_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    EXPERT_DROPOUT_COL,
+    finished_df,
+    log_y_g3,
+    make_factor_figure,
+    render_side_by_side,
+    sel_moe_expert_dropout,
+    sel_moe_expert_dropout_arch,
+):
+    # Expert dropout: baseline = not set (blank). The knob only wires into MoE
+    # blocks, so the dense series is a control that should track its baseline.
+    _out = render_side_by_side(
+        sel_moe_expert_dropout.value,
+        lambda m: make_factor_figure(
+            finished_df, EXPERT_DROPOUT_COL, "expert_dropout", None, m,
+            include_archs=sel_moe_expert_dropout_arch.value, exclude_reps=[128,256],
+            factor_key="expert_dropout",
+         log_y=log_y_g3.value
+        ),
+        "moe_expert_dropout",
+    )
+    _out
     return
 
 
@@ -1966,6 +2847,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g3,
     make_factor_figure,
     render_side_by_side,
     router_field,
@@ -1985,6 +2867,7 @@ def _(
             value_getter=lambda row: router_field(row, "jitter_eps"),
             exclude_reps=[128,256],
             factor_key="jitter_eps",
+         log_y=log_y_g3.value
         ),
         "moe_jitter_eps",
     )
@@ -2005,6 +2888,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g3,
     make_factor_figure,
     render_side_by_side,
     router_field,
@@ -2024,6 +2908,7 @@ def _(
             value_getter=lambda row: router_field(row, "eom_prob"),
             exclude_reps=[128,256],
             factor_key="eom_prob",
+         log_y=log_y_g3.value
         ),
         "moe_eom_prob",
     )
@@ -2045,6 +2930,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 def _(
     FOM_COL,
     finished_df,
+    log_y_g3,
     make_factor_figure,
     render_side_by_side,
     sel_moe_fom,
@@ -2055,6 +2941,7 @@ def _(
         sel_moe_fom.value,
         lambda m: make_factor_figure(
             finished_df, FOM_COL, "fom_prob", None, m, include_archs=sel_moe_fom_arch.value, exclude_reps=[128,256], factor_key="fom_prob",
+         log_y=log_y_g3.value
         ),
         "moe_fom_prob",
     )
@@ -2062,9 +2949,10 @@ def _(
     return
 
 
-@app.cell(column=3, hide_code=True)
+@app.cell(column=4, hide_code=True)
 def _(mo):
     export_btn_g4 = mo.ui.run_button(label="Export images")
+    log_y_g4 = mo.ui.checkbox(label="Log y axis")
     mo.vstack([
         mo.md(r"""
     ## Group 4 — `famA` runs
@@ -2080,13 +2968,14 @@ def _(mo):
 
     **Export images** writes this column to `ml/figures/filtering/`.
     """),
-        export_btn_g4,
+        mo.hstack([export_btn_g4, log_y_g4], justify="start", gap=1),
     ])
-    return (export_btn_g4,)
+    return export_btn_g4, log_y_g4
 
 
 @app.cell(hide_code=True)
 def _(
+    apply_log_yaxis,
     apply_pow2_xaxis,
     arch_color,
     arch_dash,
@@ -2148,10 +3037,13 @@ def _(
             out.append((mt, get_reps(row), pct, float(loss)))
         return out
 
-    def make_famA_figure(df, metric, include_archs=None, exclude_archs=None):
+    def make_famA_figure(
+        df, metric, include_archs=None, exclude_archs=None, log_y=False
+    ):
         """famA: metric vs. %dclm. Color = rep count; line style + shade = architecture.
 
-        The dclm baseline runs are included as the 100% dclm points."""
+        The dclm baseline runs are included as the 100% dclm points.
+        Set ``log_y=True`` for a log-scaled y axis."""
         # Collect: {(model_type, reps): {pct: min_value}}
         series: dict = {}
         rep_set = set()
@@ -2177,6 +3069,8 @@ def _(
                 linestyle=arch_dash(mt),
                 color=arch_color(rep_color[reps], mt),
             )
+        if log_y:
+            apply_log_yaxis(ax)
         ax.set_xticks([0, 25, 50, 75, 100])
         ax.set_xlabel("% dclm")
         ax.set_ylabel(axis_label(metric))
@@ -2188,11 +3082,14 @@ def _(
         fig.tight_layout()
         return fig
 
-    def make_famA_rep_figure(df, metric, include_archs=None, exclude_archs=None):
+    def make_famA_rep_figure(
+        df, metric, include_archs=None, exclude_archs=None, log_y=False
+    ):
         """famA: metric vs. repetition count (log X). Color = %dclm; line style +
         shade = architecture.
 
-        The dclm baseline runs are included as the 100% dclm series."""
+        The dclm baseline runs are included as the 100% dclm series.
+        Set ``log_y=True`` for a log-scaled y axis (X is always log/power-of-2)."""
         # Collect: {(model_type, pct): {reps: min_value}}
         series: dict = {}
         pct_set = set()
@@ -2225,6 +3122,8 @@ def _(
                 color=arch_color(pct_color[pct], mt),
             )
         apply_pow2_xaxis(ax, max_reps, any_data)
+        if log_y:
+            apply_log_yaxis(ax)
         ax.set_xlabel("repetition count")
         ax.set_ylabel(axis_label(metric))
         ax.set_title(f"famA runs: {metric} vs. repetition", fontsize=10)
@@ -2249,6 +3148,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g4,
     make_famA_figure,
     render_side_by_side,
     sel_famA,
@@ -2256,7 +3156,7 @@ def _(
 ):
     _out = render_side_by_side(
         sel_famA.value,
-        lambda m: make_famA_figure(finished_df, m, include_archs=sel_famA_arch.value),
+        lambda m: make_famA_figure(finished_df, m, include_archs=sel_famA_arch.value, log_y=log_y_g4.value),
         "famA",
     )
     _out
@@ -2277,6 +3177,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g4,
     make_famA_rep_figure,
     render_side_by_side,
     sel_famA_rep,
@@ -2286,6 +3187,7 @@ def _(
         sel_famA_rep.value,
         lambda m: make_famA_rep_figure(
             finished_df, m, include_archs=sel_famA_rep_arch.value
+        , log_y=log_y_g4.value
         ),
         "famA_rep",
     )
@@ -2293,15 +3195,24 @@ def _(
     return
 
 
-@app.cell(column=4, hide_code=True)
+@app.cell(column=5, hide_code=True)
 def _(mo):
     export_btn_g5 = mo.ui.run_button(label="Export images")
+    log_y_g5 = mo.ui.checkbox(label="Log y axis")
     mo.vstack([
         mo.md(r"""
     ## Group 5 — `famB` runs: metric vs. repetition
 
-    `famB` runs mix a single source into `olmo_mix` at a fixed fraction, encoded in
-    the run name (`sc50`/`sc90` = 50%/90% starcoder, `p2o10`/`p2o50` = 10%/50% pes2o).
+    `famB` runs mix a single source into `dclm` at a fixed fraction. **The two
+    families name that fraction differently**, so the mixture configs rather than
+    the run names are the source of truth here:
+
+    - `sc90` / `sc50` are named for the **dclm** share — 90%/50% dclm, i.e.
+      **10%/50% starcoder**.
+    - `p2o10` / `p2o50` are named for the **pes2o** share — **10%/50% pes2o**.
+
+    Both are therefore labelled by minority share in the legend (10% / 50% / 100%),
+    with 100% being the pure single-source baseline.
 
     Each figure plots the chosen metric vs. repetition count (log X, power-of-2 ticks)
     with:
@@ -2316,9 +3227,9 @@ def _(mo):
 
     **Export images** writes this column to `ml/figures/mix_varied_rep/`.
     """),
-        export_btn_g5,
+        mo.hstack([export_btn_g5, log_y_g5], justify="start", gap=1),
     ])
-    return (export_btn_g5,)
+    return export_btn_g5, log_y_g5
 
 
 @app.cell(hide_code=True)
@@ -2328,6 +3239,7 @@ def _(
     export_pdf,
     export_report,
     finished_df,
+    log_y_g5,
     make_famB_figure,
     metric_tag,
     mo,
@@ -2342,29 +3254,31 @@ def _(
         _out = mo.md("*Click **Export images** to write this column's PDFs.*")
     else:
         _sc_sources = [
-            ("dclm", "#1f77b4", "baseline", "dclm"),
-            ("sc90", "#d62728", "famB", "sc90"),
-            ("sc50", "#ff7f0e", "famB", "sc50"),
-            ("starcoder", "#2ca02c", "baseline", "starcoder"),
+            ("dclm", "#1f77b4", "hline", "dclm"),
+            ("10% StarCoder", "#d62728", "famB", "sc90"),
+            ("50% StarCoder", "#ff7f0e", "famB", "sc50"),
+            ("100% StarCoder", "#2ca02c", "baseline", "starcoder"),
         ]
         _p2o_sources = [
-            ("dclm", "#1f77b4", "baseline", "dclm"),
-            ("p2o10", "#9467bd", "famB", "p2o10"),
-            ("p2o50", "#ff7f0e", "famB", "p2o50"),
-            ("pes2o", "#2ca02c", "baseline", "pes2o"),
+            ("dclm", "#1f77b4", "hline", "dclm"),
+            ("10% peS2o", "#9467bd", "famB", "p2o10"),
+            ("50% peS2o", "#ff7f0e", "famB", "p2o50"),
+            ("100% peS2o", "#2ca02c", "baseline", "pes2o"),
         ]
         _specs = [
-            ("starcoder", sel_famB_sc, sel_famB_sc_arch, _sc_sources),
-            ("pes2o", sel_famB_p2o, sel_famB_p2o_arch, _p2o_sources),
+            ("starcoder", sel_famB_sc, sel_famB_sc_arch, _sc_sources, "% StarCoder"),
+            ("pes2o", sel_famB_p2o, sel_famB_p2o_arch, _p2o_sources, "% peS2o"),
         ]
         _paths = []
-        for _family, _sel, _arch, _sources in _specs:
+        for _family, _sel, _arch, _sources, _src_title in _specs:
             # One separate image per selected metric, always suffixed with the
             # short metric name.
             for _m in _sel.value:
                 _fig = make_famB_figure(
                     finished_df, _m, f"famB ({_family}): {_m} vs. repetition",
                     _sources, include_archs=_arch.value, exclude_reps=[128, 256],
+                 log_y=log_y_g5.value
+                    , source_title=_src_title
                 )
                 _paths.append(
                     export_pdf(
@@ -2379,6 +3293,8 @@ def _(
 
 @app.cell(hide_code=True)
 def _(
+    DATA_DISPLAY_NAMES,
+    apply_log_yaxis,
     apply_pow2_xaxis,
     arch_color,
     arch_dash,
@@ -2425,13 +3341,26 @@ def _(
         exclude_archs=None,
         include_reps=None,
         exclude_reps=None,
+        log_y=False,
+        source_title="Data source",
     ):
         """One famB figure.
 
-        `sources` is an ordered list of (label, color, kind, key) tuples where kind is
-        either "baseline" (key = data tag, uses baseline runs at 80M) or "famB"
-        (key = run-name substring). The per-source color is ignored: color now encodes
-        the data source and line style + shade encode the architecture.
+        Set ``log_y=True`` for a log-scaled y axis (X is always log/power-of-2).
+
+        `sources` is an ordered list of (label, color, kind, key) tuples. `kind` is
+        one of:
+
+        - ``"baseline"`` — key is a data tag; plots the 80M baseline runs.
+        - ``"famB"`` — key is a run-name substring; plots those runs.
+        - ``"hline"`` — draws a dotted horizontal reference line at the value of
+          that source's **dense, rep-1** run instead of a per-architecture series,
+          annotated inline (so it needs no legend entry). Used for the dclm
+          reference, which is one comparison point rather than a sweep.
+
+        The per-source color is ignored: color now encodes the data source and line
+        style + shade encode the architecture. An ``"hline"`` source still occupies
+        its palette slot, so the other series keep their colors.
 
         Filters (all default to no-op):
 
@@ -2445,7 +3374,22 @@ def _(
         any_data = False
         shown_archs = []
         shown_sources = []
+        hlines = []  # (label, key, y) reference lines, annotated after scaling
         for label, color, kind, key in sources:
+            if kind == "hline":
+                # Single reference value: this source's dense, rep-1 run.
+                _ref_pts = collect_baseline_points(df, key, "80M", "dense", metric)
+                _ref = next((v for r, v in _ref_pts if float(r) == 1.0), None)
+                if _ref is not None:
+                    ax.axhline(
+                        _ref,
+                        linestyle=":",
+                        linewidth=1.2,
+                        color=source_color[label],
+                        zorder=1,
+                    )
+                    hlines.append((label, key, _ref))
+                continue
             for model_type in ["dense", "moe32", "moe64"]:
                 if not keep_arch(model_type, include_archs, exclude_archs):
                     continue
@@ -2474,13 +3418,28 @@ def _(
                     color=arch_color(source_color[label], model_type),
                 )
         apply_pow2_xaxis(ax, max_reps, any_data)
+        if log_y:
+            apply_log_yaxis(ax)
+        # Annotate the reference lines once the scale is settled: x in axes
+        # fraction, y in data coords, so each label rides just above its line.
+        for _hl_label, _hl_key, _hl_y in hlines:
+            ax.text(
+                0.012,
+                _hl_y,
+                f"{DATA_DISPLAY_NAMES.get(_hl_key, _hl_key)} (R=1)",
+                transform=ax.get_yaxis_transform(),
+                color=source_color[_hl_label],
+                fontsize=7,
+                ha="left",
+                va="bottom",
+            )
         ax.set_xlabel("repetition count")
         ax.set_ylabel(axis_label(metric))
         ax.set_title(title, fontsize=10)
         if any_data:
             source_order = [s for s in source_labels if s in shown_sources]
             arch_factor_legend(
-                ax, shown_archs, "Data source", source_order, source_color, str
+                ax, shown_archs, source_title, source_order, source_color, str
             )
         fig.tight_layout()
         return fig
@@ -2499,6 +3458,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g5,
     make_famB_figure,
     render_side_by_side,
     sel_famB_sc,
@@ -2507,16 +3467,18 @@ def _(
     # Plot 1: starcoder family. Color = source; line style + shade = architecture.
     # Order (and thus palette assignment) is dclm, sc90, sc50, starcoder.
     _sources = [
-        ("dclm", "#1f77b4", "baseline", "dclm"),
-        ("sc90", "#d62728", "famB", "sc90"),
-        ("sc50", "#ff7f0e", "famB", "sc50"),
-        ("starcoder", "#2ca02c", "baseline", "starcoder"),
+        ("dclm", "#1f77b4", "hline", "dclm"),
+        ("10% StarCoder", "#d62728", "famB", "sc90"),
+        ("50% StarCoder", "#ff7f0e", "famB", "sc50"),
+        ("100% StarCoder", "#2ca02c", "baseline", "starcoder"),
     ]
     _out = render_side_by_side(
         sel_famB_sc.value,
         lambda m: make_famB_figure(
             finished_df, m, f"famB (starcoder): {m} vs. repetition", _sources,
             include_archs=sel_famB_sc_arch.value, exclude_reps=[128,256],
+         log_y=log_y_g5.value
+            , source_title="% StarCoder"
         ),
         "famB_starcoder",
     )
@@ -2535,6 +3497,7 @@ def _(arch_multiselect, metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_g5,
     make_famB_figure,
     render_side_by_side,
     sel_famB_p2o,
@@ -2543,16 +3506,18 @@ def _(
     # Plot 2: pes2o family. Color = source; line style + shade = architecture.
     # Order (and thus palette assignment) is dclm, p2o10, p2o50, pes2o.
     _sources = [
-        ("dclm", "#1f77b4", "baseline", "dclm"),
-        ("p2o10", "#9467bd", "famB", "p2o10"),
-        ("p2o50", "#ff7f0e", "famB", "p2o50"),
-        ("pes2o", "#2ca02c", "baseline", "pes2o"),
+        ("dclm", "#1f77b4", "hline", "dclm"),
+        ("10% peS2o", "#9467bd", "famB", "p2o10"),
+        ("50% peS2o", "#ff7f0e", "famB", "p2o50"),
+        ("100% peS2o", "#2ca02c", "baseline", "pes2o"),
     ]
     _out = render_side_by_side(
         sel_famB_p2o.value,
         lambda m: make_famB_figure(
             finished_df, m, f"famB (pes2o): {m} vs. repetition", _sources,
             include_archs=sel_famB_p2o_arch.value, exclude_reps=[128,256],
+         log_y=log_y_g5.value
+            , source_title="% peS2o"
         ),
         "famB_pes2o",
     )
@@ -2560,9 +3525,10 @@ def _(
     return
 
 
-@app.cell(column=5, hide_code=True)
+@app.cell(column=6, hide_code=True)
 def _(mo):
     export_btn_curves = mo.ui.run_button(label="Export images")
+    log_y_curves = mo.ui.checkbox(label="Log y axis")
     mo.vstack([
         mo.md(r"""
     ## Training curves — metric vs. train step (baseline runs)
@@ -2576,13 +3542,17 @@ def _(mo):
     **Export images** writes this column to `ml/figures/history/`, one file per
     metric (each a single-metric facet row).
     """),
-        export_btn_curves,
+        mo.hstack([export_btn_curves, log_y_curves], justify="start", gap=1),
     ])
-    return (export_btn_curves,)
+    return export_btn_curves, log_y_curves
 
 
 @app.cell(hide_code=True)
 def _(
+    DATA_DISPLAY_NAMES,
+    METRIC_DISPLAY_NAMES,
+    MODEL_DISPLAY_NAME,
+    apply_log_yaxis,
     factor_palette,
     get_model_type,
     get_reps,
@@ -2746,7 +3716,7 @@ def _(
                     endpoints.append((reps, series[-1][0], series[-1][1]))
 
                 if use_log:
-                    ax.set_yscale("log")
+                    apply_log_yaxis(ax)
 
                 # Inline rep labels: only for endpoints that are vertically well
                 # separated from every other endpoint in this facet. Distances are
@@ -2789,15 +3759,19 @@ def _(
 
                 # Column title (architecture) only on the top row.
                 if r == 0:
-                    ax.set_title(model_type, fontsize=11, fontweight="bold")
+                    ax.set_title(
+                        MODEL_DISPLAY_NAME.get(model_type, model_type),
+                        fontsize=11,
+                        fontweight="bold",
+                    )
                 # Y label (metric) only on the leftmost column.
                 if c == 0:
-                    ax.set_ylabel(metric, fontsize=8)
+                    ax.set_ylabel(METRIC_DISPLAY_NAMES.get(metric, metric), fontsize=8)
                 # X label only on the bottom row.
                 if r == n_rows - 1:
                     ax.set_xlabel("train step")
 
-        fig.suptitle(f"{data_tag} — {scale}: training curves (baseline)", fontsize=11)
+        fig.suptitle(f"{DATA_DISPLAY_NAMES.get(data_tag, data_tag)} — {scale}: Training Curves ", fontsize=11)
 
         if any_data:
             from matplotlib.lines import Line2D
@@ -2840,6 +3814,7 @@ def _(arch_multiselect, history_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_curves,
     make_training_curve_figure,
     render_faceted,
     sel_curve_olmo_80m,
@@ -2849,6 +3824,7 @@ def _(
         sel_curve_olmo_80m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "olmo_mix", "80M", ms, include_archs=sel_curve_olmo_80m_arch.value
+        , log_y=True if log_y_curves.value else None
         ),
         "curve_olmo_mix_80M",
     )
@@ -2868,6 +3844,7 @@ def _(arch_multiselect, history_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_curves,
     make_training_curve_figure,
     render_faceted,
     sel_curve_olmo_200m,
@@ -2877,6 +3854,7 @@ def _(
         sel_curve_olmo_200m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "olmo_mix", "200M", ms, include_archs=sel_curve_olmo_200m_arch.value
+        , log_y=True if log_y_curves.value else None
         ),
         "curve_olmo_mix_200M",
     )
@@ -2904,6 +3882,7 @@ def _(arch_multiselect, history_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_curves,
     make_training_curve_figure,
     render_faceted,
     sel_curve_dclm_80m,
@@ -2913,6 +3892,7 @@ def _(
         sel_curve_dclm_80m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "dclm", "80M", ms, include_archs=sel_curve_dclm_80m_arch.value
+        , log_y=True if log_y_curves.value else None
         ),
         "curve_dclm_80M",
     )
@@ -2932,6 +3912,7 @@ def _(arch_multiselect, history_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_curves,
     make_training_curve_figure,
     render_faceted,
     sel_curve_starcoder_80m,
@@ -2941,6 +3922,7 @@ def _(
         sel_curve_starcoder_80m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "starcoder", "80M", ms, include_archs=sel_curve_starcoder_80m_arch.value
+        , log_y=True if log_y_curves.value else None
         ),
         "curve_starcoder_80M",
     )
@@ -2960,6 +3942,7 @@ def _(arch_multiselect, history_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_curves,
     make_training_curve_figure,
     render_faceted,
     sel_curve_pes2o_80m,
@@ -2969,6 +3952,7 @@ def _(
         sel_curve_pes2o_80m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "pes2o", "80M", ms, include_archs=sel_curve_pes2o_80m_arch.value
+        , log_y=True if log_y_curves.value else None
         ),
         "curve_pes2o_80M",
     )
@@ -2989,6 +3973,7 @@ def _(arch_multiselect, history_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_curves,
     make_training_curve_figure,
     render_faceted,
     sel_curve_wiki_80m,
@@ -2998,6 +3983,7 @@ def _(
         sel_curve_wiki_80m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "wiki", "80M", ms, include_archs=sel_curve_wiki_80m_arch.value
+        , log_y=True if log_y_curves.value else None
         ),
         "curve_wiki_80M",
     )
@@ -3012,9 +3998,10 @@ def _():
     return (mo,)
 
 
-@app.cell(column=6, hide_code=True)
+@app.cell(column=7, hide_code=True)
 def _(mo):
     export_btn_load = mo.ui.run_button(label="Export images")
+    log_y_load = mo.ui.checkbox(label="Log y axis")
     mo.vstack([
         mo.md(r"""
     ## Router load metrics — metric vs. train step (baseline runs)
@@ -3029,9 +4016,9 @@ def _(mo):
     **Export images** writes this column to `ml/figures/history/` (alongside the
     training curves), one file per metric.
     """),
-        export_btn_load,
+        mo.hstack([export_btn_load, log_y_load], justify="start", gap=1),
     ])
-    return (export_btn_load,)
+    return export_btn_load, log_y_load
 
 
 @app.cell(hide_code=True)
@@ -3047,6 +4034,7 @@ def _(arch_multiselect, load_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_load,
     make_training_curve_figure,
     render_faceted,
     sel_load_olmo_80m,
@@ -3056,6 +4044,7 @@ def _(
         sel_load_olmo_80m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "olmo_mix", "80M", ms, include_archs=sel_load_olmo_80m_arch.value
+        , log_y=True if log_y_load.value else None
         ),
         "load_olmo_mix_80M",
     )
@@ -3076,6 +4065,7 @@ def _(arch_multiselect, load_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_load,
     make_training_curve_figure,
     render_faceted,
     sel_load_olmo_200m,
@@ -3085,6 +4075,7 @@ def _(
         sel_load_olmo_200m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "olmo_mix", "200M", ms, include_archs=sel_load_olmo_200m_arch.value
+        , log_y=True if log_y_load.value else None
         ),
         "load_olmo_mix_200M",
     )
@@ -3113,6 +4104,7 @@ def _(arch_multiselect, load_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_load,
     make_training_curve_figure,
     render_faceted,
     sel_load_dclm_80m,
@@ -3122,6 +4114,7 @@ def _(
         sel_load_dclm_80m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "dclm", "80M", ms, include_archs=sel_load_dclm_80m_arch.value
+        , log_y=True if log_y_load.value else None
         ),
         "load_dclm_80M",
     )
@@ -3142,6 +4135,7 @@ def _(arch_multiselect, load_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_load,
     make_training_curve_figure,
     render_faceted,
     sel_load_starcoder_80m,
@@ -3151,6 +4145,7 @@ def _(
         sel_load_starcoder_80m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "starcoder", "80M", ms, include_archs=sel_load_starcoder_80m_arch.value
+        , log_y=True if log_y_load.value else None
         ),
         "load_starcoder_80M",
     )
@@ -3171,6 +4166,7 @@ def _(arch_multiselect, load_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_load,
     make_training_curve_figure,
     render_faceted,
     sel_load_pes2o_80m,
@@ -3180,6 +4176,7 @@ def _(
         sel_load_pes2o_80m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "pes2o", "80M", ms, include_archs=sel_load_pes2o_80m_arch.value
+        , log_y=True if log_y_load.value else None
         ),
         "load_pes2o_80M",
     )
@@ -3200,6 +4197,7 @@ def _(arch_multiselect, load_metric_multiselect, mo):
 @app.cell(hide_code=True)
 def _(
     finished_df,
+    log_y_load,
     make_training_curve_figure,
     render_faceted,
     sel_load_wiki_80m,
@@ -3209,6 +4207,7 @@ def _(
         sel_load_wiki_80m.value,
         lambda ms: make_training_curve_figure(
             finished_df, "wiki", "80M", ms, include_archs=sel_load_wiki_80m_arch.value
+        , log_y=True if log_y_load.value else None
         ),
         "load_wiki_80M",
     )

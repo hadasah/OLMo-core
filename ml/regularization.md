@@ -10,13 +10,14 @@ Most techniques below are **training-only** (they are no-ops during eval) and ar
 | Technique | Scope | CLI arg (`single_train_launch.py`) | Config path |
 |---|---|---|---|
 | Dropout | Any transformer block | `--dropout` *(see note)* | `model.block.dropout` |
-| Expert dropout | MoE block (expert output) | *(see note)* | `model.block.expert_dropout` |
+| Expert dropout | Feed-forward output (MoE expert output or dense FFN output) | *(see note)* | `model.block.expert_dropout` |
 | Weight decay | Optimizer | `--weight_decay` | `train_module.optim.weight_decay` |
 | Gradient clipping | Train module | `--max_grad_norm` *(see note)* | `train_module.max_grad_norm` |
 | Router jitter | MoE router | `--moe_jitter_eps` | `model.block.feed_forward_moe.routers_list.0.jitter_eps` |
 | Expert weight normalization | MoE router | `--moe_normalize_expert_weights` | `model.block.feed_forward_moe.routers_list.0.normalize_expert_weights` |
 | Expert Output Masking (EOM) | MoE router | `--moe_eom_prob` | `model.block.feed_forward_moe.routers_list.0.eom_prob` |
 | Final Output Masking (FOM) | MoE layer | `--moe_fom_prob` | `model.block.feed_forward_moe.fom_prob` |
+| Final Output Masking (FOM) | Dense feed-forward output | *(override)* | `model.block.fom_prob` |
 
 See also [Related MoE loss knobs](#related-moe-loss-knobs) at the bottom for the
 load-balancing loss, router z-loss, and aux-loss-free bias, which shape routing behavior
@@ -63,15 +64,16 @@ To sweep multiple values: `"dropout": [0.0, 0.1, 0.2]`.
 
 ## Expert Dropout
 
-**What it does.** Uses a separate dropout probability for the **MoE (expert) output** of MoE
-blocks, so the expert path can be regularized more (or less) heavily than the rest of the
-network. Everything else in the block — the attention output, and the dense feed-forward
-output of hybrid blocks — keeps using the regular [dropout](#dropout) value.
+**What it does.** Uses a separate dropout probability for the **feed-forward sub-layer output**,
+so the FFN path can be regularized more (or less) heavily than the attention path. For MoE
+blocks this is the MoE (expert) output; for **dense blocks** it is the dense feed-forward
+output. The attention output keeps using the regular [dropout](#dropout) value. The name is
+shared between MoE and dense even though dense blocks have no experts.
 
 **Mechanism.** Identical to dropout (standard inverted dropout via `nn.Dropout`), just with
-its own probability and applied only at the MoE output. When `expert_dropout` is unset, the
-expert output falls back to the regular `dropout` value, which is exactly the pre-existing
-behavior.
+its own probability and applied only at the feed-forward output. When `expert_dropout` is
+unset, the feed-forward output falls back to the regular `dropout` value, which is exactly
+the pre-existing behavior.
 
 Which tensor gets it, per block type:
 
@@ -79,12 +81,14 @@ Which tensor gets it, per block type:
 |---|---|---|
 | `moe`, `moe_reordered_norm` | attention output | MoE output |
 | `moe_hybrid`, `moe_hybrid_reordered_norm` | attention output, dense FF output | MoE output |
-| dense blocks | all sub-layer outputs | *(ignored — no experts)* |
+| dense blocks | attention output (and FF output when `expert_dropout` unset) | dense feed-forward output |
 
 **Where it lives.**
 - `TransformerBlockConfig.expert_dropout` (`src/olmo_core/nn/transformer/config.py`) — the config field.
 - `MoETransformerBlock.expert_dropout` (`src/olmo_core/nn/transformer/block.py`) — the module,
   used by all MoE block variants (including the expert-parallel `combined_forward` paths).
+- `TransformerBlock` (`src/olmo_core/nn/transformer/block.py`) — for dense blocks, applied via the
+  feed-forward `ResidualStream`'s dropout (falling back to `dropout`).
 
 **Default.** `None` (fall back to `dropout`).
 
@@ -272,33 +276,50 @@ to the token's output.
 ## Final Output Masking (FOM)
 
 **What it does.** A simpler, more generic alternative to EOM. Instead of masking
-individual experts, it masks the *combined* output of the MoE layer for a random fraction
-of tokens. Because it targets the final stage of the layer, the same idea generalizes to
-dense models (not just MoE).
+individual experts, it masks the *combined* feed-forward output for a random fraction
+of tokens. Because it targets the final stage of the layer, it applies to both MoE and
+dense models.
 
-**Mechanism.** During training, the combined MoE output (shape `(batch, seq_len, d_model)`)
-is masked per token: each token's entire output vector is independently zeroed with
-probability `fom_prob` (a mask of shape `(batch, seq_len, 1)` broadcast over `d_model`).
+**Mechanism.** During training, the combined feed-forward output (shape
+`(batch, seq_len, d_model)`) is masked per token: each token's entire output vector is
+independently zeroed with probability `fom_prob` (a mask of shape `(batch, seq_len, 1)`
+broadcast over `d_model`).
 
 - Masking is **per token** (the whole `d_model` vector is dropped together).
 - **No rescaling** is applied.
-- Applied at the single output choke point of the MoE layer, so it covers all variants
-  (default and dropless, expert-parallel and not, including the shared-MLP contribution).
+- For MoE, applied at the single output choke point of the MoE layer, so it covers all
+  variants (default and dropless, expert-parallel and not, including the shared-MLP
+  contribution).
+- For dense, applied to the feed-forward sub-layer output only (not attention), mirroring
+  where the MoE version applies.
 - Intended to be applied **on top of** dropout.
 
 **Where it lives.**
-- `MoEConfig.fom_prob` (`src/olmo_core/nn/moe/moe.py`) — config field.
-- Applied in `MoEBase.forward` after the expert outputs are combined.
+- MoE: `MoEConfig.fom_prob` (`src/olmo_core/nn/moe/moe.py`), applied in `MoEBase.forward`
+  after the expert outputs are combined.
+- Dense: `TransformerBlockConfig.fom_prob` (`src/olmo_core/nn/transformer/config.py`),
+  applied in `ResidualStream.forward` (`src/olmo_core/nn/residual_stream.py`) on the
+  feed-forward residual stream. Reuses the same `fom_prob` name.
 
 **Default.** `None` (disabled).
 
-**How to set it.** Exposed as a top-level CLI arg, so in `train_sweep.py`:
+**How to set it.**
+- MoE: exposed as a top-level CLI arg, so in `train_sweep.py`:
 
-```python
-"main_grid": {
-    "moe_fom_prob": [0.1],
-},
-```
+  ```python
+  "main_grid": {
+      "moe_fom_prob": [0.1],
+  },
+  ```
+
+- Dense: set the block config field directly (like `dropout`/`expert_dropout`), via
+  `model.block.fom_prob`:
+
+  ```python
+  "main_grid": {
+      "model.block.fom_prob": [0.1],
+  },
+  ```
 
 ---
 
@@ -308,7 +329,7 @@ probability `fom_prob` (a mask of shape `(batch, seq_len, 1)` broadcast over `d_
 |---|---|---|
 | Granularity | per (token, expert) | per token (whole layer output) |
 | Level | individual expert combine weight | combined MoE output |
-| Applies to dense models? | No (MoE-specific) | Conceptually yes (currently wired in MoE only) |
+| Applies to dense models? | No (MoE-specific) | Yes (wired for both MoE and dense) |
 | Rescaling | None | None |
 | Affects load-balancing loss? | No | No |
 

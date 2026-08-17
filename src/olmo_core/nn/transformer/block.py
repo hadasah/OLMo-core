@@ -101,7 +101,15 @@ class TransformerBlock(TransformerBlockBase):
     :param sequence_mixer: The sequence mixer module config (e.g. attention, recurrent, convolution, etc.).
     :param feed_forward: The feed forward module config.
     :param layer_norm: The layer norm config for both the attention LN and the feed forward LN.
-    :param dropout: Dropout probability.
+    :param dropout: Dropout probability applied to the attention sub-layer output (and to the
+        feed-forward sub-layer output when :data:`expert_dropout` is not set).
+    :param expert_dropout: Dropout probability applied to the feed-forward (MLP) sub-layer output
+        only. Defaults to ``dropout`` when not set. This is the dense-block equivalent of the MoE
+        :data:`~olmo_core.nn.transformer.config.TransformerBlockConfig.expert_dropout`; the name is
+        shared for consistency even though dense blocks have no experts.
+    :param fom_prob: Final Output Masking probability applied to the feed-forward output. See
+        :class:`~olmo_core.nn.residual_stream.ResidualStream` for details. This is the dense-block
+        equivalent of the MoE :data:`~olmo_core.nn.moe.MoEConfig.fom_prob`.
     :param init_device: The device used when initializing parameters.
     """
 
@@ -115,6 +123,8 @@ class TransformerBlock(TransformerBlockBase):
         feed_forward: FeedForwardConfig,
         layer_norm: LayerNormConfig,
         dropout: float = 0.0,
+        expert_dropout: Optional[float] = None,
+        fom_prob: Optional[float] = None,
         attention_residual_alpha: float = 1.0,
         feed_forward_residual_alpha: float = 1.0,
         init_device: str = "cpu",
@@ -136,8 +146,11 @@ class TransformerBlock(TransformerBlockBase):
         )
         self.feed_forward = feed_forward.build(d_model=d_model, init_device=init_device)
         self.feed_forward_norm = layer_norm.build(d_model, init_device=init_device)
+        # `expert_dropout` applies dropout to the feed-forward sub-layer only (falling back to
+        # `dropout`), and FOM masks only the feed-forward output, both mirroring the MoE block.
+        ffn_dropout = dropout if expert_dropout is None else expert_dropout
         self.feed_forward_residual_stream = ResidualStream(
-            alpha=feed_forward_residual_alpha, dropout=dropout
+            alpha=feed_forward_residual_alpha, dropout=ffn_dropout, fom_prob=fom_prob
         )
 
     def forward(
@@ -249,6 +262,8 @@ class LayerNormScaledTransformerBlock(TransformerBlock):
         feed_forward: FeedForwardConfig,
         layer_norm: LayerNormConfig,
         dropout: float = 0.0,
+        expert_dropout: Optional[float] = None,
+        fom_prob: Optional[float] = None,
         attention_residual_alpha: float = 1.0,
         feed_forward_residual_alpha: float = 1.0,
         init_device: str = "cpu",
@@ -262,6 +277,8 @@ class LayerNormScaledTransformerBlock(TransformerBlock):
             feed_forward=feed_forward,
             layer_norm=layer_norm,
             dropout=dropout,
+            expert_dropout=expert_dropout,
+            fom_prob=fom_prob,
             attention_residual_alpha=attention_residual_alpha,
             feed_forward_residual_alpha=feed_forward_residual_alpha,
             init_device=init_device,
@@ -323,6 +340,8 @@ class PeriNormTransformerBlock(TransformerBlock):
         feed_forward: FeedForwardConfig,
         layer_norm: LayerNormConfig,
         dropout: float = 0.0,
+        expert_dropout: Optional[float] = None,
+        fom_prob: Optional[float] = None,
         attention_residual_alpha: float = 1.0,
         feed_forward_residual_alpha: float = 1.0,
         init_device: str = "cpu",
@@ -336,6 +355,8 @@ class PeriNormTransformerBlock(TransformerBlock):
             feed_forward=feed_forward,
             layer_norm=layer_norm,
             dropout=dropout,
+            expert_dropout=expert_dropout,
+            fom_prob=fom_prob,
             attention_residual_alpha=attention_residual_alpha,
             feed_forward_residual_alpha=feed_forward_residual_alpha,
             init_device=init_device,

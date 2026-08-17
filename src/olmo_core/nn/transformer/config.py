@@ -183,8 +183,17 @@ class TransformerBlockConfig(ModuleConfig):
     """
     expert_dropout: Optional[float] = None
     """
-    Dropout probability for the MoE (expert) output, for MoE blocks only. Defaults to
-    :data:`dropout` when not set.
+    Dropout probability applied to the feed-forward sub-layer output only, leaving the attention
+    sub-layer governed by :data:`dropout`. For MoE blocks this is the expert (MoE) output; for
+    dense blocks it is the dense feed-forward output. Defaults to :data:`dropout` when not set.
+    """
+    fom_prob: Optional[float] = None
+    """
+    Final Output Masking probability applied to the feed-forward output, for dense blocks only.
+    During training the entire feed-forward output vector is zeroed per token with this probability
+    (no rescaling). This is the dense-block equivalent of the MoE
+    :data:`~olmo_core.nn.moe.MoEConfig.fom_prob`; for MoE blocks set ``feed_forward_moe.fom_prob``
+    instead.
     """
     attention_residual_alpha: Optional[float] = None
     """
@@ -240,19 +249,24 @@ class TransformerBlockConfig(ModuleConfig):
             cache=cache,
         )
 
-        # `expert_dropout` only applies to MoE blocks.
+        # `expert_dropout` applies to both MoE blocks (dropout on the expert output) and dense
+        # blocks (dropout on the feed-forward output); it falls back to `dropout` in either case.
+        # `fom_prob` (as a block-level field) only applies to dense blocks — MoE blocks receive FOM
+        # via `feed_forward_moe.fom_prob`.
         expert_dropout = kwargs.pop("expert_dropout", None)
+        fom_prob = kwargs.pop("fom_prob", None)
         moe_kwargs = {**kwargs, "expert_dropout": expert_dropout}
+        dense_kwargs = {**kwargs, "expert_dropout": expert_dropout, "fom_prob": fom_prob}
 
         try:
             if self.name == TransformerBlockType.default:
-                return TransformerBlock(**kwargs)
+                return TransformerBlock(**dense_kwargs)
             elif self.name == TransformerBlockType.default_scaled:
-                return LayerNormScaledTransformerBlock(**kwargs)
+                return LayerNormScaledTransformerBlock(**dense_kwargs)
             elif self.name == TransformerBlockType.reordered_norm:
-                return ReorderedNormTransformerBlock(**kwargs)
+                return ReorderedNormTransformerBlock(**dense_kwargs)
             elif self.name == TransformerBlockType.peri_norm:
-                return PeriNormTransformerBlock(**kwargs)
+                return PeriNormTransformerBlock(**dense_kwargs)
             elif self.name == TransformerBlockType.normalized:
                 return NormalizedTransformerBlock(**kwargs)
             elif self.name == TransformerBlockType.moe:
