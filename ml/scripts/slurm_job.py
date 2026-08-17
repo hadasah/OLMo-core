@@ -40,6 +40,7 @@ SLRM_JOB_ARRAY_TEMPLATE = """
 ## srun forks ntasks_per_node times on each node
 #SBATCH --ntasks-per-node={ntasks_per_node}
 #SBATCH --mem={mem_gb}G
+#SBATCH --exclude=g3070
 {SBATCH_EXTRAS}
 
 source ~/.bashrc

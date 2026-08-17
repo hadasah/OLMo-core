@@ -66,3 +66,6 @@ runs_data/
 
 # notebooks
 __marimo__
+
+# figures
+figures
