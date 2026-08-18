@@ -14,10 +14,12 @@ MODELS = [
     # 'olmo2_ml_10M',
     # "olmo2_ml_80M",
     # 'olmo2_ml_200M',
-    # 200M dropout sweep (2026-08-15): dense + moe64 x R{1,8,16,32,64} x
-    # dropout{0.1,0.4} on the OLMoE mix, plus the two missing dropout=0 R=64
-    # baselines. The 1B missing rungs (2x/32x) finished 2026-08-11.
-    "olmo2_ml_200M",
+    # Family C expert count (2026-08-18): moe16 + moe128 x R{1..32} on the
+    # OLMoE mix at 80M -- the second half of Family C (the granularity half,
+    # moe64s8/moe64s32, finished 2026-08-09). The 200M dropout sweep (22 runs)
+    # finished 2026-08-17.
+    "olmo2_ml_80M",
+    # "olmo2_ml_200M",
     # "olmo2_ml_1B",
 ]
 
@@ -336,13 +338,10 @@ def main(
                     # directly comparable to it. Leaving this set to a single domain
                     # would have trained every arm on that domain instead.
                     "train_datamix_name": ["OLMoE_mix_0824"],
-                    # 200M cadence (3,815 steps/run): eval 250 gives ~15 in-loop
-                    # evals (the 80M sweeps' density); save 1000 + ephemeral 250 keep
-                    # checkpoints sane. Cadence does not affect training math.
-                    # (1B used 1000/2000/250 to match the klone 1B runs.)
-                    "eval_interval": [250],
-                    "save_interval": [1000],
-                    "ephemeral_save_interval": [250],
+                    # 80M: no cadence overrides -- the parser defaults (eval 100 /
+                    # save 200 / ephemeral 50) are exactly what the granularity arms
+                    # and the klone 80M baselines ran with.
+                    # (200M used 250/1000/250; 1B used 1000/2000/250.)
                     # Phase B (2026-08-15): dropout axis REMOVED -- these two rep64x
                     # cells are the missing dropout=0 baselines, and omitting the key
                     # keeps model.block.dropout=None exactly like the April-23 klone
@@ -587,11 +586,11 @@ def main(
 #                        "unique_data_fraction": ["0.03125"],
 #                        "num_repetitions": ["32"],
 #                    },
-                    "dense_rep64x": {
-                        "moe_num_experts_list": ["1"],
-                        "unique_data_fraction": ["0.015625"],
-                        "num_repetitions": ["64"],
-                    },
+#                    "dense_rep64x": {
+#                        "moe_num_experts_list": ["1"],
+#                        "unique_data_fraction": ["0.015625"],
+#                        "num_repetitions": ["64"],
+#                    },
 #                    "moe64_rep1x": {
 #                        "moe_num_experts_list": ["64"],
 #                        "moe_hidden_multipliers_list": ["0.25"],
@@ -624,14 +623,14 @@ def main(
 #                        "unique_data_fraction": ["0.03125"],
 #                        "num_repetitions": ["32"],
 #                    },
-                    "moe64_rep64x": {
-                        "moe_num_experts_list": ["64"],
-                        "moe_hidden_multipliers_list": ["0.25"],
-                        "moe_router_top_ks_list": ["4"],
-                        "moe_generalist_hidden_multiplier": ["0"],
-                        "unique_data_fraction": ["0.015625"],
-                        "num_repetitions": ["64"],
-                    },
+#                    "moe64_rep64x": {
+#                        "moe_num_experts_list": ["64"],
+#                        "moe_hidden_multipliers_list": ["0.25"],
+#                        "moe_router_top_ks_list": ["4"],
+#                        "moe_generalist_hidden_multiplier": ["0"],
+#                        "unique_data_fraction": ["0.015625"],
+#                        "num_repetitions": ["64"],
+#                    },
                     ## 1B 2x/32x rungs: DONE 2026-08-11 (sweep 2026_08_09-17_02_22,
                     ## jobs 420482_[0-3], all finished at step 19074).
                     ## === 1B missing rungs (dense + moe64 x R{2,32}) ===
@@ -854,103 +853,103 @@ def main(
 #                        "num_repetitions": ["32"],
 #                    },
                     ## MoE 128 experts at different repetition levels
-#                     "moe128_rep1x": {
-#                         "moe_num_experts_list": ["128"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["1.0"],
-#                         "num_repetitions": ["1"],
-#                     },
-#                     "moe128_rep2x": {
-#                         "moe_num_experts_list": ["128"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["0.5"],
-#                         "num_repetitions": ["2"],
-#                     },
-#                     "moe128_rep4x": {
-#                         "moe_num_experts_list": ["128"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["0.25"],
-#                         "num_repetitions": ["4"],
-#                     },
-#                     "moe128_rep8x": {
-#                         "moe_num_experts_list": ["128"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["0.125"],
-#                         "num_repetitions": ["8"],
-#                     },
-#                     "moe128_rep16x": {
-#                         "moe_num_experts_list": ["128"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["0.0625"],
-#                         "num_repetitions": ["16"],
-#                     },
-#                     "moe128_rep32x": {
-#                         "moe_num_experts_list": ["128"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["0.03125"],
-#                         "num_repetitions": ["32"],
-#                     },
+                     "moe128_rep1x": {
+                         "moe_num_experts_list": ["128"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["1.0"],
+                         "num_repetitions": ["1"],
+                     },
+                     "moe128_rep2x": {
+                         "moe_num_experts_list": ["128"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["0.5"],
+                         "num_repetitions": ["2"],
+                     },
+                     "moe128_rep4x": {
+                         "moe_num_experts_list": ["128"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["0.25"],
+                         "num_repetitions": ["4"],
+                     },
+                     "moe128_rep8x": {
+                         "moe_num_experts_list": ["128"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["0.125"],
+                         "num_repetitions": ["8"],
+                     },
+                     "moe128_rep16x": {
+                         "moe_num_experts_list": ["128"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["0.0625"],
+                         "num_repetitions": ["16"],
+                     },
+                     "moe128_rep32x": {
+                         "moe_num_experts_list": ["128"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["0.03125"],
+                         "num_repetitions": ["32"],
+                     },
                     ## MoE 64 experts at different repetition levels
-#                     "moe16_rep1x": {
-#                         "moe_num_experts_list": ["16"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["1.0"],
-#                         "num_repetitions": ["1"],
-#                     },
-#                     "moe16_rep2x": {
-#                         "moe_num_experts_list": ["16"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["0.5"],
-#                         "num_repetitions": ["2"],
-#                     },
-#                     "moe16_rep4x": {
-#                         "moe_num_experts_list": ["16"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["0.25"],
-#                         "num_repetitions": ["4"],
-#                     },
-#                     "moe16_rep8x": {
-#                         "moe_num_experts_list": ["16"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["0.125"],
-#                         "num_repetitions": ["8"],
-#                     },
-#                     "moe16_rep16x": {
-#                         "moe_num_experts_list": ["16"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["0.0625"],
-#                         "num_repetitions": ["16"],
-#                     },
-#                     "moe16_rep32x": {
-#                         "moe_num_experts_list": ["16"],
-#                         "moe_hidden_multipliers_list": ["0.25"],
-#                         "moe_router_top_ks_list": ["4"],
-#                         "moe_generalist_hidden_multiplier": ["0"],
-#                         "unique_data_fraction": ["0.03125"],
-#                         "num_repetitions": ["32"],
-#                     },
+                     "moe16_rep1x": {
+                         "moe_num_experts_list": ["16"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["1.0"],
+                         "num_repetitions": ["1"],
+                     },
+                     "moe16_rep2x": {
+                         "moe_num_experts_list": ["16"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["0.5"],
+                         "num_repetitions": ["2"],
+                     },
+                     "moe16_rep4x": {
+                         "moe_num_experts_list": ["16"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["0.25"],
+                         "num_repetitions": ["4"],
+                     },
+                     "moe16_rep8x": {
+                         "moe_num_experts_list": ["16"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["0.125"],
+                         "num_repetitions": ["8"],
+                     },
+                     "moe16_rep16x": {
+                         "moe_num_experts_list": ["16"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["0.0625"],
+                         "num_repetitions": ["16"],
+                     },
+                     "moe16_rep32x": {
+                         "moe_num_experts_list": ["16"],
+                         "moe_hidden_multipliers_list": ["0.25"],
+                         "moe_router_top_ks_list": ["4"],
+                         "moe_generalist_hidden_multiplier": ["0"],
+                         "unique_data_fraction": ["0.03125"],
+                         "num_repetitions": ["32"],
+                     },
                 },
             }
 
