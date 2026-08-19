@@ -101,11 +101,12 @@ def get_routing_decisions(model, input_ids: torch.Tensor) -> Dict[int, Dict[str,
                         "expert_indices": expert_indices.detach().cpu(),
                         "expert_weights": expert_weights.detach().cpu(),
                     }
-                    # Also capture logits
+                    # Also capture logits and the router's true expert count
                     with torch.no_grad():
                         x = input[0]
                         logits = module.get_expert_logits(x).detach().cpu()
                         info_dict[f"router_{r_idx}"]["logits"] = logits
+                        info_dict[f"router_{r_idx}"]["num_experts"] = module.num_experts
 
                 return hook_fn
 
@@ -134,8 +135,9 @@ def analyze_ossification(
     """
     log.info("=== Analyzing routing decision ossification ===")
 
-    results = {"steps": [], "stability_rates": {}}
+    results = {"steps": [], "step_pairs": [], "stability_rates": {}}
     prev_decisions = None
+    prev_step = None
 
     # checkpoint_dirs is already sorted by step from find_checkpoints; do NOT re-sort here
     # with default (lexicographic) ordering, which would put step1000 before step200.
@@ -158,6 +160,7 @@ def analyze_ossification(
 
         if prev_decisions is not None:
             results["steps"].append(step)
+            results["step_pairs"].append([prev_step, step])
             for key in current_decisions:
                 if key not in results["stability_rates"]:
                     results["stability_rates"][key] = []
@@ -167,6 +170,7 @@ def analyze_ossification(
                 log.info(f"    {key}: stability = {same:.4f}")
 
         prev_decisions = current_decisions
+        prev_step = step
 
     return results
 
@@ -303,17 +307,22 @@ def analyze_co_activation(
                 continue
 
             # Flatten batch and seq dims
-            flat_indices = indices.view(-1, top_k)  # (N, top_k)
-            num_experts = indices.max().item() + 1
+            flat_indices = indices.view(-1, top_k).long()  # (N, top_k)
+            # Use the router's true expert count so the matrix has a fixed,
+            # comparable shape even when some experts never fire.
+            num_experts = router_data.get("num_experts") or (indices.max().item() + 1)
 
-            # Build co-activation matrix
-            coact_matrix = torch.zeros(num_experts, num_experts)
+            # Build co-activation matrix (vectorized: bincount over pair ids;
+            # identical counts to looping +1 at [ei, ej] and [ej, ei]).
+            pair_counts = torch.zeros(num_experts * num_experts)
             for i in range(top_k):
                 for j in range(i + 1, top_k):
-                    pairs = torch.stack([flat_indices[:, i], flat_indices[:, j]], dim=-1)
-                    for ei, ej in pairs:
-                        coact_matrix[ei, ej] += 1
-                        coact_matrix[ej, ei] += 1
+                    pair_ids = flat_indices[:, i] * num_experts + flat_indices[:, j]
+                    pair_counts += torch.bincount(
+                        pair_ids, minlength=num_experts * num_experts
+                    ).float()
+            upper = pair_counts.view(num_experts, num_experts)
+            coact_matrix = upper + upper.T
 
             # Normalize
             total = coact_matrix.sum()
@@ -391,8 +400,6 @@ if __name__ == "__main__":
                         help="Directory to save results (defaults to checkpoint_dir/routing_analysis)")
     parser.add_argument("--device", type=str, default="cpu",
                         help="Device to run analysis on")
-    parser.add_argument("--num_eval_batches", type=int, default=4,
-                        help="Number of evaluation batches to use")
     parser.add_argument("--batch_size", type=int, default=4,
                         help="Batch size for evaluation")
     parser.add_argument("--seq_length", type=int, default=2048,
@@ -404,6 +411,18 @@ if __name__ == "__main__":
                              "uninformative on random input — only ossification is meaningful).")
 
     args = parser.parse_args()
+
+    if args.device == "cpu":
+        try:
+            import grouped_gemm  # noqa: F401
+            log.warning(
+                "Running on CPU but grouped_gemm is installed: DroplessMoEMLP always "
+                "calls grouped_gemm when importable, and the CUTLASS build is CUDA-only, "
+                "so the forward pass will crash on MoE checkpoints. Use --device cuda "
+                "on a GPU node."
+            )
+        except ImportError:
+            pass
 
     # OLMo-core's distributed checkpoint loader (torch.distributed.checkpoint) requires an
     # initialized process group, even on a single GPU. Spin up a 1-rank gloo group.
