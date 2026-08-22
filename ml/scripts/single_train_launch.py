@@ -191,6 +191,9 @@ def build_config(
     moe_lb_loss_weight: float = 0.01,
     unique_data_fraction: float = 1.0,
     num_repetitions: int = 1,
+    local_data_glob: Optional[str] = None,
+    local_data_ratio: float = 0.0,
+    local_data_name: str = "local",
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS["WANDB_ENTITY"],
     wandb_project: str = USER_PROJECT_SPECS["WANDB_PROJECT"],
@@ -215,7 +218,15 @@ def build_config(
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
     )
 
-    if unique_data_fraction < 1.0:
+    if local_data_glob and not 0 < local_data_ratio < 1:
+        raise ValueError(
+            f"--local_data_ratio must be strictly between 0 and 1, got {local_data_ratio}"
+        )
+
+    # The source-mixture path is needed both for data-repetition experiments and
+    # for blending locally tokenized data with the remote olmo-data.org mix, since
+    # from_data_mix() takes a single mix_base_dir and cannot span the two.
+    if unique_data_fraction < 1.0 or local_data_glob:
         # Use the actual training token budget (from overrides) instead of the
         # default train_tokens, which is only 200M and wrong for 80M/200M models.
         actual_train_tokens = train_tokens
@@ -252,6 +263,21 @@ def build_config(
         total_tokens_available = sum(source_token_counts.values())
 
         ratios = {name: source_token_counts[name] / total_tokens_available for name in source_paths}
+
+        # Blend in locally tokenized data. The remote sources keep their relative
+        # proportions but are scaled down to make room, so the whole set still
+        # sums to 1.0 -- SourceMixtureList.validate() rejects anything else.
+        if local_data_glob:
+            for name in ratios:
+                ratios[name] *= 1.0 - local_data_ratio
+            ratios[local_data_name] = local_data_ratio
+            # SourceMixtureConfig.resolved_paths expands globs itself (and raises
+            # if nothing matches), so hand it the pattern rather than pre-globbing.
+            source_paths[local_data_name] = [local_data_glob]
+
+        # Correct for float drift before validate()'s allclose check.
+        ratio_total = sum(ratios.values())
+        ratios = {name: r / ratio_total for name, r in ratios.items()}
 
         source_configs = [
             SourceMixtureConfig(
@@ -302,6 +328,12 @@ def build_config(
             f"from {len(source_paths)} sources "
             f"(fraction={unique_data_fraction}, expected ~{num_repetitions}x repetition)"
         )
+        if local_data_glob:
+            log.info(
+                f"Mixing local source '{local_data_name}' at ratio {local_data_ratio} "
+                f"from '{local_data_glob}' with remote mix '{train_datamix_name}' "
+                f"at ratio {1.0 - local_data_ratio}"
+            )
     else:
         dataset_config = NumpyFSLDatasetConfig.from_data_mix(
             DATAMIX_LOOKUP[train_datamix_name],
@@ -455,6 +487,9 @@ def main(args: argparse.Namespace, overrides: List[str]) -> None:
             train_datamix_name=args.train_datamix_name,
             valid_datamix_name=args.valid_datamix_name,
             data_root=args.data_root,
+            local_data_glob=args.local_data_glob,
+            local_data_ratio=args.local_data_ratio,
+            local_data_name=args.local_data_name,
             save_root=args.save_root,
             valid_data_dir=args.valid_data_dir,
             data_work_dir=args.data_work_dir,
@@ -545,6 +580,28 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--data_root", type=str, default="https://olmo-data.org/", help="Root URL for the data"
+    )
+    parser.add_argument(
+        "--local_data_glob",
+        type=str,
+        default=None,
+        help=(
+            "Glob of locally tokenized .npy files to blend into the training mix, e.g. "
+            "'.../preprocessed/dclm-pool-400m-1x/allenai/dolma2-tokenizer/**/*.npy'. "
+            "Quote it so the shell does not expand it. Requires --local_data_ratio."
+        ),
+    )
+    parser.add_argument(
+        "--local_data_ratio",
+        type=float,
+        default=0.0,
+        help="Fraction of the training tokens to draw from --local_data_glob (0 < r < 1).",
+    )
+    parser.add_argument(
+        "--local_data_name",
+        type=str,
+        default="local",
+        help="Source name for the local data, used in mixture logs and instance metadata.",
     )
     parser.add_argument(
         "--save_root",

@@ -5,10 +5,12 @@
 # Dolma reads JSON lines directly, including .jsonl.zst -- zstd handlers are
 # registered in dolma/core/utils.py. No round-trip through `datasets` needed.
 #
-# Requires: pip install dolma huggingface_hub
+# Requires the dedicated tokenization env -- see setup_dolma_env.sh. dolma pins
+# tokenizers<=0.19.1 (-> huggingface-hub<1.0), numpy<2 and s3fs==2023.6.0, which
+# conflict with olmoe-core-ml.
 set -euo pipefail
 
-conda activate olmoe-core-ml
+conda activate "${DOLMA_ENV:-dolma-tok}"
 
 export OLMOE_DIR=/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core
 export DATA_DIR=$OLMOE_DIR/ml/data
@@ -78,7 +80,10 @@ YAML
 #
 # Add --dryrun to print the resolved config and exit -- do this once first and
 # confirm `id_field_name: null` survived the merge before committing CPU hours.
-dolma tokens -c "$CONFIG_PATH" \
+# -c/--config is a GLOBAL option, registered on dolma's top-level parser, so it
+# must precede the subcommand: `dolma -c cfg.yaml tokens ...`, not
+# `dolma tokens -c cfg.yaml`. The latter fails with "unrecognized arguments: -c".
+dolma -c "$CONFIG_PATH" tokens \
     --documents "$RAW_DIR"/'*.jsonl.zst' \
     --destination "$OUT_DIR" \
     --tokenizer.name_or_path "$TOKENIZER" \

@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.9"
+__generated_with = "0.24.0"
 app = marimo.App(width="columns")
 
 
@@ -62,6 +62,13 @@ def _():
 
     sns.set_theme(style="whitegrid", context="notebook")
     return glob, json, math, mticker, os, pd, plt, re
+
+
+@app.cell
+def _():
+    import marimo as mo
+
+    return (mo,)
 
 
 @app.cell(hide_code=True)
@@ -135,8 +142,24 @@ def _(json, pd):
     WD_COL = "train_module.optim.weight_decay"
     MGN_COL = "train_module.max_grad_norm"
     FOM_COL = "model.block.feed_forward_moe.fom_prob"
+    # Dense runs record FOM on the block itself rather than under the MoE config,
+    # so the knob lives in one of two columns depending on architecture.
+    DENSE_FOM_COL = "model.block.fom_prob"
     ROUTERS_COL = "model.block.feed_forward_moe.routers_list"
     REPS_COL = "data_reps"
+
+    def fom_prob_value(row):
+        """FOM probability for a run, from whichever column its architecture uses.
+
+        MoE runs set ``model.block.feed_forward_moe.fom_prob``; the dense runs set
+        ``model.block.fom_prob``. Reading only the MoE column would silently file
+        every dense FOM run into the baseline bucket.
+        """
+        for _c in (FOM_COL, DENSE_FOM_COL):
+            v = row.get(_c)
+            if v is not None and not (isinstance(v, float) and pd.isna(v)) and str(v).strip() != "":
+                return v
+        return None
 
     def router_field(row, field):
         """Read a field (e.g. 'jitter_eps', 'eom_prob') from the first router in the
@@ -201,10 +224,14 @@ def _(json, pd):
             return "moe64s8"
         if "MoE64s32" in tags:
             return "moe64s32"
+        if "MoE128" in tags:
+            return "moe128"
         if "MoE64" in tags:
             return "moe64"
         if "MoE32" in tags:
             return "moe32"
+        if "MoE16" in tags:
+            return "moe16"
         return "other"
 
     MIX_COL = "dataset.mix"
@@ -300,9 +327,11 @@ def _(json, pd):
     # level and dense goes slightly below pure base color.
     MODEL_SHADE = {
         "dense": -0.2,
+        "moe16": -0.15,
         "moe32": -0.1,
         "moe64s8": -0.05,
         "moe64": 0.05,
+        "moe128": 0.08,
         "moe64s32": 0.1,
     }
 
@@ -461,7 +490,11 @@ def _(json, pd):
             _norm(row.get(LR_COL)),
             _norm(router_field(row, "jitter_eps")),
             _norm(router_field(row, "eom_prob")),
-            _norm(row.get(FOM_COL)),
+            # Coalesced: dense runs record FOM on the block, MoE runs under the MoE
+            # config. Reading only one column makes every dense FOM run look
+            # identical to the plain dense baseline at the same rep, and they get
+            # dropped here as false duplicates before any plot sees them.
+            _norm(fom_prob_value(row)),
             _arch_of(row),
         )
 
@@ -571,7 +604,6 @@ def _(json, pd):
     return (
         DROPOUT_COL,
         EXPERT_DROPOUT_COL,
-        FOM_COL,
         MGN_COL,
         MODEL_SHADE,
         WD_COL,
@@ -581,6 +613,7 @@ def _(json, pd):
         expert_size_frame,
         filter_finished,
         filter_rep_points,
+        fom_prob_value,
         get_model_type,
         get_reps,
         get_scale,
@@ -646,8 +679,10 @@ def _(
 
     ARCH_DASH = {
         "dense": "-",
+        "moe16": (0, (3, 1, 1, 1)),
         "moe32": "--",
         "moe64": ":",
+        "moe128": (0, (1, 1)),
         "moe64s8": "-.",
         "moe64s32": (0, (5, 1)),
     }
@@ -657,16 +692,16 @@ def _(
     # encodes the factor and architecture is carried by line style + shade.
     _viridis = plt.get_cmap("viridis")
     ARCH_COLOR = {
+        # Spread over [0, 0.8] -- the yellow end stays unused. Ordered so both
+        # Group 1b comparisons read monotonically: expert count
+        # (dense < 16 < 32 < 64 < 128) and expert size (dense < s8 < 64 < s32).
         "dense": to_hex(_viridis(0.0)),
-        "moe16": to_hex(_viridis(0.3)),
-        "moe32": to_hex(_viridis(0.45)),
-        # The three 64-expert variants run monotonically up the colormap by
-        # expert size (1/8 -> 1/4 -> 1/2), so the largest experts read as the
-        # most yellow-green. 0.8 is the cap — the yellow end is never used.
-        "moe64s8": to_hex(_viridis(0.45)),
-        "moe64": to_hex(_viridis(0.75)),
-        "moe64s32": to_hex(_viridis(0.95)),
-        "moe128": to_hex(_viridis(0.95)),
+        "moe16": to_hex(_viridis(0.16)),
+        "moe32": to_hex(_viridis(0.32)),
+        "moe64s8": to_hex(_viridis(0.32)),
+        "moe64": to_hex(_viridis(0.60)),
+        "moe128": to_hex(_viridis(0.80)),
+        "moe64s32": to_hex(_viridis(0.80)),
     }
 
     def arch_dash(model_type):
@@ -1024,7 +1059,9 @@ def _(METRIC_SHORTNAMES, mo, os, plt):
     # ------------------------------------------------------------------
     # Canonical architecture ordering, shared by the legend, the per-figure arch
     # loops and the export filenames. Individual plots may override the order.
-    ARCH_ORDER_DEFAULT = ["dense", "moe32", "moe64s8", "moe64", "moe64s32"]
+    ARCH_ORDER_DEFAULT = [
+        "dense", "moe16", "moe32", "moe64s8", "moe64", "moe64s32", "moe128",
+    ]
 
     def arch_tag(archs):
         """Canonical architecture part of a filename, e.g. ``dense_moe32_moe64``."""
@@ -1186,6 +1223,27 @@ def _(METRIC_SHORTNAMES, mo, raw_df):
             label=label,
         )
 
+    # Model scales, smallest first. Used by the paper figures, where scale is the
+    # facet dimension rather than a per-plot constant.
+    SCALE_OPTIONS = ["10M", "80M", "200M", "1B"]
+
+    def metric_dropdown(label, value=None):
+        """Single-select over the metrics, for plots where each panel picks one."""
+        return mo.ui.dropdown(
+            options=METRIC_OPTIONS,
+            value=value if value in METRIC_OPTIONS else METRIC_OPTIONS[0],
+            label=label,
+        )
+
+    def scale_multiselect(label, chosen_values=None, options=None):
+        """A multi-select over model scales, ordered smallest to largest."""
+        opts = list(options) if options is not None else list(SCALE_OPTIONS)
+        return mo.ui.multiselect(
+            options=opts,
+            value=chosen_values if chosen_values is not None else list(opts),
+            label=label,
+        )
+
     def render_side_by_side(metrics, build_fig, plot_key=None):
         """Render one figure per selected metric, laid out side by side.
 
@@ -1213,9 +1271,11 @@ def _(METRIC_SHORTNAMES, mo, raw_df):
         arch_multiselect,
         history_metric_multiselect,
         load_metric_multiselect,
+        metric_dropdown,
         metric_multiselect,
         render_faceted,
         render_side_by_side,
+        scale_multiselect,
     )
 
 
@@ -1265,6 +1325,7 @@ def _():
         "olmo_mix (bs 131072)": "OLMoE mix (batch 131k)",
         "olmo_mix (lr 1e-2)": "OLMoE mix (lr 1e-2)",
         "olmo_mix (expert size)": "OLMoE mix (expert size)",
+        "olmo_mix (expert count)": "OLMoE mix (expert count)",
     }
 
     # Short, human-readable metric names for axis and legend labels. Suffix
@@ -1322,6 +1383,24 @@ def _():
 
     # Human-readable architecture names, used for the "Model type" legend section.
     # Format is (num experts x expert size relative to the dense FFN).
+    # famB source lists, shared by the Group 5 plots and the paper figures so the
+    # two cannot drift apart. Tuple is (legend label, legacy color, kind, run key);
+    # the color is ignored -- `factor_palette` assigns by position.
+    FAMB_SC_SOURCES = [
+        ("dclm", "#1f77b4", "hline", "dclm"),
+        ("10% StarCoder", "#d62728", "famB", "sc90"),
+        ("50% StarCoder", "#ff7f0e", "famB", "sc50"),
+        ("100% StarCoder", "#2ca02c", "baseline", "starcoder"),
+    ]
+    FAMB_P2O_SOURCES = [
+        ("dclm", "#1f77b4", "hline", "dclm"),
+        ("10% peS2o", "#9467bd", "famB", "p2o10"),
+        ("50% peS2o", "#ff7f0e", "famB", "p2o50"),
+        ("100% peS2o", "#2ca02c", "baseline", "pes2o"),
+    ]
+    FAMB_SC_TITLE = "% StarCoder"
+    FAMB_P2O_TITLE = "% peS2o"
+
     MODEL_DISPLAY_NAME = {
         "dense": "Dense (1 x 1)",
         "moe16": "MoE (16 x 1/4)",
@@ -1334,10 +1413,53 @@ def _():
     return (
         DATA_DISPLAY_NAMES,
         FACTOR_DISPLAY_NAMES,
+        FAMB_P2O_SOURCES,
+        FAMB_P2O_TITLE,
+        FAMB_SC_SOURCES,
+        FAMB_SC_TITLE,
         METRIC_DISPLAY_NAMES,
         METRIC_SHORTNAMES,
         MODEL_DISPLAY_NAME,
     )
+
+
+@app.cell(column=1, hide_code=True)
+def _(mo):
+    export_btn_g12 = mo.ui.run_button(label="Export images")
+    log_y_g12 = mo.ui.checkbox(label="Log y axis")
+    mo.vstack([
+        mo.md(r"""
+    ## Group 1 & 2 — Final loss vs. repetition (baseline runs)
+
+    For each data mixture we plot Dense, MoE32 and MoE64 **baseline** runs (tag
+    `baseline`, i.e. no dropout/EOM/FOM/jitter). Metric on Y, repetition count on a
+    log X axis. If more than one baseline run exists at the same repetition count, a
+    warning is printed and the **lowest** value is kept.
+
+    Group 1 covers the `olmo_mix` mixture at 10M, 80M, 200M and 1B.
+
+    The 10M figure excludes the small-batch (131072-token) runs, which are plotted
+    separately in Group 1b.
+
+    > **10M caveat.** The separate `lr=1e-2` 10M sweep (`data_rep_AC_lr1e-2`) is
+    > also tagged `baseline`, and at 10M it reaches ~6.5 train CE against ~9.3 for
+    > the `lr=4e-4` runs plotted here. It is split out into `high_lr_df` and shown
+    > in Group 1b, so it cannot reach this figure. One visible consequence: the 10M
+    > dense series has **no rep=1 point**, because the only 10M dense rep1x run
+    > belongs to that sweep.
+
+    > **1B is wired but empty.** The sweep is still in flight, and separately the 1B
+    > runs launched so far carry tags like `1B, Data=1C, MoE64, olmo_mix, rep1x` with
+    > **no `baseline` tag**, which is what `collect_baseline_points` selects on. Tag
+    > them `baseline` at launch (as the 80M/200M runs are) or the figure stays blank
+    > even after they finish.
+
+    **Export images** writes Group 1 to `ml/figures/olmoe_mix/` and Group 2 to
+    `ml/figures/single_domain/`.
+    """),
+        mo.hstack([export_btn_g12, log_y_g12], justify="start", gap=1),
+    ])
+    return export_btn_g12, log_y_g12
 
 
 @app.cell(hide_code=True)
@@ -1402,292 +1524,6 @@ def _(
         _out = export_report(_paths)
     _out
     return
-
-
-@app.cell(hide_code=True)
-def _(
-    DROPOUT_COL,
-    EXPERT_DROPOUT_COL,
-    FOM_COL,
-    MGN_COL,
-    WD_COL,
-    arch_tag,
-    export_btn_g3,
-    export_pdf,
-    export_report,
-    finished_df,
-    log_y_g3,
-    make_factor_figure,
-    metric_tag,
-    mo,
-    router_field,
-    sel_dropout,
-    sel_dropout_arch,
-    sel_max_grad_norm,
-    sel_max_grad_norm_arch,
-    sel_moe_eom,
-    sel_moe_eom_arch,
-    sel_moe_expert_dropout,
-    sel_moe_expert_dropout_arch,
-    sel_moe_fom,
-    sel_moe_fom_arch,
-    sel_moe_jitter,
-    sel_moe_jitter_arch,
-    sel_weight_decay,
-    sel_weight_decay_arch,
-):
-    # Export every Group 3 / 3b regularizer sweep to regularizers/.
-    # Name: olmo_mix__80M__<architectures>__<varied feature>__<metric>.
-    if not export_btn_g3.value:
-        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
-    else:
-        # (varied feature, selector, arch selector, extra make_factor_figure kwargs)
-        _specs = [
-            ("dropout", sel_dropout, sel_dropout_arch,
-             dict(factor_col=DROPOUT_COL, baseline_value=None, factor_key="dropout",
-                  baseline_label="None (disabled)")),
-            ("weight_decay", sel_weight_decay, sel_weight_decay_arch,
-             dict(factor_col=WD_COL, baseline_value=0.1, factor_key="weight_decay")),
-            ("max_grad_norm", sel_max_grad_norm, sel_max_grad_norm_arch,
-             dict(factor_col=MGN_COL, baseline_value=1.0, nan_label="0 (no clip)",
-                  factor_key="max_grad_norm")),
-            ("jitter_eps", sel_moe_jitter, sel_moe_jitter_arch,
-             dict(factor_col=None, baseline_value=None, factor_key="jitter_eps",
-                  value_getter=lambda row: router_field(row, "jitter_eps"))),
-            ("eom_prob", sel_moe_eom, sel_moe_eom_arch,
-             dict(factor_col=None, baseline_value=None, factor_key="eom_prob",
-                  value_getter=lambda row: router_field(row, "eom_prob"))),
-            ("fom_prob", sel_moe_fom, sel_moe_fom_arch,
-             dict(factor_col=FOM_COL, baseline_value=None, factor_key="fom_prob")),
-            ("expert_dropout", sel_moe_expert_dropout, sel_moe_expert_dropout_arch,
-             dict(factor_col=EXPERT_DROPOUT_COL, baseline_value=None,
-                  factor_key="expert_dropout")),
-        ]
-        _paths = []
-        for _feature, _sel, _arch, _kw in _specs:
-            # One separate image per selected metric, always suffixed with the
-            # short metric name.
-            for _m in _sel.value:
-                _fig = make_factor_figure(
-                    finished_df,
-                    _kw["factor_col"],
-                    _feature,
-                    _kw["baseline_value"],
-                    _m,
-                    include_archs=_arch.value,
-                    exclude_reps=[128, 256],
-                    nan_label=_kw.get("nan_label"),
-                    baseline_label=_kw.get("baseline_label"),
-                    value_getter=_kw.get("value_getter"),
-                    factor_key=_kw["factor_key"],
-                    log_y=log_y_g3.value,
-                )
-                _paths.append(
-                    export_pdf(
-                        _fig, "regularizers", "olmo_mix", "80M",
-                        arch_tag(_arch.value), _feature, metric_tag(_m),
-                    )
-                )
-        _out = export_report(_paths)
-    _out
-    return
-
-
-@app.cell(hide_code=True)
-def _(
-    arch_tag,
-    export_btn_g4,
-    export_pdf,
-    export_report,
-    finished_df,
-    log_y_g4,
-    make_famA_figure,
-    make_famA_rep_figure,
-    metric_tag,
-    mo,
-    sel_famA,
-    sel_famA_arch,
-    sel_famA_rep,
-    sel_famA_rep_arch,
-):
-    # Export the two Group 4 (famA) plots to filtering/.
-    # Name: famA__80M__<architectures>__<x axis>__<metric>.
-    if not export_btn_g4.value:
-        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
-    else:
-        _specs = [
-            ("pct_dclm", sel_famA, sel_famA_arch, make_famA_figure),
-            ("repetition", sel_famA_rep, sel_famA_rep_arch, make_famA_rep_figure),
-        ]
-        _paths = []
-        for _feature, _sel, _arch, _builder in _specs:
-            # One separate image per selected metric, always suffixed with the
-            # short metric name.
-            for _m in _sel.value:
-                _fig = _builder(
-                    finished_df, _m, include_archs=_arch.value,
-                    log_y=log_y_g4.value,
-                )
-                _paths.append(
-                    export_pdf(
-                        _fig, "filtering", "famA", "80M",
-                        arch_tag(_arch.value), _feature, metric_tag(_m),
-                    )
-                )
-        _out = export_report(_paths)
-    _out
-    return
-
-
-@app.cell(hide_code=True)
-def _(
-    arch_tag,
-    export_btn_curves,
-    export_pdf,
-    export_report,
-    finished_df,
-    log_y_curves,
-    make_training_curve_figure,
-    metric_tag,
-    mo,
-    sel_curve_dclm_80m,
-    sel_curve_dclm_80m_arch,
-    sel_curve_olmo_200m,
-    sel_curve_olmo_200m_arch,
-    sel_curve_olmo_80m,
-    sel_curve_olmo_80m_arch,
-    sel_curve_pes2o_80m,
-    sel_curve_pes2o_80m_arch,
-    sel_curve_starcoder_80m,
-    sel_curve_starcoder_80m_arch,
-    sel_curve_wiki_80m,
-    sel_curve_wiki_80m_arch,
-):
-    # Export the training-curve facets to history/, one PDF per metric so the
-    # metric name is meaningful. Name:
-    #   <data source>__<scale>__<architectures>__<metric>.
-    if not export_btn_curves.value:
-        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
-    else:
-        _specs = [
-            ("olmo_mix", "80M", sel_curve_olmo_80m, sel_curve_olmo_80m_arch),
-            ("olmo_mix", "200M", sel_curve_olmo_200m, sel_curve_olmo_200m_arch),
-            ("dclm", "80M", sel_curve_dclm_80m, sel_curve_dclm_80m_arch),
-            ("starcoder", "80M", sel_curve_starcoder_80m, sel_curve_starcoder_80m_arch),
-            ("pes2o", "80M", sel_curve_pes2o_80m, sel_curve_pes2o_80m_arch),
-            ("wiki", "80M", sel_curve_wiki_80m, sel_curve_wiki_80m_arch),
-        ]
-        _paths = []
-        for _tag, _scale, _sel, _arch in _specs:
-            for _m in _sel.value:
-                _fig = make_training_curve_figure(
-                    finished_df, _tag, _scale, [_m], include_archs=_arch.value,
-                    log_y=True if log_y_curves.value else None,
-                )
-                _paths.append(
-                    export_pdf(
-                        _fig, "history", _tag, _scale, arch_tag(_arch.value),
-                        metric_tag(_m),
-                    )
-                )
-        _out = export_report(_paths)
-    _out
-    return
-
-
-@app.cell(hide_code=True)
-def _(
-    arch_tag,
-    export_btn_load,
-    export_pdf,
-    export_report,
-    finished_df,
-    log_y_load,
-    make_training_curve_figure,
-    metric_tag,
-    mo,
-    sel_load_dclm_80m,
-    sel_load_dclm_80m_arch,
-    sel_load_olmo_200m,
-    sel_load_olmo_200m_arch,
-    sel_load_olmo_80m,
-    sel_load_olmo_80m_arch,
-    sel_load_pes2o_80m,
-    sel_load_pes2o_80m_arch,
-    sel_load_starcoder_80m,
-    sel_load_starcoder_80m_arch,
-    sel_load_wiki_80m,
-    sel_load_wiki_80m_arch,
-):
-    # Export the router-load facets to history/ (same folder as the training
-    # curves; the metric name keeps them distinct). Name:
-    #   <data source>__<scale>__<architectures>__<metric>.
-    if not export_btn_load.value:
-        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
-    else:
-        _specs = [
-            ("olmo_mix", "80M", sel_load_olmo_80m, sel_load_olmo_80m_arch),
-            ("olmo_mix", "200M", sel_load_olmo_200m, sel_load_olmo_200m_arch),
-            ("dclm", "80M", sel_load_dclm_80m, sel_load_dclm_80m_arch),
-            ("starcoder", "80M", sel_load_starcoder_80m, sel_load_starcoder_80m_arch),
-            ("pes2o", "80M", sel_load_pes2o_80m, sel_load_pes2o_80m_arch),
-            ("wiki", "80M", sel_load_wiki_80m, sel_load_wiki_80m_arch),
-        ]
-        _paths = []
-        for _tag, _scale, _sel, _arch in _specs:
-            for _m in _sel.value:
-                _fig = make_training_curve_figure(
-                    finished_df, _tag, _scale, [_m], include_archs=_arch.value,
-                    log_y=True if log_y_load.value else None,
-                )
-                _paths.append(
-                    export_pdf(
-                        _fig, "history", _tag, _scale, arch_tag(_arch.value),
-                        metric_tag(_m),
-                    )
-                )
-        _out = export_report(_paths)
-    _out
-    return
-
-
-@app.cell(column=1, hide_code=True)
-def _(mo):
-    export_btn_g12 = mo.ui.run_button(label="Export images")
-    log_y_g12 = mo.ui.checkbox(label="Log y axis")
-    mo.vstack([
-        mo.md(r"""
-    ## Group 1 & 2 — Final loss vs. repetition (baseline runs)
-
-    For each data mixture we plot Dense, MoE32 and MoE64 **baseline** runs (tag
-    `baseline`, i.e. no dropout/EOM/FOM/jitter). Metric on Y, repetition count on a
-    log X axis. If more than one baseline run exists at the same repetition count, a
-    warning is printed and the **lowest** value is kept.
-
-    Group 1 covers the `olmo_mix` mixture at 10M, 80M, 200M and 1B.
-
-    The 10M figure excludes the small-batch (131072-token) runs, which are plotted
-    separately in Group 1b.
-
-    > **10M caveat.** The separate `lr=1e-2` 10M sweep (`data_rep_AC_lr1e-2`) is
-    > also tagged `baseline`, and at 10M it reaches ~6.5 train CE against ~9.3 for
-    > the `lr=4e-4` runs plotted here. It is split out into `high_lr_df` and shown
-    > in Group 1b, so it cannot reach this figure. One visible consequence: the 10M
-    > dense series has **no rep=1 point**, because the only 10M dense rep1x run
-    > belongs to that sweep.
-
-    > **1B is wired but empty.** The sweep is still in flight, and separately the 1B
-    > runs launched so far carry tags like `1B, Data=1C, MoE64, olmo_mix, rep1x` with
-    > **no `baseline` tag**, which is what `collect_baseline_points` selects on. Tag
-    > them `baseline` at launch (as the 80M/200M runs are) or the figure stays blank
-    > even after they finish.
-
-    **Export images** writes Group 1 to `ml/figures/olmoe_mix/` and Group 2 to
-    `ml/figures/single_domain/`.
-    """),
-        mo.hstack([export_btn_g12, log_y_g12], justify="start", gap=1),
-    ])
-    return export_btn_g12, log_y_g12
 
 
 @app.cell(hide_code=True)
@@ -1813,7 +1649,7 @@ def _(
         mix_label = DATA_DISPLAY_NAMES.get(
             data_label, DATA_DISPLAY_NAMES.get(data_tag, data_tag or "all data")
         )
-        fig, ax = plt.subplots(figsize=(5.0, 4.5))
+        fig, ax = plt.subplots(figsize=(5.0, 4.0))
         any_data = False
         max_reps = 0
         shown_archs = []
@@ -1840,16 +1676,17 @@ def _(
                 linestyle=arch_dash(model_type),
                 color=ARCH_COLOR[model_type],
             )
-        title = f"{mix_label} — {scale}"
+        # title = f"{mix_label} — {scale}"
+        # title = f"{mix_label} — {scale}"
         # title = f"{mix_label} — {scale}\n{metric} vs. repetition ({label})"
-        if not any_data:
-            title += f"  [no finished {label} runs]"
+        # if not any_data:
+        #     title += f"  [no finished {label} runs]"
         apply_pow2_xaxis(ax, max_reps, any_data)
         if log_y:
             apply_log_yaxis(ax)
-        ax.set_xlabel("repetition count")
+        ax.set_xlabel("Repetition Rate")
         ax.set_ylabel(axis_label(metric))
-        ax.set_title(title, fontsize=10)
+        # ax.set_title(title, fontsize=10)
         if any_data:
             arch_factor_legend(
                 ax, shown_archs, arch_colored=True, arch_order=arch_order
@@ -2152,11 +1989,14 @@ def _(
     export_btn_g1b,
     export_pdf,
     export_report,
+    finished_df,
     high_lr_df,
     log_y_g1b,
     make_repetition_figure,
     metric_tag,
     mo,
+    sel_expcount_80m,
+    sel_expcount_80m_arch,
     sel_expsize_80m,
     sel_expsize_80m_arch,
     sel_highlr_10m,
@@ -2239,6 +2079,24 @@ def _(
                 export_pdf(
                     _fig, "olmoe_mix_expert_size", "olmo_mix_expert_size", "80M",
                     arch_tag(sel_expsize_80m_arch.value), metric_tag(_m),
+                )
+            )
+        for _m in sel_expcount_80m.value:
+            _fig = make_repetition_figure(
+                finished_df,
+                "olmo_mix",
+                "80M",
+                _m,
+                include_archs=sel_expcount_80m_arch.value,
+                include_reps=[1, 2, 4, 8, 16, 32],
+                data_label="olmo_mix (expert count)",
+                arch_order=["dense", "moe16", "moe32", "moe64", "moe128"],
+                log_y=log_y_g1b.value,
+            )
+            _paths.append(
+                export_pdf(
+                    _fig, "olmoe_mix_expert_count", "olmo_mix_expert_count", "80M",
+                    arch_tag(sel_expcount_80m_arch.value), metric_tag(_m),
                 )
             )
         _out = export_report(_paths)
@@ -2403,6 +2261,51 @@ def _(
     return
 
 
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_expcount_80m = metric_multiselect(
+        "80M expert count — metrics",
+        chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"],
+    )
+    sel_expcount_80m_arch = arch_multiselect(
+        "80M expert count — architectures",
+        options=["dense", "moe16", "moe32", "moe64", "moe128"],
+    )
+    mo.vstack([sel_expcount_80m, sel_expcount_80m_arch])
+    return sel_expcount_80m, sel_expcount_80m_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    log_y_g1b,
+    make_repetition_figure,
+    render_side_by_side,
+    sel_expcount_80m,
+    sel_expcount_80m_arch,
+):
+    # 80M expert-count sweep: 16 / 32 / 64 / 128 experts against dense, all at 1/4
+    # the dense FFN. Unlike the expert-size plot this runs over `finished_df` with
+    # the normal mixture filter -- these runs are tagged `olmo_mix`.
+    _out = render_side_by_side(
+        sel_expcount_80m.value,
+        lambda m: make_repetition_figure(
+            finished_df,
+            "olmo_mix",
+            "80M",
+            m,
+            include_reps=[1, 2, 4, 8, 16, 32],
+            include_archs=sel_expcount_80m_arch.value,
+            data_label="olmo_mix (expert count)",
+            arch_order=["dense", "moe16", "moe32", "moe64", "moe128"],
+            log_y=log_y_g1b.value,
+        ),
+        "olmo_mix_80M_expert_count",
+    )
+    _out
+    return
+
+
 @app.cell(column=3, hide_code=True)
 def _(mo):
     export_btn_g3 = mo.ui.run_button(label="Export images")
@@ -2430,8 +2333,97 @@ def _(mo):
 def _(
     DROPOUT_COL,
     EXPERT_DROPOUT_COL,
+    MGN_COL,
+    WD_COL,
+    arch_tag,
+    export_btn_g3,
+    export_pdf,
+    export_report,
+    finished_df,
+    fom_prob_value,
+    log_y_g3,
+    make_factor_figure,
+    metric_tag,
+    mo,
+    router_field,
+    sel_dropout,
+    sel_dropout_arch,
+    sel_max_grad_norm,
+    sel_max_grad_norm_arch,
+    sel_moe_eom,
+    sel_moe_eom_arch,
+    sel_moe_expert_dropout,
+    sel_moe_expert_dropout_arch,
+    sel_moe_fom,
+    sel_moe_fom_arch,
+    sel_moe_jitter,
+    sel_moe_jitter_arch,
+    sel_weight_decay,
+    sel_weight_decay_arch,
+):
+    # Export every Group 3 / 3b regularizer sweep to regularizers/.
+    # Name: olmo_mix__80M__<architectures>__<varied feature>__<metric>.
+    if not export_btn_g3.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        # (varied feature, selector, arch selector, extra make_factor_figure kwargs)
+        _specs = [
+            ("dropout", sel_dropout, sel_dropout_arch,
+             dict(factor_col=DROPOUT_COL, baseline_value=None, factor_key="dropout",
+                  baseline_label="None (disabled)")),
+            ("weight_decay", sel_weight_decay, sel_weight_decay_arch,
+             dict(factor_col=WD_COL, baseline_value=0.1, factor_key="weight_decay")),
+            ("max_grad_norm", sel_max_grad_norm, sel_max_grad_norm_arch,
+             dict(factor_col=MGN_COL, baseline_value=1.0, nan_label="0 (no clip)",
+                  factor_key="max_grad_norm")),
+            ("jitter_eps", sel_moe_jitter, sel_moe_jitter_arch,
+             dict(factor_col=None, baseline_value=None, factor_key="jitter_eps",
+                  value_getter=lambda row: router_field(row, "jitter_eps"))),
+            ("eom_prob", sel_moe_eom, sel_moe_eom_arch,
+             dict(factor_col=None, baseline_value=None, factor_key="eom_prob",
+                  value_getter=lambda row: router_field(row, "eom_prob"))),
+            ("fom_prob", sel_moe_fom, sel_moe_fom_arch,
+             dict(factor_col=None, baseline_value=None, factor_key="fom_prob",
+                  value_getter=fom_prob_value)),
+            ("expert_dropout", sel_moe_expert_dropout, sel_moe_expert_dropout_arch,
+             dict(factor_col=EXPERT_DROPOUT_COL, baseline_value=None,
+                  factor_key="expert_dropout")),
+        ]
+        _paths = []
+        for _feature, _sel, _arch, _kw in _specs:
+            # One separate image per selected metric, always suffixed with the
+            # short metric name.
+            for _m in _sel.value:
+                _fig = make_factor_figure(
+                    finished_df,
+                    _kw["factor_col"],
+                    _feature,
+                    _kw["baseline_value"],
+                    _m,
+                    include_archs=_arch.value,
+                    exclude_reps=[128, 256, 512, 1024],
+                    nan_label=_kw.get("nan_label"),
+                    baseline_label=_kw.get("baseline_label"),
+                    value_getter=_kw.get("value_getter"),
+                    factor_key=_kw["factor_key"],
+                    log_y=log_y_g3.value,
+                )
+                _paths.append(
+                    export_pdf(
+                        _fig, "regularizers", "olmo_mix", "80M",
+                        arch_tag(_arch.value), _feature, metric_tag(_m),
+                    )
+                )
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    DROPOUT_COL,
+    EXPERT_DROPOUT_COL,
     FACTOR_DISPLAY_NAMES,
-    FOM_COL,
     METRIC_DISPLAY_NAMES,
     MGN_COL,
     WD_COL,
@@ -2443,6 +2435,7 @@ def _(
     axis_label,
     factor_palette,
     filter_rep_points,
+    fom_prob_value,
     get_model_type,
     get_reps,
     get_scale,
@@ -2538,7 +2531,7 @@ def _(
             "expert_dropout": lambda row: _blank(row.get(EXPERT_DROPOUT_COL)),
             "weight_decay": lambda row: _num_default(row.get(WD_COL), 0.1),
             "max_grad_norm": lambda row: _num_default(row.get(MGN_COL), 1.0),
-            "fom_prob": lambda row: _blank(row.get(FOM_COL)),
+            "fom_prob": lambda row: _blank(fom_prob_value(row)),
             "jitter_eps": lambda row: _blank(router_field(row, "jitter_eps")),
             "eom_prob": lambda row: _blank(router_field(row, "eom_prob")),
         }
@@ -2658,7 +2651,7 @@ def _(
         if log_y:
             apply_log_yaxis(ax)
         factor_label = FACTOR_DISPLAY_NAMES.get(raw_factor_label, raw_factor_label)
-        ax.set_xlabel("Repetition Count")
+        ax.set_xlabel("Repetition Rate")
         ax.set_ylabel(axis_label(metric))
         ax.set_title(
             f"{factor_label} — {METRIC_DISPLAY_NAMES.get(metric, metric)} "
@@ -2684,7 +2677,7 @@ def _(
 @app.cell(hide_code=True)
 def _(arch_multiselect, metric_multiselect, mo):
     sel_dropout = metric_multiselect("dropout — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_dropout_arch = arch_multiselect("dropout — architectures")
+    sel_dropout_arch = arch_multiselect("dropout — architectures", chosen_values=["dense", "moe64"])
     mo.vstack([sel_dropout, sel_dropout_arch])
     return sel_dropout, sel_dropout_arch
 
@@ -2704,7 +2697,7 @@ def _(
         sel_dropout.value,
         lambda m: make_factor_figure(
             finished_df, DROPOUT_COL, "dropout", None, m,
-            include_archs=sel_dropout_arch.value, exclude_reps=[128,256],
+            include_archs=sel_dropout_arch.value, exclude_reps=[128,256,512,1024],
             factor_key="dropout",
             baseline_label="None (disabled)",
          log_y=log_y_g3.value
@@ -2718,7 +2711,7 @@ def _(
 @app.cell(hide_code=True)
 def _(arch_multiselect, metric_multiselect, mo):
     sel_weight_decay = metric_multiselect("weight decay — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_weight_decay_arch = arch_multiselect("weight decay — architectures")
+    sel_weight_decay_arch = arch_multiselect("weight decay — architectures", chosen_values=["dense", "moe64"])
     mo.vstack([sel_weight_decay, sel_weight_decay_arch])
     return sel_weight_decay, sel_weight_decay_arch
 
@@ -2738,7 +2731,7 @@ def _(
         sel_weight_decay.value,
         lambda m: make_factor_figure(
             finished_df, WD_COL, "weight_decay", 0.1, m,
-            include_archs=sel_weight_decay_arch.value, exclude_reps=[128,256],
+            include_archs=sel_weight_decay_arch.value, exclude_reps=[128,256,512,1024],
             factor_key="weight_decay",
          log_y=log_y_g3.value
         ),
@@ -2751,7 +2744,7 @@ def _(
 @app.cell(hide_code=True)
 def _(arch_multiselect, metric_multiselect, mo):
     sel_max_grad_norm = metric_multiselect("max grad norm — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_max_grad_norm_arch = arch_multiselect("max grad norm — architectures")
+    sel_max_grad_norm_arch = arch_multiselect("max grad norm — architectures", chosen_values=["dense", "moe64"])
     mo.vstack([sel_max_grad_norm, sel_max_grad_norm_arch])
     return sel_max_grad_norm, sel_max_grad_norm_arch
 
@@ -2771,8 +2764,8 @@ def _(
     _out = render_side_by_side(
         sel_max_grad_norm.value,
         lambda m: make_factor_figure(
-            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="0 (no clip)",
-            include_archs=sel_max_grad_norm_arch.value, exclude_reps=[128,256],
+            finished_df, MGN_COL, "max_grad_norm", 1.0, m, nan_label="None (no clip)",
+            include_archs=sel_max_grad_norm_arch.value, exclude_reps=[128,256,512,1024],
             factor_key="max_grad_norm",
          log_y=log_y_g3.value
         ),
@@ -2802,7 +2795,7 @@ def _(mo):
 def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_expert_dropout = metric_multiselect("MoE expert_dropout — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_moe_expert_dropout_arch = arch_multiselect(
-        "MoE expert_dropout — architectures", options=["dense", "moe32", "moe64"]
+        "MoE expert_dropout — architectures", options=["dense", "moe32", "moe64"], chosen_values=["dense", "moe64"]
     )
     mo.vstack([sel_moe_expert_dropout, sel_moe_expert_dropout_arch])
     return sel_moe_expert_dropout, sel_moe_expert_dropout_arch
@@ -2824,7 +2817,7 @@ def _(
         sel_moe_expert_dropout.value,
         lambda m: make_factor_figure(
             finished_df, EXPERT_DROPOUT_COL, "expert_dropout", None, m,
-            include_archs=sel_moe_expert_dropout_arch.value, exclude_reps=[128,256],
+            include_archs=sel_moe_expert_dropout_arch.value, exclude_reps=[128,256,512,1024],
             factor_key="expert_dropout",
          log_y=log_y_g3.value
         ),
@@ -2838,7 +2831,7 @@ def _(
 def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_jitter = metric_multiselect("MoE jitter_eps — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_moe_jitter_arch = arch_multiselect(
-        "MoE jitter_eps — architectures", options=["dense", "moe32", "moe64"]
+        "MoE jitter_eps — architectures", options=["dense", "moe32", "moe64"], chosen_values=["dense", "moe64"]
     )
     mo.vstack([sel_moe_jitter, sel_moe_jitter_arch])
     return sel_moe_jitter, sel_moe_jitter_arch
@@ -2865,7 +2858,7 @@ def _(
             m,
             include_archs=sel_moe_jitter_arch.value,
             value_getter=lambda row: router_field(row, "jitter_eps"),
-            exclude_reps=[128,256],
+            exclude_reps=[128,256,512,1024],
             factor_key="jitter_eps",
          log_y=log_y_g3.value
         ),
@@ -2879,7 +2872,7 @@ def _(
 def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_eom = metric_multiselect("MoE eom_prob — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_moe_eom_arch = arch_multiselect(
-        "MoE eom_prob — architectures", options=["dense","moe32", "moe64"]
+        "MoE eom_prob — architectures", options=["dense","moe32", "moe64"], chosen_values=["dense", "moe64"]
     )
     mo.vstack([sel_moe_eom, sel_moe_eom_arch])
     return sel_moe_eom, sel_moe_eom_arch
@@ -2906,7 +2899,7 @@ def _(
             m,
             include_archs=sel_moe_eom_arch.value,
             value_getter=lambda row: router_field(row, "eom_prob"),
-            exclude_reps=[128,256],
+            exclude_reps=[128,256,512,1024],
             factor_key="eom_prob",
          log_y=log_y_g3.value
         ),
@@ -2920,7 +2913,7 @@ def _(
 def _(arch_multiselect, metric_multiselect, mo):
     sel_moe_fom = metric_multiselect("MoE fom_prob — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
     sel_moe_fom_arch = arch_multiselect(
-        "MoE fom_prob — architectures", options=["dense", "moe32", "moe64"]
+        "MoE fom_prob — architectures", options=["dense", "moe32", "moe64"], chosen_values=["dense", "moe64"]
     )
     mo.vstack([sel_moe_fom, sel_moe_fom_arch])
     return sel_moe_fom, sel_moe_fom_arch
@@ -2928,8 +2921,8 @@ def _(arch_multiselect, metric_multiselect, mo):
 
 @app.cell(hide_code=True)
 def _(
-    FOM_COL,
     finished_df,
+    fom_prob_value,
     log_y_g3,
     make_factor_figure,
     render_side_by_side,
@@ -2940,7 +2933,9 @@ def _(
     _out = render_side_by_side(
         sel_moe_fom.value,
         lambda m: make_factor_figure(
-            finished_df, FOM_COL, "fom_prob", None, m, include_archs=sel_moe_fom_arch.value, exclude_reps=[128,256], factor_key="fom_prob",
+            finished_df, None, "fom_prob", None, m,
+            include_archs=sel_moe_fom_arch.value, exclude_reps=[128,256,512,1024],
+            factor_key="fom_prob", value_getter=fom_prob_value,
          log_y=log_y_g3.value
         ),
         "moe_fom_prob",
@@ -2971,6 +2966,52 @@ def _(mo):
         mo.hstack([export_btn_g4, log_y_g4], justify="start", gap=1),
     ])
     return export_btn_g4, log_y_g4
+
+
+@app.cell(hide_code=True)
+def _(
+    arch_tag,
+    export_btn_g4,
+    export_pdf,
+    export_report,
+    finished_df,
+    log_y_g4,
+    make_famA_figure,
+    make_famA_rep_figure,
+    metric_tag,
+    mo,
+    sel_famA,
+    sel_famA_arch,
+    sel_famA_rep,
+    sel_famA_rep_arch,
+):
+    # Export the two Group 4 (famA) plots to filtering/.
+    # Name: famA__80M__<architectures>__<x axis>__<metric>.
+    if not export_btn_g4.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _specs = [
+            ("pct_dclm", sel_famA, sel_famA_arch, make_famA_figure),
+            ("repetition", sel_famA_rep, sel_famA_rep_arch, make_famA_rep_figure),
+        ]
+        _paths = []
+        for _feature, _sel, _arch, _builder in _specs:
+            # One separate image per selected metric, always suffixed with the
+            # short metric name.
+            for _m in _sel.value:
+                _fig = _builder(
+                    finished_df, _m, include_archs=_arch.value,
+                    log_y=log_y_g4.value,
+                )
+                _paths.append(
+                    export_pdf(
+                        _fig, "filtering", "famA", "80M",
+                        arch_tag(_arch.value), _feature, metric_tag(_m),
+                    )
+                )
+        _out = export_report(_paths)
+    _out
+    return
 
 
 @app.cell(hide_code=True)
@@ -3038,7 +3079,7 @@ def _(
         return out
 
     def make_famA_figure(
-        df, metric, include_archs=None, exclude_archs=None, log_y=False
+        df, metric, include_archs=None, exclude_archs=None, log_y=False, ax=None
     ):
         """famA: metric vs. %dclm. Color = rep count; line style + shade = architecture.
 
@@ -3054,7 +3095,12 @@ def _(
 
         rep_order = sorted(rep_set)
         rep_color = factor_palette(rep_order)
-        fig, ax = plt.subplots(figsize=(5.5, 4.5))
+        # Draw into a caller-supplied axes when given, so the paper figure can put
+        # this panel and the rep panel side by side without duplicating the body.
+        own_fig = ax is None
+        fig = None
+        if own_fig:
+            fig, ax = plt.subplots(figsize=(5.5, 4.5))
         shown_archs = []
         for (mt, reps), by_pct in sorted(series.items()):
             pts = sorted(by_pct.items())
@@ -3074,16 +3120,18 @@ def _(
         ax.set_xticks([0, 25, 50, 75, 100])
         ax.set_xlabel("% dclm")
         ax.set_ylabel(axis_label(metric))
-        ax.set_title(f"famA runs: {metric} vs. %dclm", fontsize=10)
+        # ax.set_title(f"famA runs: {metric} vs. %dclm", fontsize=10)
         if series:
             arch_factor_legend(
                 ax, shown_archs, "Repetitions", rep_order, rep_color, lambda r: f"{r:g}x"
             )
+        if not own_fig:
+            return None
         fig.tight_layout()
         return fig
 
     def make_famA_rep_figure(
-        df, metric, include_archs=None, exclude_archs=None, log_y=False
+        df, metric, include_archs=None, exclude_archs=None, log_y=False, ax=None
     ):
         """famA: metric vs. repetition count (log X). Color = %dclm; line style +
         shade = architecture.
@@ -3100,7 +3148,10 @@ def _(
 
         pct_order = sorted(pct_set)
         pct_color = factor_palette(pct_order)
-        fig, ax = plt.subplots(figsize=(5.5, 4.5))
+        own_fig = ax is None
+        fig = None
+        if own_fig:
+            fig, ax = plt.subplots(figsize=(5.5, 4.5))
         shown_archs = []
         max_reps = 0
         any_data = False
@@ -3124,13 +3175,15 @@ def _(
         apply_pow2_xaxis(ax, max_reps, any_data)
         if log_y:
             apply_log_yaxis(ax)
-        ax.set_xlabel("repetition count")
+        ax.set_xlabel("Repetition Rate")
         ax.set_ylabel(axis_label(metric))
-        ax.set_title(f"famA runs: {metric} vs. repetition", fontsize=10)
+        # ax.set_title(f"famA runs: {metric} vs. repetition", fontsize=10)
         if any_data:
             arch_factor_legend(
                 ax, shown_archs, "% dclm", pct_order, pct_color, lambda p: f"{p:g}%"
             )
+        if not own_fig:
+            return None
         fig.tight_layout()
         return fig
 
@@ -3140,7 +3193,7 @@ def _(
 @app.cell(hide_code=True)
 def _(arch_multiselect, metric_multiselect, mo):
     sel_famA = metric_multiselect("famA — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/downstream/hellaswag (CE loss)"])
-    sel_famA_arch = arch_multiselect("famA — architectures")
+    sel_famA_arch = arch_multiselect("famA — architectures", chosen_values=["dense", "moe64"])
     mo.vstack([sel_famA, sel_famA_arch])
     return sel_famA, sel_famA_arch
 
@@ -3169,7 +3222,7 @@ def _(arch_multiselect, metric_multiselect, mo):
         "famA (vs reps) — metrics",
         chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss", "eval/downstream/hellaswag (CE loss)"],
     )
-    sel_famA_rep_arch = arch_multiselect("famA (vs reps) — architectures")
+    sel_famA_rep_arch = arch_multiselect("famA (vs reps) — architectures", chosen_values=["dense", "moe64"])
     mo.vstack([sel_famA_rep, sel_famA_rep_arch])
     return sel_famA_rep, sel_famA_rep_arch
 
@@ -3234,6 +3287,8 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
+    FAMB_P2O_SOURCES,
+    FAMB_SC_SOURCES,
     arch_tag,
     export_btn_g5,
     export_pdf,
@@ -3253,18 +3308,8 @@ def _(
     if not export_btn_g5.value:
         _out = mo.md("*Click **Export images** to write this column's PDFs.*")
     else:
-        _sc_sources = [
-            ("dclm", "#1f77b4", "hline", "dclm"),
-            ("10% StarCoder", "#d62728", "famB", "sc90"),
-            ("50% StarCoder", "#ff7f0e", "famB", "sc50"),
-            ("100% StarCoder", "#2ca02c", "baseline", "starcoder"),
-        ]
-        _p2o_sources = [
-            ("dclm", "#1f77b4", "hline", "dclm"),
-            ("10% peS2o", "#9467bd", "famB", "p2o10"),
-            ("50% peS2o", "#ff7f0e", "famB", "p2o50"),
-            ("100% peS2o", "#2ca02c", "baseline", "pes2o"),
-        ]
+        _sc_sources = FAMB_SC_SOURCES
+        _p2o_sources = FAMB_P2O_SOURCES
         _specs = [
             ("starcoder", sel_famB_sc, sel_famB_sc_arch, _sc_sources, "% StarCoder"),
             ("pes2o", sel_famB_p2o, sel_famB_p2o_arch, _p2o_sources, "% peS2o"),
@@ -3433,7 +3478,7 @@ def _(
                 ha="left",
                 va="bottom",
             )
-        ax.set_xlabel("repetition count")
+        ax.set_xlabel("Repetition Rate")
         ax.set_ylabel(axis_label(metric))
         ax.set_title(title, fontsize=10)
         if any_data:
@@ -3444,19 +3489,20 @@ def _(
         fig.tight_layout()
         return fig
 
-    return (make_famB_figure,)
+    return collect_famB_points, make_famB_figure
 
 
 @app.cell(hide_code=True)
 def _(arch_multiselect, metric_multiselect, mo):
     sel_famB_sc = metric_multiselect("famB starcoder — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_stack-validation/CE loss"])
-    sel_famB_sc_arch = arch_multiselect("famB starcoder — architectures")
+    sel_famB_sc_arch = arch_multiselect("famB starcoder — architectures", chosen_values=["dense", "moe64"])
     mo.vstack([sel_famB_sc, sel_famB_sc_arch])
     return sel_famB_sc, sel_famB_sc_arch
 
 
 @app.cell(hide_code=True)
 def _(
+    FAMB_SC_SOURCES,
     finished_df,
     log_y_g5,
     make_famB_figure,
@@ -3466,12 +3512,7 @@ def _(
 ):
     # Plot 1: starcoder family. Color = source; line style + shade = architecture.
     # Order (and thus palette assignment) is dclm, sc90, sc50, starcoder.
-    _sources = [
-        ("dclm", "#1f77b4", "hline", "dclm"),
-        ("10% StarCoder", "#d62728", "famB", "sc90"),
-        ("50% StarCoder", "#ff7f0e", "famB", "sc50"),
-        ("100% StarCoder", "#2ca02c", "baseline", "starcoder"),
-    ]
+    _sources = FAMB_SC_SOURCES
     _out = render_side_by_side(
         sel_famB_sc.value,
         lambda m: make_famB_figure(
@@ -3489,13 +3530,14 @@ def _(
 @app.cell(hide_code=True)
 def _(arch_multiselect, metric_multiselect, mo):
     sel_famB_p2o = metric_multiselect("famB pes2o — metrics", chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss", "eval/lm/dolma_pes2o-validation/CE loss"])
-    sel_famB_p2o_arch = arch_multiselect("famB pes2o — architectures")
+    sel_famB_p2o_arch = arch_multiselect("famB pes2o — architectures", chosen_values=["dense", "moe64"])
     mo.vstack([sel_famB_p2o, sel_famB_p2o_arch])
     return sel_famB_p2o, sel_famB_p2o_arch
 
 
 @app.cell(hide_code=True)
 def _(
+    FAMB_P2O_SOURCES,
     finished_df,
     log_y_g5,
     make_famB_figure,
@@ -3505,12 +3547,7 @@ def _(
 ):
     # Plot 2: pes2o family. Color = source; line style + shade = architecture.
     # Order (and thus palette assignment) is dclm, p2o10, p2o50, pes2o.
-    _sources = [
-        ("dclm", "#1f77b4", "hline", "dclm"),
-        ("10% peS2o", "#9467bd", "famB", "p2o10"),
-        ("50% peS2o", "#ff7f0e", "famB", "p2o50"),
-        ("100% peS2o", "#2ca02c", "baseline", "pes2o"),
-    ]
+    _sources = FAMB_P2O_SOURCES
     _out = render_side_by_side(
         sel_famB_p2o.value,
         lambda m: make_famB_figure(
@@ -3549,7 +3586,62 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(
-    DATA_DISPLAY_NAMES,
+    arch_tag,
+    export_btn_curves,
+    export_pdf,
+    export_report,
+    finished_df,
+    log_y_curves,
+    make_training_curve_figure,
+    metric_tag,
+    mo,
+    sel_curve_dclm_80m,
+    sel_curve_dclm_80m_arch,
+    sel_curve_olmo_200m,
+    sel_curve_olmo_200m_arch,
+    sel_curve_olmo_80m,
+    sel_curve_olmo_80m_arch,
+    sel_curve_pes2o_80m,
+    sel_curve_pes2o_80m_arch,
+    sel_curve_starcoder_80m,
+    sel_curve_starcoder_80m_arch,
+    sel_curve_wiki_80m,
+    sel_curve_wiki_80m_arch,
+):
+    # Export the training-curve facets to history/, one PDF per metric so the
+    # metric name is meaningful. Name:
+    #   <data source>__<scale>__<architectures>__<metric>.
+    if not export_btn_curves.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _specs = [
+            ("olmo_mix", "80M", sel_curve_olmo_80m, sel_curve_olmo_80m_arch),
+            ("olmo_mix", "200M", sel_curve_olmo_200m, sel_curve_olmo_200m_arch),
+            ("dclm", "80M", sel_curve_dclm_80m, sel_curve_dclm_80m_arch),
+            ("starcoder", "80M", sel_curve_starcoder_80m, sel_curve_starcoder_80m_arch),
+            ("pes2o", "80M", sel_curve_pes2o_80m, sel_curve_pes2o_80m_arch),
+            ("wiki", "80M", sel_curve_wiki_80m, sel_curve_wiki_80m_arch),
+        ]
+        _paths = []
+        for _tag, _scale, _sel, _arch in _specs:
+            for _m in _sel.value:
+                _fig = make_training_curve_figure(
+                    finished_df, _tag, _scale, [_m], include_archs=_arch.value,
+                    log_y=True if log_y_curves.value else None,
+                )
+                _paths.append(
+                    export_pdf(
+                        _fig, "history", _tag, _scale, arch_tag(_arch.value),
+                        metric_tag(_m),
+                    )
+                )
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(
     METRIC_DISPLAY_NAMES,
     MODEL_DISPLAY_NAME,
     apply_log_yaxis,
@@ -3769,9 +3861,9 @@ def _(
                     ax.set_ylabel(METRIC_DISPLAY_NAMES.get(metric, metric), fontsize=8)
                 # X label only on the bottom row.
                 if r == n_rows - 1:
-                    ax.set_xlabel("train step")
+                    ax.set_xlabel("Train Step")
 
-        fig.suptitle(f"{DATA_DISPLAY_NAMES.get(data_tag, data_tag)} — {scale}: Training Curves ", fontsize=11)
+        # fig.suptitle(f"{DATA_DISPLAY_NAMES.get(data_tag, data_tag)} — {scale}: Training Curves ", fontsize=11)
 
         if any_data:
             from matplotlib.lines import Line2D
@@ -3806,7 +3898,7 @@ def _(
 def _(arch_multiselect, history_metric_multiselect, mo):
     sel_curve_olmo_80m = history_metric_multiselect(
         "curves: olmo_mix 80M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_curve_olmo_80m_arch = arch_multiselect("curves: olmo_mix 80M — architectures")
+    sel_curve_olmo_80m_arch = arch_multiselect("curves: olmo_mix 80M — architectures", chosen_values=["dense", "moe64"])
     mo.vstack([sel_curve_olmo_80m, sel_curve_olmo_80m_arch])
     return sel_curve_olmo_80m, sel_curve_olmo_80m_arch
 
@@ -3836,7 +3928,7 @@ def _(
 def _(arch_multiselect, history_metric_multiselect, mo):
     sel_curve_olmo_200m = history_metric_multiselect(
         "curves: olmo_mix 200M — metrics", chosen_values=["train/CE loss", "eval/lm/dolma_common-crawl-validation/CE loss"])
-    sel_curve_olmo_200m_arch = arch_multiselect("curves: olmo_mix 200M — architectures")
+    sel_curve_olmo_200m_arch = arch_multiselect("curves: olmo_mix 200M — architectures", chosen_values=["dense", "moe64"])
     mo.vstack([sel_curve_olmo_200m, sel_curve_olmo_200m_arch])
     return sel_curve_olmo_200m, sel_curve_olmo_200m_arch
 
@@ -3991,13 +4083,6 @@ def _(
     return
 
 
-@app.cell
-def _():
-    import marimo as mo
-
-    return (mo,)
-
-
 @app.cell(column=7, hide_code=True)
 def _(mo):
     export_btn_load = mo.ui.run_button(label="Export images")
@@ -4019,6 +4104,62 @@ def _(mo):
         mo.hstack([export_btn_load, log_y_load], justify="start", gap=1),
     ])
     return export_btn_load, log_y_load
+
+
+@app.cell(hide_code=True)
+def _(
+    arch_tag,
+    export_btn_load,
+    export_pdf,
+    export_report,
+    finished_df,
+    log_y_load,
+    make_training_curve_figure,
+    metric_tag,
+    mo,
+    sel_load_dclm_80m,
+    sel_load_dclm_80m_arch,
+    sel_load_olmo_200m,
+    sel_load_olmo_200m_arch,
+    sel_load_olmo_80m,
+    sel_load_olmo_80m_arch,
+    sel_load_pes2o_80m,
+    sel_load_pes2o_80m_arch,
+    sel_load_starcoder_80m,
+    sel_load_starcoder_80m_arch,
+    sel_load_wiki_80m,
+    sel_load_wiki_80m_arch,
+):
+    # Export the router-load facets to history/ (same folder as the training
+    # curves; the metric name keeps them distinct). Name:
+    #   <data source>__<scale>__<architectures>__<metric>.
+    if not export_btn_load.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _specs = [
+            ("olmo_mix", "80M", sel_load_olmo_80m, sel_load_olmo_80m_arch),
+            ("olmo_mix", "200M", sel_load_olmo_200m, sel_load_olmo_200m_arch),
+            ("dclm", "80M", sel_load_dclm_80m, sel_load_dclm_80m_arch),
+            ("starcoder", "80M", sel_load_starcoder_80m, sel_load_starcoder_80m_arch),
+            ("pes2o", "80M", sel_load_pes2o_80m, sel_load_pes2o_80m_arch),
+            ("wiki", "80M", sel_load_wiki_80m, sel_load_wiki_80m_arch),
+        ]
+        _paths = []
+        for _tag, _scale, _sel, _arch in _specs:
+            for _m in _sel.value:
+                _fig = make_training_curve_figure(
+                    finished_df, _tag, _scale, [_m], include_archs=_arch.value,
+                    log_y=True if log_y_load.value else None,
+                )
+                _paths.append(
+                    export_pdf(
+                        _fig, "history", _tag, _scale, arch_tag(_arch.value),
+                        metric_tag(_m),
+                    )
+                )
+        _out = export_report(_paths)
+    _out
+    return
 
 
 @app.cell(hide_code=True)
@@ -4210,6 +4351,804 @@ def _(
         , log_y=True if log_y_load.value else None
         ),
         "load_wiki_80M",
+    )
+    _out
+    return
+
+
+@app.cell(column=8, hide_code=True)
+def _(mo):
+    export_btn_paper = mo.ui.run_button(label="Export images")
+    log_y_paper = mo.ui.checkbox(label="Log y axis")
+    mo.vstack([
+        mo.md(r"""
+    # Paper Figures
+
+    Publication-ready versions of the figures, kept separate from the exploratory
+    columns so their styling can be tuned without disturbing anything else.
+
+    **Loss vs. repetition, across model scale.** One figure per selected metric, with
+    each model scale as its own subfigure. The subfigures deliberately do **not**
+    share a y axis — absolute loss differs enough between 10M and 1B that a shared
+    scale flattens the within-scale trend that the figure is about. A single legend
+    covers the whole figure.
+
+    **Export images** writes to `ml/figures/paper/`.
+    """),
+        mo.hstack([export_btn_paper, log_y_paper], justify="start", gap=1),
+    ])
+    return export_btn_paper, log_y_paper
+
+
+@app.cell(hide_code=True)
+def _(
+    arch_tag,
+    export_btn_paper,
+    export_pdf,
+    export_report,
+    finished_df,
+    log_y_paper,
+    make_paper_facet_figure,
+    metric_tag,
+    mo,
+    paper_dom_metrics,
+    paper_domain_panels,
+    sel_paper_dom_arch,
+):
+    # One saved figure per metric. Mixture is the facet dimension, so the data-source
+    # slot in the filename records the whole set rather than a single tag.
+    if not export_btn_paper.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _fig = make_paper_facet_figure(
+            finished_df,
+            paper_domain_panels(["dclm", "starcoder", "pes2o", "wiki"]),
+            paper_dom_metrics,
+            include_archs=sel_paper_dom_arch.value,
+            arch_order=["dense", "moe16", "moe32", "moe64", "moe128"],
+            log_y=log_y_paper.value,
+        )
+        # Panels can each use a different metric, so the metric slot lists them in
+        # panel order (collapsed to one name when they all agree).
+        _tags = [metric_tag(_m) for _m in paper_dom_metrics]
+        _metric_part = _tags[0] if len(set(_tags)) == 1 else "_".join(_tags)
+        _paths = [
+            export_pdf(
+                _fig, "paper", "single_domains", "80M",
+                arch_tag(sel_paper_dom_arch.value), _metric_part,
+            )
+        ]
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    arch_tag,
+    export_btn_paper,
+    export_pdf,
+    export_report,
+    finished_df,
+    log_y_paper,
+    make_paper_facet_figure,
+    metric_tag,
+    mo,
+    paper_scale_panels,
+    sel_paper_scale,
+    sel_paper_scale_arch,
+    sel_paper_scale_sizes,
+):
+    # One saved figure per selected metric. Scale is the facet dimension, so the
+    # filename carries the full set of sizes in place of a single scale.
+    if not export_btn_paper.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _sizes = "_".join(
+            s for s in ["10M", "80M", "200M", "1B"] if s in sel_paper_scale_sizes.value
+        ) or "none"
+        _paths = []
+        for _m in sel_paper_scale.value:
+            _fig = make_paper_facet_figure(
+                finished_df,
+                paper_scale_panels(sel_paper_scale_sizes.value),
+                _m,
+                include_archs=sel_paper_scale_arch.value,
+                arch_order=["dense", "moe16", "moe32", "moe64", "moe128"],
+                log_y=log_y_paper.value,
+            )
+            _paths.append(
+                export_pdf(
+                    _fig, "paper", "olmo_mix", _sizes,
+                    arch_tag(sel_paper_scale_arch.value), metric_tag(_m),
+                )
+            )
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    arch_tag,
+    export_btn_paper,
+    export_pdf,
+    export_report,
+    finished_df,
+    log_y_paper,
+    make_paper_famA_figure,
+    metric_tag,
+    mo,
+    sel_paper_famA,
+    sel_paper_famA_arch,
+):
+    if not export_btn_paper.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _paths = []
+        for _m in sel_paper_famA.value:
+            _fig = make_paper_famA_figure(
+                finished_df,
+                _m,
+                include_archs=sel_paper_famA_arch.value,
+                log_y=log_y_paper.value,
+            )
+            _paths.append(
+                export_pdf(
+                    _fig, "paper", "famA", "80M",
+                    arch_tag(sel_paper_famA_arch.value), metric_tag(_m),
+                )
+            )
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    ARCH_COLOR,
+    ARCH_ORDER_DEFAULT,
+    DATA_DISPLAY_NAMES,
+    MODEL_DISPLAY_NAME,
+    apply_log_yaxis,
+    apply_pow2_xaxis,
+    arch_dash,
+    axis_label,
+    collect_baseline_points,
+    filter_rep_points,
+    keep_arch,
+    plt,
+):
+    def make_paper_facet_figure(
+        df,
+        panels,
+        metric,
+        include_archs=None,
+        exclude_archs=None,
+        include_reps=None,
+        exclude_reps=None,
+        arch_order=None,
+        log_y=False,
+    ):
+        """Loss vs. repetition, one subfigure per panel.
+
+        ``panels`` is an ordered list of ``(data_tag, scale, title)`` — the facet
+        dimension is whatever varies across it, so the same function draws both the
+        across-scale figure (one mixture, many scales) and the across-domain figure
+        (one scale, many mixtures).
+
+        Architecture is encoded exactly as in Group 1 (color + line style). Each
+        subfigure autoscales its own y axis; a single figure-level legend covers all
+        of them, so the panels carry no per-axes legends.
+        """
+        from matplotlib.lines import Line2D
+
+        panels = list(panels or [])
+        # `metric` is either one metric for every panel, or one per panel (used by
+        # the single-domain figure, where each domain is judged on its own eval set).
+        if isinstance(metric, str):
+            panel_metrics = [metric] * len(panels)
+        else:
+            panel_metrics = list(metric)
+            if len(panel_metrics) != len(panels):
+                raise ValueError(
+                    f"got {len(panel_metrics)} metrics for {len(panels)} panels"
+                )
+        n_cols = max(1, len(panels))
+        fig, axes = plt.subplots(
+            1, n_cols, figsize=(4 * n_cols, 4), squeeze=False
+        )
+
+        shown_archs = []
+        for col, (panel_tag, panel_scale, panel_title) in enumerate(panels):
+            ax = axes[0][col]
+            panel_metric = panel_metrics[col]
+            max_reps = 0
+            any_data = False
+            for model_type in arch_order or ARCH_ORDER_DEFAULT:
+                if not keep_arch(model_type, include_archs, exclude_archs):
+                    continue
+                points = collect_baseline_points(
+                    df, panel_tag, panel_scale, model_type, panel_metric
+                )
+                points = filter_rep_points(points, include_reps, exclude_reps)
+                if not points:
+                    continue
+                any_data = True
+                if model_type not in shown_archs:
+                    shown_archs.append(model_type)
+                max_reps = max(max_reps, max(p[0] for p in points))
+                ax.plot(
+                    [p[0] for p in points],
+                    [p[1] for p in points],
+                    marker="o",
+                    markersize=4,
+                    linewidth=1.5,
+                    linestyle=arch_dash(model_type),
+                    color=ARCH_COLOR[model_type],
+                )
+            apply_pow2_xaxis(ax, max_reps, any_data)
+            if log_y:
+                apply_log_yaxis(ax)
+            ax.set_title(panel_title, fontsize=11, fontweight="bold")
+            ax.set_xlabel("Repetition Rate")
+            # Every panel is labelled: the y axes are independent, so each one needs
+            # its own label to be readable in isolation.
+            ax.set_ylabel(axis_label(panel_metric))
+            if not any_data:
+                ax.set_title(f"{panel_title}  [no data]", fontsize=9)
+
+        # One legend for the whole figure, in canonical architecture order.
+        arch_shown = [a for a in (arch_order or ARCH_ORDER_DEFAULT) if a in shown_archs]
+        if arch_shown:
+            handles = [Line2D([0], [0], linestyle="none", marker="")] + [
+                Line2D(
+                    [0], [0],
+                    color=ARCH_COLOR[a], linewidth=1.8, linestyle=arch_dash(a),
+                )
+                for a in arch_shown
+            ]
+            labels = ["Model type"] + [
+                MODEL_DISPLAY_NAME.get(a, a) for a in arch_shown
+            ]
+            legend = fig.legend(
+                handles,
+                labels,
+                fontsize=8,
+                loc="center left",
+                bbox_to_anchor=(1.0, 0.5),
+                borderaxespad=0.0,
+                handlelength=2.2,
+            )
+            for text in legend.get_texts():
+                if text.get_text() == "Model type":
+                    text.set_fontweight("bold")
+
+        fig.tight_layout()
+        return fig
+
+    def paper_scale_panels(sizes, data_tag="olmo_mix"):
+        """Panels for the across-scale figure: one mixture, one panel per size."""
+        return [
+            (data_tag, sc, sc)
+            for sc in ["10M", "80M", "200M", "1B"]
+            if sc in (sizes or [])
+        ]
+
+    def paper_domain_panels(domains, scale="80M"):
+        """Panels for the across-domain figure: one scale, one panel per mixture."""
+        return [
+            (d, scale, DATA_DISPLAY_NAMES.get(d, d))
+            for d in ["dclm", "starcoder", "pes2o", "wiki"]
+            if d in (domains or [])
+        ]
+
+    return make_paper_facet_figure, paper_domain_panels, paper_scale_panels
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo, scale_multiselect):
+    sel_paper_scale = metric_multiselect(
+        "paper: loss vs. repetition — metrics",
+        chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss"],
+    )
+    sel_paper_scale_sizes = scale_multiselect("paper: loss vs. repetition — model sizes")
+    sel_paper_scale_arch = arch_multiselect(
+        "paper: loss vs. repetition — architectures",
+        options=["dense", "moe16", "moe32", "moe64", "moe128"],
+        chosen_values=["dense", "moe32", "moe64"],
+    )
+    mo.vstack([sel_paper_scale, sel_paper_scale_sizes, sel_paper_scale_arch])
+    return sel_paper_scale, sel_paper_scale_arch, sel_paper_scale_sizes
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    log_y_paper,
+    make_paper_facet_figure,
+    paper_scale_panels,
+    render_side_by_side,
+    sel_paper_scale,
+    sel_paper_scale_arch,
+    sel_paper_scale_sizes,
+):
+    _out = render_side_by_side(
+        sel_paper_scale.value,
+        lambda m: make_paper_facet_figure(
+            finished_df,
+            paper_scale_panels(sel_paper_scale_sizes.value),
+            m,
+            include_archs=sel_paper_scale_arch.value,
+            arch_order=["dense", "moe16", "moe32", "moe64", "moe128"],
+            log_y=log_y_paper.value,
+        ),
+        "paper_loss_vs_rep",
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ---
+    **Loss vs. repetition, across single-domain mixtures.** The Group 2 mixtures at
+    80M, one subfigure each. Same conventions as the figure above: independent y
+    axes per panel, one legend for the whole figure, one saved file per metric.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_dropdown, mo):
+    # One metric per panel: each domain defaults to its own held-out eval set, which
+    # is the comparison the figure is usually making.
+    sel_paper_dom_dclm = metric_dropdown(
+        "DCLM panel — metric", "eval/lm/dolma_common-crawl-validation/CE loss"
+    )
+    sel_paper_dom_sc = metric_dropdown(
+        "StarCoder panel — metric", "eval/lm/dolma_stack-validation/CE loss"
+    )
+    sel_paper_dom_p2o = metric_dropdown(
+        "peS2o panel — metric", "eval/lm/dolma_pes2o-validation/CE loss"
+    )
+    sel_paper_dom_wiki = metric_dropdown(
+        "Wikipedia panel — metric", "eval/lm/dolma_wiki-validation/CE loss"
+    )
+    sel_paper_dom_arch = arch_multiselect(
+        "paper: single domains — architectures",
+        options=["dense", "moe16", "moe32", "moe64", "moe128"],
+        chosen_values=["dense", "moe32", "moe64"],
+    )
+    mo.vstack([
+        sel_paper_dom_dclm,
+        sel_paper_dom_sc,
+        sel_paper_dom_p2o,
+        sel_paper_dom_wiki,
+        sel_paper_dom_arch,
+    ])
+    return (
+        sel_paper_dom_arch,
+        sel_paper_dom_dclm,
+        sel_paper_dom_p2o,
+        sel_paper_dom_sc,
+        sel_paper_dom_wiki,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    log_y_paper,
+    make_paper_facet_figure,
+    paper_domain_panels,
+    sel_paper_dom_arch,
+    sel_paper_dom_dclm,
+    sel_paper_dom_p2o,
+    sel_paper_dom_sc,
+    sel_paper_dom_wiki,
+):
+    # One figure: the panel set is fixed at the four Group 2 mixtures, each drawn
+    # against its own metric. The arch dropdown selects the lines within every panel.
+    paper_dom_metrics = [
+        sel_paper_dom_dclm.value,
+        sel_paper_dom_sc.value,
+        sel_paper_dom_p2o.value,
+        sel_paper_dom_wiki.value,
+    ]
+    _out = make_paper_facet_figure(
+        finished_df,
+        paper_domain_panels(["dclm", "starcoder", "pes2o", "wiki"]),
+        paper_dom_metrics,
+        include_archs=sel_paper_dom_arch.value,
+        arch_order=["dense", "moe16", "moe32", "moe64", "moe128"],
+        log_y=log_y_paper.value,
+    )
+    _out
+    return (paper_dom_metrics,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ---
+    **famB mixture sweeps.** The Group 5 families, with each selected metric as its
+    own subfigure. Color is the data source, line style + shade the architecture, and
+    the dotted line is the `dclm` rep-1 reference. Independent y axes, one legend.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    FAMB_P2O_SOURCES,
+    FAMB_P2O_TITLE,
+    FAMB_SC_SOURCES,
+    FAMB_SC_TITLE,
+    arch_tag,
+    export_btn_paper,
+    export_pdf,
+    export_report,
+    finished_df,
+    log_y_paper,
+    make_paper_famB_figure,
+    metric_tag,
+    mo,
+    sel_paper_famB_p2o,
+    sel_paper_famB_p2o_arch,
+    sel_paper_famB_sc,
+    sel_paper_famB_sc_arch,
+):
+    # One saved figure per family; metric is the facet dimension, so the metric slot
+    # lists the panels in order.
+    if not export_btn_paper.value:
+        _out = mo.md("*Click **Export images** to write this column's PDFs.*")
+    else:
+        _specs = [
+            ("starcoder", FAMB_SC_SOURCES, FAMB_SC_TITLE,
+             sel_paper_famB_sc, sel_paper_famB_sc_arch),
+            ("pes2o", FAMB_P2O_SOURCES, FAMB_P2O_TITLE,
+             sel_paper_famB_p2o, sel_paper_famB_p2o_arch),
+        ]
+        _paths = []
+        for _fam, _srcs, _title, _sel, _arch in _specs:
+            if not _sel.value:
+                continue
+            _fig = make_paper_famB_figure(
+                finished_df,
+                _srcs,
+                _sel.value,
+                source_title=_title,
+                include_archs=_arch.value,
+                arch_order=["dense", "moe16", "moe32", "moe64", "moe128"],
+                exclude_reps=[128, 256],
+                log_y=log_y_paper.value,
+            )
+            _paths.append(
+                export_pdf(
+                    _fig, "paper", f"famB_{_fam}", "80M",
+                    arch_tag(_arch.value),
+                    "_".join(metric_tag(_m) for _m in _sel.value),
+                )
+            )
+        _out = export_report(_paths)
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(
+    ARCH_ORDER_DEFAULT,
+    DATA_DISPLAY_NAMES,
+    MODEL_DISPLAY_NAME,
+    apply_log_yaxis,
+    apply_pow2_xaxis,
+    arch_color,
+    arch_dash,
+    axis_label,
+    collect_baseline_points,
+    collect_famB_points,
+    factor_palette,
+    filter_rep_points,
+    keep_arch,
+    plt,
+):
+    def make_paper_famB_figure(
+        df,
+        sources,
+        metrics,
+        source_title="Data source",
+        include_archs=None,
+        exclude_archs=None,
+        include_reps=None,
+        exclude_reps=None,
+        arch_order=None,
+        log_y=False,
+    ):
+        """famB mixture sweep, one subfigure per metric.
+
+        Same encoding as the Group 5 plots — color is the data source, line style +
+        shade the architecture, and an ``"hline"`` source becomes a dotted reference
+        line annotated inline. Faceting is by *metric* here, so each panel carries its
+        own y label and the panels do not share a y axis.
+
+        A single figure-level legend covers both sections (architecture and source);
+        the panels carry no legends of their own.
+        """
+        from matplotlib.lines import Line2D
+
+        metrics = list(metrics or [])
+        n_cols = max(1, len(metrics))
+        fig, axes = plt.subplots(1, n_cols, figsize=(3.7 * n_cols, 3.7), squeeze=False)
+
+        source_labels = [src[0] for src in sources]
+        source_color = factor_palette(source_labels)
+        shown_archs, shown_sources = [], []
+
+        for col, metric in enumerate(metrics):
+            ax = axes[0][col]
+            hlines = []
+            max_reps = 0
+            any_data = False
+            for label, _color, kind, key in sources:
+                if kind == "hline":
+                    _ref_pts = collect_baseline_points(df, key, "80M", "dense", metric)
+                    _ref = next((v for r, v in _ref_pts if float(r) == 1.0), None)
+                    if _ref is not None:
+                        ax.axhline(
+                            _ref, linestyle=":", linewidth=1.2,
+                            color=source_color[label], zorder=1,
+                        )
+                        hlines.append((label, key, _ref))
+                    continue
+                for model_type in arch_order or ARCH_ORDER_DEFAULT:
+                    if not keep_arch(model_type, include_archs, exclude_archs):
+                        continue
+                    if kind == "baseline":
+                        points = collect_baseline_points(
+                            df, key, "80M", model_type, metric
+                        )
+                    else:
+                        points = collect_famB_points(df, key, model_type, metric)
+                    points = filter_rep_points(points, include_reps, exclude_reps)
+                    if not points:
+                        continue
+                    any_data = True
+                    if model_type not in shown_archs:
+                        shown_archs.append(model_type)
+                    if label not in shown_sources:
+                        shown_sources.append(label)
+                    max_reps = max(max_reps, max(p[0] for p in points))
+                    ax.plot(
+                        [p[0] for p in points],
+                        [p[1] for p in points],
+                        marker="o",
+                        markersize=3,
+                        linewidth=1.5,
+                        linestyle=arch_dash(model_type),
+                        color=arch_color(source_color[label], model_type),
+                    )
+            apply_pow2_xaxis(ax, max_reps, any_data)
+            if log_y:
+                apply_log_yaxis(ax)
+            for _hl_label, _hl_key, _hl_y in hlines:
+                ax.text(
+                    0.012,
+                    _hl_y,
+                    f"{DATA_DISPLAY_NAMES.get(_hl_key, _hl_key)} (R=1)",
+                    transform=ax.get_yaxis_transform(),
+                    color=source_color[_hl_label],
+                    fontsize=7,
+                    ha="left",
+                    va="bottom",
+                )
+
+            ax.set_title(axis_label(metric), fontsize=11, fontweight="bold")
+            ax.set_xlabel("Repetition Rate")
+            # The facet dimension is the metric, so the y label names the panel --
+            # a separate title would just repeat it.
+            ax.set_ylabel(axis_label(metric))
+
+        # One legend for the figure: architecture section, then source section.
+        def _header():
+            return Line2D([0], [0], linestyle="none", marker="", label="")
+
+        arch_shown = [a for a in (arch_order or ARCH_ORDER_DEFAULT) if a in shown_archs]
+        src_shown = [s for s in source_labels if s in shown_sources]
+        if arch_shown or src_shown:
+            handles = [_header()] + [
+                Line2D(
+                    [0], [0],
+                    color=arch_color("#333333", a),
+                    linewidth=1.6,
+                    linestyle=arch_dash(a),
+                )
+                for a in arch_shown
+            ]
+            labels = ["Model type"] + [MODEL_DISPLAY_NAME.get(a, a) for a in arch_shown]
+            if src_shown:
+                handles += [_header()] + [
+                    Line2D([0], [0], color=source_color[l], linewidth=2)
+                    for l in src_shown
+                ]
+                labels += [source_title] + list(src_shown)
+            legend = fig.legend(
+                handles,
+                labels,
+                fontsize=8,
+                loc="center left",
+                bbox_to_anchor=(1.0, 0.5),
+                borderaxespad=0.0,
+                handlelength=2.2,
+            )
+            for text in legend.get_texts():
+                if text.get_text() in ("Model type", source_title):
+                    text.set_fontweight("bold")
+
+        fig.tight_layout()
+        return fig
+
+    return (make_paper_famB_figure,)
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_paper_famB_sc = metric_multiselect(
+        "paper: famB StarCoder — metrics",
+        chosen_values=[
+            "eval/lm/dolma_common-crawl-validation/CE loss",
+            "eval/lm/dolma_stack-validation/CE loss",
+        ],
+    )
+    sel_paper_famB_sc_arch = arch_multiselect(
+        "paper: famB StarCoder — architectures",
+        options=["dense", "moe16", "moe32", "moe64", "moe128"],
+        chosen_values=["dense", "moe64"],
+    )
+    mo.vstack([sel_paper_famB_sc, sel_paper_famB_sc_arch])
+    return sel_paper_famB_sc, sel_paper_famB_sc_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    FAMB_SC_SOURCES,
+    FAMB_SC_TITLE,
+    finished_df,
+    log_y_paper,
+    make_paper_famB_figure,
+    sel_paper_famB_sc,
+    sel_paper_famB_sc_arch,
+):
+    _out = make_paper_famB_figure(
+        finished_df,
+        FAMB_SC_SOURCES,
+        sel_paper_famB_sc.value,
+        source_title=FAMB_SC_TITLE,
+        include_archs=sel_paper_famB_sc_arch.value,
+        arch_order=["dense", "moe16", "moe32", "moe64", "moe128"],
+        exclude_reps=[128, 256],
+        log_y=log_y_paper.value,
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_paper_famB_p2o = metric_multiselect(
+        "paper: famB peS2o — metrics",
+        chosen_values=[
+            "eval/lm/dolma_common-crawl-validation/CE loss",
+            "eval/lm/dolma_pes2o-validation/CE loss",
+        ],
+    )
+    sel_paper_famB_p2o_arch = arch_multiselect(
+        "paper: famB peS2o — architectures",
+        options=["dense", "moe16", "moe32", "moe64", "moe128"],
+        chosen_values=["dense", "moe64"],
+    )
+    mo.vstack([sel_paper_famB_p2o, sel_paper_famB_p2o_arch])
+    return sel_paper_famB_p2o, sel_paper_famB_p2o_arch
+
+
+@app.cell(hide_code=True)
+def _(
+    FAMB_P2O_SOURCES,
+    FAMB_P2O_TITLE,
+    finished_df,
+    log_y_paper,
+    make_paper_famB_figure,
+    sel_paper_famB_p2o,
+    sel_paper_famB_p2o_arch,
+):
+    _out = make_paper_famB_figure(
+        finished_df,
+        FAMB_P2O_SOURCES,
+        sel_paper_famB_p2o.value,
+        source_title=FAMB_P2O_TITLE,
+        include_archs=sel_paper_famB_p2o_arch.value,
+        arch_order=["dense", "moe16", "moe32", "moe64", "moe128"],
+        exclude_reps=[128, 256],
+        log_y=log_y_paper.value,
+    )
+    _out
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ---
+    **famA filtering sweep.** The two Group 4 views side by side: loss vs. %dclm
+    (colored by repetition) and loss vs. repetition (colored by %dclm). One figure per
+    selected metric.
+
+    Each panel keeps its own legend here — unlike the other paper figures, the two
+    panels encode *different* variables in color, so a single shared key would be
+    wrong.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(arch_multiselect, metric_multiselect, mo):
+    sel_paper_famA = metric_multiselect(
+        "paper: famA — metrics",
+        chosen_values=["eval/lm/dolma_common-crawl-validation/CE loss"],
+    )
+    sel_paper_famA_arch = arch_multiselect(
+        "paper: famA — architectures",
+        options=["dense", "moe16", "moe32", "moe64", "moe128"],
+        chosen_values=["dense", "moe32", "moe64"],
+    )
+    mo.vstack([sel_paper_famA, sel_paper_famA_arch])
+    return sel_paper_famA, sel_paper_famA_arch
+
+
+@app.cell(hide_code=True)
+def _(make_famA_figure, make_famA_rep_figure, plt):
+    def make_paper_famA_figure(
+        df, metric, include_archs=None, exclude_archs=None, log_y=False
+    ):
+        """The two famA views as subfigures of one figure.
+
+        Both panels are drawn by the same functions that back the Group 4 plots, via
+        their ``ax`` argument, so the two stay in sync by construction.
+        """
+        fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.2))
+        make_famA_figure(
+            df, metric, include_archs=include_archs,
+            exclude_archs=exclude_archs, log_y=log_y, ax=axes[0],
+        )
+        make_famA_rep_figure(
+            df, metric, include_archs=include_archs,
+            exclude_archs=exclude_archs, log_y=log_y, ax=axes[1],
+        )
+        fig.tight_layout()
+        return fig
+
+    return (make_paper_famA_figure,)
+
+
+@app.cell(hide_code=True)
+def _(
+    finished_df,
+    log_y_paper,
+    make_paper_famA_figure,
+    render_side_by_side,
+    sel_paper_famA,
+    sel_paper_famA_arch,
+):
+    _out = render_side_by_side(
+        sel_paper_famA.value,
+        lambda m: make_paper_famA_figure(
+            finished_df,
+            m,
+            include_archs=sel_paper_famA_arch.value,
+            log_y=log_y_paper.value,
+        ),
+        "paper_famA",
     )
     _out
     return

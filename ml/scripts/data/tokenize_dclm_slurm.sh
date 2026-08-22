@@ -45,8 +45,10 @@
 
 # Sourced before `set -u`: interactive rc files routinely reference unbound vars.
 source ~/.bashrc
-source ~/init_scripts/.olmoe-core-ml.sh 2>/dev/null || true
-conda activate olmoe-core-ml
+# Tokenization runs in its own env, NOT olmoe-core-ml: dolma pins
+# tokenizers<=0.19.1 (-> huggingface-hub<1.0), numpy<2, and s3fs==2023.6.0, which
+# conflict with a modern training env. See setup_dolma_env.sh.
+conda activate "${DOLMA_ENV:-dolma-tok}"
 
 set -euo pipefail
 
@@ -111,9 +113,11 @@ done
 echo "Task $TASK_ID (attempt $ATTEMPT): $RANGE (${#FILES[@]} files) -> $OUT_DIR"
 
 # --- step 1: download ------------------------------------------------------
-# Filenames are passed positionally; `hf download`'s --include is nargs="*", so
-# repeating the flag would overwrite rather than accumulate. Already-complete
-# files are skipped, which makes this safe to re-run after a preemption.
+# Filenames are passed positionally (`hf download REPO f1 f2 ...`), which avoids
+# depending on how repeated --include flags accumulate: that differs between the
+# current typer CLI (list[str], accumulates) and the older argparse one
+# (nargs="*", last flag wins). Already-complete files are skipped, which makes
+# this safe to re-run after a preemption.
 hf download "$HF_DATASET" "${FILES[@]}" \
     --repo-type dataset --local-dir "$RAW_DIR"
 # (on huggingface_hub < 0.34 the command is `huggingface-cli download ...`)
@@ -148,7 +152,10 @@ if [ "$PROCESSES" -gt "${SLURM_CPUS_PER_TASK:-8}" ]; then
     PROCESSES=${SLURM_CPUS_PER_TASK:-8}
 fi
 
-dolma tokens -c "$CONFIG_PATH" \
+# -c/--config is a GLOBAL option, registered on dolma's top-level parser, so it
+# must precede the subcommand: `dolma -c cfg.yaml tokens ...`, not
+# `dolma tokens -c cfg.yaml`. The latter fails with "unrecognized arguments: -c".
+dolma -c "$CONFIG_PATH" tokens \
     --documents "$RAW_DIR"/'*.jsonl.zst' \
     --destination "$OUT_DIR" \
     --work_dir.input "$WORK_DIR/input" \
