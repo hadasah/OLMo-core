@@ -69,6 +69,7 @@ class DataMix(DataMixBase):
     starcoder_only = "starcoder-only"
     wikipedia_only = "wikipedia-only"
     pes2o_only = "pes2o-only"
+    dclm_pool = "dclm-pool"
 
     @classmethod
     def _missing_(cls, value: object) -> "DataMix | None":

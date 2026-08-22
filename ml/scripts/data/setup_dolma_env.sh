@@ -26,7 +26,7 @@
 # into the training env.
 set -euo pipefail
 
-ENV_NAME=${ENV_NAME:-dolma-tok}
+ENV_NAME=${ENV_NAME:-dolma}
 # 3.12 is the newest dolma supports. Prebuilt linux x86_64 wheels exist at this
 # version for both dolma (cp312 manylinux_2_28) and fasttext-wheel==0.9.2
 # (cp312 manylinux_2_17), so nothing needs a compiler. Drop to 3.11 if the
