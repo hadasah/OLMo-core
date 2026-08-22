@@ -151,8 +151,9 @@ MODEL_HP_DEFAULTS = {
 PROJECT_SPECS = {
     "margsli": {
         "DEFAULT_SAVE_PATH": os.path.join(DEFAULT_DIR_PATH, "models"),
-        "DATA_WORK_DIR": "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data",
-        "VALID_DATA_DIR": "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed",
+        "DATA_WORK_DIR": "/gscratch/zlab/margsli/gitfiles/OLMo-core/ml/data",
+        "LOCAL_DATAROOT": "/gscratch/zlab/margsli/gitfiles/OLMo-core/ml/data",
+        "VALID_DATA_DIR": "/gscratch/zlab/margsli/gitfiles/OLMo-core/ml/data/preprocessed",
         "WANDB_PROJECT": "moe",
         "WANDB_ENTITY": "ml-moe",
         "CONDA_ENV_NAME": "moe",
@@ -203,6 +204,7 @@ PROJECT_SPECS = {
     "atindra": {
         "DEFAULT_SAVE_PATH": "/gscratch/zlab/atindra/models",
         "DATA_WORK_DIR": "/gscratch/zlab/atindra/data/work",
+        "LOCAL_DATAROOT": "/gscratch/zlab/atindra/data/work",
         "VALID_DATA_DIR": "/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core/ml/data/preprocessed",
         "WANDB_PROJECT": "data_rep_moe",
         "WANDB_ENTITY": "ml-moe",
@@ -231,6 +233,7 @@ PROJECT_SPECS = {
     "atj10": {
         "DEFAULT_SAVE_PATH": "/scratch/m000137-pm06/atj10/models",
         "DATA_WORK_DIR": "/scratch/m000137-pm06/atj10/data/work",
+        "LOCAL_DATAROOT": "/scratch/m000137-pm06/atj10/data/work",
         "VALID_DATA_DIR": "/scratch/m000137-pm06/atj10/data/preprocessed",
         "WANDB_PROJECT": "data_rep_moe",
         "WANDB_ENTITY": "ml-moe",

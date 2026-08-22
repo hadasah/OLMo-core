@@ -86,7 +86,37 @@ DATAMIX_LOOKUP = {
     "pes2o_only": DataMix.pes2o_only,
     "dolma17": DataMix.dolma17,
     "dolma3": DataMix.OLMo_mix_0925_official,
+    "dclm_pool": DataMix.dclm_pool,
 }
+
+def resolve_mix_paths(mix, remote_root: str, local_root: Optional[str], tokenizer_id: str):
+    """
+    Build a data mix, preferring a local copy of each path when one exists.
+
+    ``DataMix.build()`` prepends a single base_dir to every relative path in the
+    manifest, so it alone cannot express "this shard is local, that one streams".
+    Building the same mix twice against the two roots and zipping the results
+    gives per-path resolution for free: a manifest naming files that only exist
+    locally resolves local, one naming olmo-data.org shards resolves remote, and
+    a remote shard you happen to have mirrored locally is picked up as a cache.
+
+    Only the local side is probed (a cheap ``os.path.isfile``); anything not found
+    there is assumed remote, so this adds no network round trips.
+    """
+    remote_paths, labels = mix.build(remote_root, tokenizer_id)
+    if not local_root:
+        return remote_paths, labels, 0
+
+    local_paths, _ = mix.build(local_root, tokenizer_id)
+    resolved, num_local = [], 0
+    for remote_path, local_path in zip(remote_paths, local_paths):
+        if os.path.isfile(local_path):
+            resolved.append(local_path)
+            num_local += 1
+        else:
+            resolved.append(remote_path)
+    return resolved, labels, num_local
+
 
 _user = os.environ.get("USER", "")
 if _user not in PROJECT_SPECS:
@@ -226,6 +256,8 @@ def build_config(
     minority_repetition: int = 1,
     primary_repetition: int = 1,
     mix_unique_fraction: Optional[float] = None,
+    local_data_root: Optional[str] = USER_PROJECT_SPECS["LOCAL_DATAROOT"],
+    train_datamix_ratios: Optional[str] = None,
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS["WANDB_ENTITY"],
     wandb_project: str = USER_PROJECT_SPECS["WANDB_PROJECT"],
@@ -277,8 +309,18 @@ def build_config(
             raise ValueError(f"mix_unique_fraction must be in (0, 1], got {frac}")
         requested_unique_tokens = int(total_budget * frac)
 
-        primary_paths, _ = DATAMIX_LOOKUP[mix_primary].build(data_root, tokenizer_config.identifier)
-        minority_paths, _ = DATAMIX_LOOKUP[mix_minority].build(data_root, tokenizer_config.identifier)
+        primary_paths, _, _ = resolve_mix_paths(
+            DATAMIX_LOOKUP[mix_primary],
+            data_root,
+            local_data_root,
+            cast(str, tokenizer_config.identifier),
+        )
+        minority_paths, _, _ = resolve_mix_paths(
+            DATAMIX_LOOKUP[mix_minority],
+            data_root,
+            local_data_root,
+            cast(str, tokenizer_config.identifier),
+        )
 
         # Infer dtype itemsize (same logic as NumpyDatasetConfig.get_dtype).
         npdtype = np.uint32
@@ -375,8 +417,18 @@ def build_config(
         r_min = max(1, int(minority_repetition))
         r_pri = max(1, int(primary_repetition))
 
-        primary_paths, _ = DATAMIX_LOOKUP[mix_primary].build(data_root, tokenizer_config.identifier)
-        minority_paths, _ = DATAMIX_LOOKUP[mix_minority].build(data_root, tokenizer_config.identifier)
+        primary_paths, _, _ = resolve_mix_paths(
+            DATAMIX_LOOKUP[mix_primary],
+            data_root,
+            local_data_root,
+            cast(str, tokenizer_config.identifier),
+        )
+        minority_paths, _, _ = resolve_mix_paths(
+            DATAMIX_LOOKUP[mix_minority],
+            data_root,
+            local_data_root,
+            cast(str, tokenizer_config.identifier),
+        )
 
         # Infer dtype itemsize (same logic as NumpyDatasetConfig.get_dtype).
         npdtype = np.uint32
@@ -468,8 +520,12 @@ def build_config(
             )
         train_tokens = actual_train_tokens
 
-        mix = DATAMIX_LOOKUP[train_datamix_name]
-        paths, labels = mix.build(data_root, tokenizer_config.identifier)
+        paths, labels, _ = resolve_mix_paths(
+            DATAMIX_LOOKUP[train_datamix_name],
+            data_root,
+            local_data_root,
+            cast(str, tokenizer_config.identifier),
+        )
 
         source_paths = defaultdict(list)
         for path, label in zip(paths, labels):
@@ -540,8 +596,25 @@ def build_config(
             f"(fraction={unique_data_fraction}, expected ~{num_repetitions}x repetition)"
         )
     else:
-        dataset_config = NumpyFSLDatasetConfig.from_data_mix(
-            DATAMIX_LOOKUP[train_datamix_name],
+        all_paths: List[str] = []
+        all_labels: List[str] = []
+        for mix_name in mix_names:
+            paths, labels, num_local = resolve_mix_paths(
+                DATAMIX_LOOKUP[mix_name],
+                data_root,
+                local_data_root,
+                cast(str, tokenizer_config.identifier),
+            )
+            log.info(
+                f"Mix '{mix_name}': {len(paths)} shards "
+                f"({num_local} local, {len(paths) - num_local} remote)"
+            )
+            all_paths.extend(paths)
+            all_labels.extend(labels)
+
+        dataset_config = NumpyFSLDatasetConfig(
+            paths=all_paths,
+            metadata=[{"label": label} for label in all_labels],
             tokenizer=tokenizer_config,
             mix_base_dir=data_root,
             sequence_length=sequence_length,
@@ -789,6 +862,17 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--data_root", type=str, default="https://olmo-data.org/", help="Root URL for the data"
+    )
+    parser.add_argument(
+        "--local_data_root",
+        type=str,
+        default=USER_PROJECT_SPECS["LOCAL_DATAROOT"],
+
+        help=(
+            "Base directory checked before --data_root for every mix path. Manifest paths "
+            "are appended to it, so this should be the parent of 'preprocessed/'. "
+            "Pass '' to disable local resolution and always stream."
+        ),
     )
     parser.add_argument(
         "--save_root",
