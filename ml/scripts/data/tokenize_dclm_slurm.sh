@@ -32,10 +32,10 @@
 #
 #SBATCH --job-name=tokenize-dclm
 #SBATCH --account=zlab
-#SBATCH --partition=ckpt-all
+#SBATCH --partition=gpu-a40
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=8:00:00
 #SBATCH --requeue
@@ -48,11 +48,11 @@ source ~/.bashrc
 # Tokenization runs in its own env, NOT olmoe-core-ml: dolma pins
 # tokenizers<=0.19.1 (-> huggingface-hub<1.0), numpy<2, and s3fs==2023.6.0, which
 # conflict with a modern training env. See setup_dolma_env.sh.
-conda activate "${DOLMA_ENV:-dolma-tok}"
+conda activate "${DOLMA_ENV:-dolma}"
 
 set -euo pipefail
 
-export OLMOE_DIR=/gscratch/zlab/margsli/gitfiles/olmoe-core/OLMo-core
+export OLMOE_DIR=/gscratch/zlab/margsli/gitfiles/OLMo-core
 export DATA_DIR=$OLMOE_DIR/ml/data
 
 HF_DATASET="mlfoundations/dclm-pool-400m-1x"
