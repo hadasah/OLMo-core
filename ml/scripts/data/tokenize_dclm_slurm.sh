@@ -46,7 +46,7 @@
 # Sourced before `set -u`: interactive rc files routinely reference unbound vars.
 source ~/.bashrc
 source ~/init_scripts/.olmoe-core-ml.sh 2>/dev/null || true
-conda activate olmoe-core-ml
+conda activate dolma
 
 set -euo pipefail
 
@@ -148,7 +148,7 @@ if [ "$PROCESSES" -gt "${SLURM_CPUS_PER_TASK:-8}" ]; then
     PROCESSES=${SLURM_CPUS_PER_TASK:-8}
 fi
 
-dolma tokens -c "$CONFIG_PATH" \
+dolma -c "$CONFIG_PATH" tokens \
     --documents "$RAW_DIR"/'*.jsonl.zst' \
     --destination "$OUT_DIR" \
     --work_dir.input "$WORK_DIR/input" \
