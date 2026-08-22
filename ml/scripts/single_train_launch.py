@@ -84,10 +84,39 @@ DATAMIX_LOOKUP = {
     "starcoder_only": DataMix.starcoder_only,
     "wikipedia_only": DataMix.wikipedia_only,
     "pes2o_only": DataMix.pes2o_only,
-    # Locally tokenized; use with --local_datamix_name, not --train_datamix_name,
-    # since its paths resolve against a local root rather than olmo-data.org.
+    # Locally tokenized. Paths resolve against --local_data_root automatically,
+    # so this can be listed in --train_datamix_name alongside remote mixes.
     "dclm_pool": DataMix.dclm_pool,
 }
+
+def resolve_mix_paths(mix, remote_root: str, local_root: Optional[str], tokenizer_id: str):
+    """
+    Build a data mix, preferring a local copy of each path when one exists.
+
+    ``DataMix.build()`` prepends a single base_dir to every relative path in the
+    manifest, so it alone cannot express "this shard is local, that one streams".
+    Building the same mix twice against the two roots and zipping the results
+    gives per-path resolution for free: a manifest naming files that only exist
+    locally resolves local, one naming olmo-data.org shards resolves remote, and
+    a remote shard you happen to have mirrored locally is picked up as a cache.
+
+    Only the local side is probed (a cheap ``os.path.isfile``); anything not found
+    there is assumed remote, so this adds no network round trips.
+    """
+    remote_paths, labels = mix.build(remote_root, tokenizer_id)
+    if not local_root:
+        return remote_paths, labels, 0
+
+    local_paths, _ = mix.build(local_root, tokenizer_id)
+    resolved, num_local = [], 0
+    for remote_path, local_path in zip(remote_paths, local_paths):
+        if os.path.isfile(local_path):
+            resolved.append(local_path)
+            num_local += 1
+        else:
+            resolved.append(remote_path)
+    return resolved, labels, num_local
+
 
 _user = os.environ.get("USER", "")
 if _user not in PROJECT_SPECS:
@@ -194,9 +223,8 @@ def build_config(
     moe_lb_loss_weight: float = 0.01,
     unique_data_fraction: float = 1.0,
     num_repetitions: int = 1,
-    local_datamix_name: Optional[str] = None,
-    local_data_root: str = USER_PROJECT_SPECS["DATA_WORK_DIR"],
-    local_data_ratio: float = 0.0,
+    local_data_root: Optional[str] = USER_PROJECT_SPECS["DATA_WORK_DIR"],
+    train_datamix_ratios: Optional[str] = None,
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS["WANDB_ENTITY"],
     wandb_project: str = USER_PROJECT_SPECS["WANDB_PROJECT"],
@@ -221,19 +249,35 @@ def build_config(
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
     )
 
-    if local_datamix_name and not 0 < local_data_ratio < 1:
-        raise ValueError(
-            f"--local_data_ratio must be strictly between 0 and 1, got {local_data_ratio}"
-        )
+    # --train_datamix_name takes one or more comma-separated mixes. Each is
+    # resolved per-path against the local root first and olmo-data.org second, so
+    # a locally tokenized mix and a streamed one can be listed together without
+    # any extra flags.
+    mix_names = [m.strip() for m in train_datamix_name.split(",") if m.strip()]
+    if not mix_names:
+        raise ValueError("--train_datamix_name must name at least one mix")
+    for name in mix_names:
+        if name not in DATAMIX_LOOKUP:
+            raise ValueError(f"Unknown data mix '{name}'. Known: {sorted(DATAMIX_LOOKUP)}")
 
-    # The source-mixture path is needed both for data-repetition experiments and
-    # for blending a locally tokenized mix with the remote olmo-data.org mix.
-    # DataMix.build() prepends a single base_dir to every relative path in a
-    # manifest, and from_data_mix() accepts only one mix plus one mix_base_dir, so
-    # there is no way to express "these paths are remote, those are local" through
-    # it. Building each mix separately against its own root and combining them as
-    # SourceMixtureConfigs is what makes the two roots possible.
-    if unique_data_fraction < 1.0 or local_datamix_name:
+    mix_ratios: Optional[List[float]] = None
+    if train_datamix_ratios:
+        mix_ratios = [float(r) for r in train_datamix_ratios.split(",")]
+        if len(mix_ratios) != len(mix_names):
+            raise ValueError(
+                f"--train_datamix_ratios has {len(mix_ratios)} values but "
+                f"--train_datamix_name has {len(mix_names)} mixes"
+            )
+        if any(r <= 0 for r in mix_ratios):
+            raise ValueError(f"--train_datamix_ratios must all be > 0, got {mix_ratios}")
+        mix_ratios = [r / sum(mix_ratios) for r in mix_ratios]
+
+    # The source-mixture path is what allows explicit per-source proportions. It
+    # costs a get_file_size() per shard, so it is only used when the proportions
+    # actually matter: for data-repetition experiments, or when ratios are given.
+    # Otherwise paths go straight to NumpyFSLDatasetConfig, which just concatenates
+    # them and needs no token counting.
+    if unique_data_fraction < 1.0 or mix_ratios is not None:
         # Use the actual training token budget (from overrides) instead of the
         # default train_tokens, which is only 200M and wrong for 80M/200M models.
         actual_train_tokens = train_tokens
@@ -249,33 +293,32 @@ def build_config(
             )
         train_tokens = actual_train_tokens
 
-        mix = DATAMIX_LOOKUP[train_datamix_name]
-        paths, labels = mix.build(data_root, tokenizer_config.identifier)
-
         source_paths = defaultdict(list)
-        for path, label in zip(paths, labels):
-            source_paths[label].append(path)
-        remote_labels = set(source_paths)
-
-        # Second mix, resolved against a local root instead of olmo-data.org.
-        local_labels: set = set()
-        if local_datamix_name:
-            local_mix = DATAMIX_LOOKUP[local_datamix_name]
-            local_paths, local_mix_labels = local_mix.build(
-                local_data_root, tokenizer_config.identifier
+        labels_by_mix: List[set] = []
+        for mix_name in mix_names:
+            paths, labels, num_local = resolve_mix_paths(
+                DATAMIX_LOOKUP[mix_name],
+                data_root,
+                local_data_root,
+                cast(str, tokenizer_config.identifier),
             )
-            for path, label in zip(local_paths, local_mix_labels):
-                # A label shared with the remote mix would silently merge the two
-                # into one source and make the ratio split meaningless.
-                if label in remote_labels:
-                    raise ValueError(
-                        f"Label '{label}' appears in both '{train_datamix_name}' and "
-                        f"'{local_datamix_name}'. Rename it in the local manifest."
-                    )
+            log.info(
+                f"Mix '{mix_name}': {len(paths)} shards "
+                f"({num_local} local, {len(paths) - num_local} remote)"
+            )
+            for path, label in zip(paths, labels):
                 source_paths[label].append(path)
-                local_labels.add(label)
-            if not local_labels:
-                raise ValueError(f"Local mix '{local_datamix_name}' produced no paths")
+            labels_by_mix.append(set(labels))
+
+        # Two mixes sharing a label would merge into one source, making a per-mix
+        # ratio split meaningless.
+        for i, first in enumerate(labels_by_mix):
+            for j, second in enumerate(labels_by_mix[i + 1 :], start=i + 1):
+                if shared := first & second:
+                    raise ValueError(
+                        f"Mixes '{mix_names[i]}' and '{mix_names[j]}' share label(s) "
+                        f"{sorted(shared)}. Rename them so each mix has distinct labels."
+                    )
 
         # Infer dtype from vocab size (same logic as NumpyDatasetConfig.get_dtype)
         npdtype = np.uint32  # safe fallback
@@ -290,19 +333,16 @@ def build_config(
             source_token_counts[name] = sum(get_file_size(p) // itemsize for p in spaths)
         total_tokens_available = sum(source_token_counts.values())
 
-        if local_labels:
-            # Each group keeps its internal proportions (by available tokens) and is
-            # scaled to its share of the whole, so the full set still sums to 1.0 --
-            # SourceMixtureList.validate() rejects anything else.
-            remote_total = sum(source_token_counts[n] for n in remote_labels)
-            local_total = sum(source_token_counts[n] for n in local_labels)
-            ratios = {
-                n: source_token_counts[n] / remote_total * (1.0 - local_data_ratio)
-                for n in remote_labels
-            }
-            ratios.update(
-                {n: source_token_counts[n] / local_total * local_data_ratio for n in local_labels}
-            )
+        if mix_ratios is not None:
+            # Labels within a mix keep their natural proportions (by available
+            # tokens); each mix is then scaled to its requested share, so the whole
+            # set still sums to 1.0 -- SourceMixtureList.validate() rejects anything
+            # else.
+            ratios = {}
+            for mix_labels, mix_ratio in zip(labels_by_mix, mix_ratios):
+                mix_total = sum(source_token_counts[n] for n in mix_labels)
+                for name in mix_labels:
+                    ratios[name] = source_token_counts[name] / mix_total * mix_ratio
         else:
             ratios = {
                 name: source_token_counts[name] / total_tokens_available for name in source_paths
@@ -361,17 +401,37 @@ def build_config(
             f"from {len(source_paths)} sources "
             f"(fraction={unique_data_fraction}, expected ~{num_repetitions}x repetition)"
         )
-        if local_labels:
+        if mix_ratios is not None:
             log.info(
-                f"Mixing local mix '{local_datamix_name}' (labels {sorted(local_labels)}, "
-                f"root {local_data_root}) at ratio {local_data_ratio} with remote mix "
-                f"'{train_datamix_name}' (root {data_root}) at ratio {1.0 - local_data_ratio}"
+                "Mix ratios: "
+                + ", ".join(f"{n}={r:.4f}" for n, r in zip(mix_names, mix_ratios))
             )
     else:
-        dataset_config = NumpyFSLDatasetConfig.from_data_mix(
-            DATAMIX_LOOKUP[train_datamix_name],
+        # No explicit ratios: concatenate the resolved paths. from_data_mix() is not
+        # usable here because it re-derives paths from a single mix_base_dir, which
+        # would undo the per-path local/remote resolution. Passing `paths` plus
+        # `metadata` reproduces exactly what _resolve_paths_metadata() would build
+        # for a mix, including the {"label": ...} entries LMEvaluator keys on.
+        all_paths: List[str] = []
+        all_labels: List[str] = []
+        for mix_name in mix_names:
+            paths, labels, num_local = resolve_mix_paths(
+                DATAMIX_LOOKUP[mix_name],
+                data_root,
+                local_data_root,
+                cast(str, tokenizer_config.identifier),
+            )
+            log.info(
+                f"Mix '{mix_name}': {len(paths)} shards "
+                f"({num_local} local, {len(paths) - num_local} remote)"
+            )
+            all_paths.extend(paths)
+            all_labels.extend(labels)
+
+        dataset_config = NumpyFSLDatasetConfig(
+            paths=all_paths,
+            metadata=[{"label": label} for label in all_labels],
             tokenizer=tokenizer_config,
-            mix_base_dir=data_root,
             sequence_length=sequence_length,
             max_target_sequence_length=max(4096, sequence_length),
             work_dir=data_work_dir,
@@ -520,9 +580,8 @@ def main(args: argparse.Namespace, overrides: List[str]) -> None:
             train_datamix_name=args.train_datamix_name,
             valid_datamix_name=args.valid_datamix_name,
             data_root=args.data_root,
-            local_datamix_name=args.local_datamix_name,
-            local_data_root=args.local_data_root,
-            local_data_ratio=args.local_data_ratio,
+            local_data_root=args.local_data_root or None,
+            train_datamix_ratios=args.train_datamix_ratios,
             save_root=args.save_root,
             valid_data_dir=args.valid_data_dir,
             data_work_dir=args.data_work_dir,
@@ -603,7 +662,12 @@ if __name__ == "__main__":
         "--train_datamix_name",
         type=str,
         default="OLMoE_mix_0824",
-        help="Name of the training data mix",
+        help=(
+            "Name of the training data mix, or a comma-separated list to train on several "
+            "at once, e.g. 'dclm_only,dclm_pool'. Each path is resolved against "
+            "--local_data_root first and --data_root second, so local and streamed mixes "
+            "can be combined freely."
+        ),
     )
     parser.add_argument(
         "--valid_datamix_name",
@@ -615,30 +679,24 @@ if __name__ == "__main__":
         "--data_root", type=str, default="https://olmo-data.org/", help="Root URL for the data"
     )
     parser.add_argument(
-        "--local_datamix_name",
-        type=str,
-        default=None,
-        choices=[None, *DATAMIX_LOOKUP.keys()],
-        help=(
-            "A second data mix whose paths resolve against --local_data_root instead of "
-            "--data_root, blended into the training mix at --local_data_ratio. "
-            "e.g. 'dclm_pool'."
-        ),
-    )
-    parser.add_argument(
         "--local_data_root",
         type=str,
         default=USER_PROJECT_SPECS["DATA_WORK_DIR"],
         help=(
-            "Base directory for --local_datamix_name. Manifest paths are appended to it, "
-            "so this should be the parent of 'preprocessed/'."
+            "Base directory checked before --data_root for every mix path. Manifest paths "
+            "are appended to it, so this should be the parent of 'preprocessed/'. "
+            "Pass '' to disable local resolution and always stream."
         ),
     )
     parser.add_argument(
-        "--local_data_ratio",
-        type=float,
-        default=0.0,
-        help="Fraction of the training tokens to draw from --local_datamix_name (0 < r < 1).",
+        "--train_datamix_ratios",
+        type=str,
+        default=None,
+        help=(
+            "Optional comma-separated proportions, one per mix in --train_datamix_name, "
+            "e.g. '0.9,0.1'. Normalized to sum to 1. Omit to blend the mixes in their "
+            "natural proportions (which avoids a get_file_size() call per shard)."
+        ),
     )
     parser.add_argument(
         "--save_root",
