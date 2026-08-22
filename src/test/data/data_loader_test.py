@@ -446,3 +446,118 @@ def test_vsl_data_loader(
     # Make sure batches were unique.
     all_tokens_less_eos = [t for t in all_tokens if t != 0]
     assert len(set(all_tokens_less_eos)) == len(all_tokens_less_eos)
+
+
+def _write_tokens(path: Path, num_tokens: int) -> Path:
+    mmap = np.memmap(path, dtype=np.uint16, mode="w+", shape=(num_tokens,))
+    mmap[:] = list(range(num_tokens))
+    mmap.flush()
+    return path
+
+
+def _fsl_dataset(path: Path, sequence_length: int) -> NumpyFSLDataset:
+    return NumpyFSLDataset(
+        path,
+        sequence_length=sequence_length,
+        pad_token_id=-1,
+        eos_token_id=-1,
+        vocab_size=32_000,
+    )
+
+
+@pytest.mark.parametrize("repeat_to_fill_batch", [None, False])
+def test_fsl_data_loader_no_batches_without_repeat(tmp_path: Path, repeat_to_fill_batch):
+    """
+    A dataset smaller than one global batch yields no batches unless the pool is repeated.
+    ``None`` (auto) should repeat it; ``False`` should preserve the old behavior.
+    """
+    sequence_length, batch_size = 4, 32  # 8 instances per batch
+    dataset = _fsl_dataset(_write_tokens(tmp_path / "tokens.npy", 12), sequence_length)
+    assert len(dataset) == 3  # fewer than the 8 instances in a batch
+
+    data_loader = NumpyFSLDataLoader(
+        dataset,
+        global_batch_size=batch_size,
+        collator=DataCollator(pad_token_id=-1),
+        work_dir=tmp_path,
+        repeat_to_fill_batch=repeat_to_fill_batch,
+    )
+    data_loader.reshuffle(epoch=1)
+
+    if repeat_to_fill_batch is False:
+        assert data_loader.repeat_to_fill_batch is False
+        assert data_loader.num_tiles == 1
+        assert data_loader.total_batches == 0
+        assert list(data_loader) == []
+    else:
+        assert data_loader.repeat_to_fill_batch is True
+        assert data_loader.num_tiles == 3  # ceil(8 / 3)
+        assert data_loader.total_batches == 1
+        (batch,) = list(data_loader)
+        assert batch["input_ids"].numel() == batch_size
+
+
+def test_fsl_data_loader_repeat_covers_every_instance(tmp_path: Path):
+    sequence_length, batch_size = 4, 32  # 8 instances per batch
+    dataset = _fsl_dataset(_write_tokens(tmp_path / "tokens.npy", 12), sequence_length)
+
+    data_loader = NumpyFSLDataLoader(
+        dataset,
+        global_batch_size=batch_size,
+        collator=DataCollator(pad_token_id=-1),
+        work_dir=tmp_path,
+        repeat_to_fill_batch=True,
+    )
+    data_loader.reshuffle(epoch=1)
+
+    indices = data_loader.get_global_indices()[: data_loader.total_size]
+    assert len(indices) == 8
+    # Every unique instance appears, and no instance is over-represented by more than one copy.
+    counts = np.bincount(indices, minlength=len(dataset))
+    assert (counts > 0).all()
+    assert counts.max() - counts.min() <= 1
+
+
+def test_fsl_data_loader_repeat_is_noop_when_pool_fills_batch(tmp_path: Path):
+    """Auto-detection must not perturb the data order of runs that already work."""
+    sequence_length, batch_size = 4, 8  # 2 instances per batch
+    path = _write_tokens(tmp_path / "tokens.npy", 100)
+
+    def indices_for(repeat_to_fill_batch, epoch: int) -> np.ndarray:
+        data_loader = NumpyFSLDataLoader(
+            _fsl_dataset(path, sequence_length),
+            global_batch_size=batch_size,
+            collator=DataCollator(pad_token_id=-1),
+            work_dir=tmp_path,
+            repeat_to_fill_batch=repeat_to_fill_batch,
+        )
+        data_loader.reshuffle(epoch=epoch)
+        assert data_loader.num_tiles == 1
+        assert data_loader.repeat_to_fill_batch is False
+        return np.asarray(data_loader.get_global_indices()[: data_loader.total_size])
+
+    for epoch in (1, 2):
+        np.testing.assert_array_equal(indices_for(None, epoch), indices_for(False, epoch))
+
+
+def test_fsl_data_loader_repeat_reshuffles_between_epochs(tmp_path: Path):
+    sequence_length, batch_size = 4, 32  # 8 instances per batch
+    dataset = _fsl_dataset(_write_tokens(tmp_path / "tokens.npy", 20), sequence_length)
+
+    def indices_for(epoch: int) -> np.ndarray:
+        data_loader = NumpyFSLDataLoader(
+            dataset,
+            global_batch_size=batch_size,
+            collator=DataCollator(pad_token_id=-1),
+            work_dir=tmp_path,
+            repeat_to_fill_batch=True,
+        )
+        data_loader.reshuffle(epoch=epoch)
+        assert data_loader.num_tiles == 2  # ceil(8 / 5)
+        return np.asarray(data_loader.get_global_indices())
+
+    first, second = indices_for(1), indices_for(2)
+    assert not np.array_equal(first, second)
+    # Each tile is a full permutation of the dataset.
+    for tile in (first[:5], first[5:10]):
+        np.testing.assert_array_equal(np.sort(tile), np.arange(5))

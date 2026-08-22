@@ -347,6 +347,11 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
     :param dp_world_size: The data parallel world size.
     :param dp_rank: The local data parallel rank.
     :param fs_local_rank: The filesystem-local rank.
+    :param repeat_to_fill_batch: Whether to repeat the instance pool so that an epoch produces at
+        least one full batch. Only meaningful when the dataset holds fewer instances than a single
+        global batch, which otherwise yields zero batches per epoch. ``None`` (the default) means
+        "auto": enable it only in that case, leaving all other runs bit-for-bit unchanged. See
+        :data:`NumpyFSLDataLoader.num_tiles`.
     """
 
     def __init__(
@@ -366,6 +371,7 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
         dp_rank: int = 0,
         fs_local_rank: Optional[int] = None,
         ignore_fingerprint_mismatch: bool = False,
+        repeat_to_fill_batch: Optional[bool] = None,
     ):
         super().__init__(
             collator=collator,
@@ -384,6 +390,7 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
         self.target_device_type = target_device_type
         self._global_indices: Optional[np.ndarray] = None
         self.ignore_fingerprint_mismatch = ignore_fingerprint_mismatch
+        self._repeat_to_fill_batch = repeat_to_fill_batch
 
     @classmethod
     def wrap_numpy_dataset(
@@ -403,6 +410,7 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
         target_device_type: str = "cpu",
         shuffle: bool = True,
         ignore_fingerprint_mismatch: bool = False,
+        repeat_to_fill_batch: Optional[bool] = None,
     ) -> "NumpyDataLoaderBase":
         """
         Construct the corresponding :class:`NumpyDataLoaderBase` instance for the given :class:`NumpyDatasetBase`.
@@ -423,6 +431,7 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
             target_device_type=target_device_type,
             shuffle=shuffle,
             ignore_fingerprint_mismatch=ignore_fingerprint_mismatch,
+            repeat_to_fill_batch=repeat_to_fill_batch,
         )
         data_loader: DataLoaderBase
         if isinstance(dataset, NumpyFSLDatasetBase):
@@ -437,6 +446,14 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
             raise NotImplementedError
 
         return data_loader
+
+    @property
+    def repeat_to_fill_batch(self) -> bool:
+        """
+        The resolved value of the ``repeat_to_fill_batch`` option. Subclasses that can support
+        repeating the instance pool should override this to implement the ``None`` ("auto") case.
+        """
+        return bool(self._repeat_to_fill_batch)
 
     def state_dict(self) -> Dict[str, Any]:
         return {
@@ -571,7 +588,7 @@ class NumpyDataLoaderBase(TextDataLoaderBase):
     def _iter_batches(self) -> Iterable[Dict[str, Any]]:
         # If we're already at the end of epoch we can skip creating the iterator.
         if self.total_batches is not None and self.batches_processed >= self.total_batches:
-            yield from ()
+            return
 
         def _build_batch_iterator():
             return iter(
@@ -639,39 +656,78 @@ class NumpyFSLDataLoader(NumpyDataLoaderBase):
             )
 
     @property
+    def instances_per_batch(self) -> int:
+        """
+        The number of instances in a single global batch.
+        """
+        assert isinstance(self.dataset, NumpyFSLDatasetBase)
+        return self.global_batch_size // self.dataset.sequence_length
+
+    @property
+    def _one_pass_size(self) -> int:
+        """
+        The number of instance indices produced by a single pass over the dataset.
+
+        NOTE: This is not always ``len(self.dataset)``. When chunking, whole chunks are shuffled,
+        so any trailing instances that don't fill a chunk are not emitted.
+        """
+        num_instances = len(self.dataset)
+        if self.chunk_size == 1:
+            return num_instances
+        return (num_instances // self.chunk_size) * self.chunk_size
+
+    @property
+    def repeat_to_fill_batch(self) -> bool:
+        if self._repeat_to_fill_batch is None:
+            # "Auto": only kick in when a single pass can't fill one global batch, which would
+            # otherwise make `total_batches` zero and hang the trainer. Every other run is
+            # unaffected, so this is a no-op for existing configs.
+            return self._one_pass_size < self.instances_per_batch
+        return self._repeat_to_fill_batch
+
+    @property
+    def num_tiles(self) -> int:
+        """
+        How many times the instance pool is repeated to fill at least one global batch.
+
+        This is always 1 unless :data:`repeat_to_fill_batch` is in effect *and* a single pass over
+        the dataset is smaller than one global batch. Each tile is an independent shuffle, so a
+        given instance lands in different positions across tiles rather than in a repeating block.
+        """
+        if not self.repeat_to_fill_batch:
+            return 1
+        if (one_pass_size := self._one_pass_size) <= 0:
+            return 1
+        return max(1, math.ceil(self.instances_per_batch / one_pass_size))
+
+    @property
     def total_size(self) -> int:
         """
         The total number of instances that the dataset will produce over the course of an epoch.
         """
-        assert isinstance(self.dataset, NumpyFSLDatasetBase)
-        instances_per_batch = self.global_batch_size // self.dataset.sequence_length
-        return instances_per_batch * (len(self.dataset) // instances_per_batch)
+        instances_per_batch = self.instances_per_batch
+        effective_size = self.num_tiles * self._one_pass_size
+        return instances_per_batch * (effective_size // instances_per_batch)
 
     @property
     def total_batches(self) -> int:
-        assert isinstance(self.dataset, NumpyFSLDatasetBase)
-        return self.total_size // (self.global_batch_size // self.dataset.sequence_length)
+        return self.total_size // self.instances_per_batch
 
     @property
     def _global_indices_file(self) -> Path:
+        num_tiles = self.num_tiles
         global_indices_fname = self._format_fname_from_fields(
             "global_indices",
             seed=self.seed if self.shuffle else None,
             epoch=self.epoch if self.shuffle else None,
             dataset_size=len(self.dataset),
             chunk=self.chunk_size if self.chunk_size > 1 else None,
+            tiles=num_tiles if num_tiles > 1 else None,
             v=1,  # tick if logic changes
         )
         return self.work_dir / f"{global_indices_fname}.npy"
 
-    def _build_global_indices(self) -> np.ndarray:
-        assert len(self.dataset) < np.iinfo(np.uint32).max
-
-        rng: Optional[np.random.Generator] = None
-        if self.shuffle:
-            # Deterministically shuffle based on epoch and seed
-            rng = get_rng(self.seed + self.epoch)
-
+    def _build_one_pass_indices(self, rng: Optional[np.random.Generator]) -> np.ndarray:
         indices: np.ndarray
         if self.chunk_size == 1:
             indices = np.arange(len(self.dataset), dtype=np.uint32)
@@ -689,6 +745,22 @@ class NumpyFSLDataLoader(NumpyDataLoaderBase):
 
         return indices
 
+    def _build_global_indices(self) -> np.ndarray:
+        assert len(self.dataset) < np.iinfo(np.uint32).max
+
+        rng: Optional[np.random.Generator] = None
+        if self.shuffle:
+            # Deterministically shuffle based on epoch and seed
+            rng = get_rng(self.seed + self.epoch)
+
+        # NOTE: With a single tile the RNG is created and consumed exactly as it was before tiling
+        # existed, so the data order of existing runs is unchanged.
+        if (num_tiles := self.num_tiles) == 1:
+            return self._build_one_pass_indices(rng)
+
+        # Each tile draws from the same generator, so tiles are distinct permutations.
+        return np.concatenate([self._build_one_pass_indices(rng) for _ in range(num_tiles)])
+
     def __getitem__(self, index: int) -> Dict[str, Any]:
         # NOTE: Make sure the logic here matches that in '_get_local_instance_indices()'
 
@@ -696,10 +768,8 @@ class NumpyFSLDataLoader(NumpyDataLoaderBase):
         indices = self.get_global_indices()[: self.total_size]
 
         # Slice up by batch.
-        assert isinstance(self.dataset, NumpyFSLDatasetBase)
-        instances_per_batch = self.global_batch_size // self.dataset.sequence_length
         # shape: (global num batches, global num instances per batch)
-        indices = indices.reshape(-1, instances_per_batch)
+        indices = indices.reshape(-1, self.instances_per_batch)
 
         # Slice batches into micro batches for the local DP rank.
         if self.dp_world_size > 1:
@@ -725,10 +795,8 @@ class NumpyFSLDataLoader(NumpyDataLoaderBase):
         indices = indices[: self.total_size]
 
         # Slice up by batch.
-        assert isinstance(self.dataset, NumpyFSLDatasetBase)
-        instances_per_batch = self.global_batch_size // self.dataset.sequence_length
         # shape: (global num batches, global num instances per batch)
-        indices = indices.reshape(-1, instances_per_batch)
+        indices = indices.reshape(-1, self.instances_per_batch)
 
         # Offset by the number of batches already processed.
         if self.batches_processed > 0:
@@ -795,6 +863,11 @@ class NumpyVSLDataLoader(NumpyDataLoaderBase):
         self._batches_per_bucket: Optional[Tuple[Tuple[int, int], ...]] = None
         self._buckets: Optional[Tuple[int, ...]] = None
         self._bucket_indices: Optional[Dict[int, np.ndarray]] = None
+        if self._repeat_to_fill_batch:
+            raise OLMoConfigurationError(
+                f"'repeat_to_fill_batch' is not supported by {self.__class__.__name__}, since "
+                "batches are formed from sequence-length buckets rather than a flat instance pool"
+            )
         if not self.shuffle:
             log.warning("VSL curriculum will be ignored since shuffle=False")
         if self.rank_batch_size < max(self.buckets):
@@ -1117,6 +1190,21 @@ class NumpyDataLoaderConfig(DataLoaderConfig[NumpyDataLoaderBase]):
     prefetch_factor: Optional[int] = None
     target_device_type: Optional[str] = None
     ignore_fingerprint_mismatch: bool = False
+    repeat_to_fill_batch: Optional[bool] = None
+    """
+    Whether to repeat the instance pool so that an epoch produces at least one full batch.
+
+    Without this, a dataset holding fewer instances than a single global batch produces zero
+    batches per epoch, and since the trainer loops over epochs until its token-based duration is
+    met, it never makes progress. This arises under extreme data repetition, where the unique
+    token budget can fall below one batch.
+
+    ``None`` (the default) means "auto": it is enabled only when a single pass over the dataset
+    cannot fill one global batch, so runs that already work are bit-for-bit unaffected. Set to
+    ``False`` to keep the old behavior unconditionally, or ``True`` to force it on. :meth:`build()`
+    resolves this to a concrete ``bool`` so the value that was actually used is recorded in the
+    serialized config.
+    """
 
     def build(
         self,
@@ -1162,5 +1250,21 @@ class NumpyDataLoaderConfig(DataLoaderConfig[NumpyDataLoaderBase]):
             prefetch_factor=self.prefetch_factor,
             target_device_type=self.target_device_type or get_default_device().type,
             ignore_fingerprint_mismatch=self.ignore_fingerprint_mismatch,
+            repeat_to_fill_batch=self.repeat_to_fill_batch,
         )
+
+        # Resolve "auto" to the value actually in effect and record it back on the config, so that
+        # it shows up wherever the config is serialized (W&B, checkpoints, etc.). This runs before
+        # the config is captured, so the reported value is the one that was used.
+        was_auto = self.repeat_to_fill_batch is None
+        self.repeat_to_fill_batch = data_loader.repeat_to_fill_batch
+        if was_auto and self.repeat_to_fill_batch:
+            log.warning(
+                "Enabling 'repeat_to_fill_batch' automatically: a single pass over the dataset "
+                "cannot fill one global batch, which would otherwise produce zero batches per "
+                "epoch and stall training. The instance pool will be repeated "
+                f"{getattr(data_loader, 'num_tiles', 1)}x per epoch. Set "
+                "'repeat_to_fill_batch=False' to opt out."
+            )
+
         return data_loader

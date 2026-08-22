@@ -717,6 +717,17 @@ class Trainer:
             if not self.training_complete:
                 self._dry_run_batch()
 
+            # An epoch that yields no batches can never advance `global_train_tokens_seen`, so a
+            # token- or epoch-based duration would loop forever without training on anything.
+            if self.data_loader.total_batches == 0:
+                raise OLMoConfigurationError(
+                    "The data loader produces 0 batches per epoch, so training could never "
+                    "progress. The dataset holds fewer instances than one global batch "
+                    f"({self.global_batch_size:,d} tokens). Either lower the global batch size or "
+                    "set 'repeat_to_fill_batch=True' on the data loader config to repeat the "
+                    "instance pool up to a full batch."
+                )
+
             # Iterate over epochs until done.
             while not self.training_complete:
                 self._fit_epoch()
