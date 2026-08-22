@@ -59,6 +59,10 @@ class DataMix(DataMixBase):
     v3_small_ppl_validation = "v3-small-ppl-validation"
     OLMoE_mix_1124 = "OLMoE-mix-1124"
 
+    # Locally tokenized mixes. These name files under a local data root rather than
+    # olmo-data.org, so they must be built with a matching `base_dir`.
+    dclm_pool = "dclm-pool"
+
     # Single-source mixes (for data repetition experiments)
     c4_only = "c4-only"
     dclm_only = "dclm-only"

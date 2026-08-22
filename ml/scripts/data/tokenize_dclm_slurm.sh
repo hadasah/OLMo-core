@@ -61,6 +61,12 @@ CORPUS_NAME="dclm-pool-400m-1x"
 FIRST_SHARD=${FIRST_SHARD:-0}
 LAST_SHARD=${LAST_SHARD:-31}
 SHARDS_PER_TASK=${SHARDS_PER_TASK:-8}
+# Input files per output file. dolma buckets sources with
+#   step_size = min(files_per_process or inf, num_source_files / processes)
+# and emits one writer (one part-*.npy) per bucket, so leaving this unset makes
+# the output count equal `processes` rather than the input count -- e.g. 24 inputs
+# at --processes 8 collapse to 8 outputs. 1 gives a 1:1 input:output mapping.
+FILES_PER_PROCESS=${FILES_PER_PROCESS:-1}
 # Free the compressed shards once tokenized. Set to 0 to keep them.
 DELETE_RAW=${DELETE_RAW:-1}
 
@@ -72,6 +78,23 @@ PAD_TOKEN_ID=100277
 DTYPE=uint32
 
 TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+
+# Guard against the easy mistake of running this with `bash` instead of `sbatch`.
+# Without SLURM_ARRAY_TASK_ID we are task 0, which covers only the FIRST
+# SHARDS_PER_TASK shards -- the rest of the range belongs to array tasks that do
+# not exist outside an array job.
+NEEDED_TASKS=$(( (LAST_SHARD - FIRST_SHARD + SHARDS_PER_TASK) / SHARDS_PER_TASK ))
+if [ -z "${SLURM_ARRAY_TASK_ID:-}" ] && [ "$NEEDED_TASKS" -gt 1 ]; then
+    echo "WARNING: SLURM_ARRAY_TASK_ID is unset, so this runs as task 0 only."
+    echo "  Shards $FIRST_SHARD-$LAST_SHARD at SHARDS_PER_TASK=$SHARDS_PER_TASK need"
+    echo "  $NEEDED_TASKS tasks; this invocation will cover just the first $SHARDS_PER_TASK."
+    echo "  To cover the whole range, either submit the array:"
+    echo "    sbatch --export=ALL,FIRST_SHARD,LAST_SHARD,SHARDS_PER_TASK \\"
+    echo "           --array=0-$((NEEDED_TASKS - 1)) $0"
+    echo "  or do it all in one process with SHARDS_PER_TASK=$((LAST_SHARD - FIRST_SHARD + 1))."
+    echo "  Continuing as task 0 in 10s; Ctrl-C to abort."
+    sleep 10
+fi
 # Slurm sets SLURM_RESTART_COUNT only after a requeue. Writing each attempt to
 # its own directory keeps a resumed run from colliding with part-* files the
 # previous attempt already wrote: dolma derives part numbering from the position
@@ -164,6 +187,7 @@ dolma -c "$CONFIG_PATH" tokens \
     --tokenizer.eos_token_id $EOS_TOKEN_ID \
     --tokenizer.pad_token_id $PAD_TOKEN_ID \
     --dtype $DTYPE \
+    --files_per_process "$FILES_PER_PROCESS" \
     --max_size '250_000_000' \
     --seed 0 \
     --processes "$PROCESSES"

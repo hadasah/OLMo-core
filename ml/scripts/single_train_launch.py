@@ -84,6 +84,9 @@ DATAMIX_LOOKUP = {
     "starcoder_only": DataMix.starcoder_only,
     "wikipedia_only": DataMix.wikipedia_only,
     "pes2o_only": DataMix.pes2o_only,
+    # Locally tokenized; use with --local_datamix_name, not --train_datamix_name,
+    # since its paths resolve against a local root rather than olmo-data.org.
+    "dclm_pool": DataMix.dclm_pool,
 }
 
 _user = os.environ.get("USER", "")
@@ -191,9 +194,9 @@ def build_config(
     moe_lb_loss_weight: float = 0.01,
     unique_data_fraction: float = 1.0,
     num_repetitions: int = 1,
-    local_data_glob: Optional[str] = None,
+    local_datamix_name: Optional[str] = None,
+    local_data_root: str = USER_PROJECT_SPECS["DATA_WORK_DIR"],
     local_data_ratio: float = 0.0,
-    local_data_name: str = "local",
     init_seed: int = 12536,
     wandb_entity: str = USER_PROJECT_SPECS["WANDB_ENTITY"],
     wandb_project: str = USER_PROJECT_SPECS["WANDB_PROJECT"],
@@ -218,15 +221,19 @@ def build_config(
         lb_loss_weight=moe_lb_loss_weight if moe_lb_loss_weight > 0 else None,
     )
 
-    if local_data_glob and not 0 < local_data_ratio < 1:
+    if local_datamix_name and not 0 < local_data_ratio < 1:
         raise ValueError(
             f"--local_data_ratio must be strictly between 0 and 1, got {local_data_ratio}"
         )
 
     # The source-mixture path is needed both for data-repetition experiments and
-    # for blending locally tokenized data with the remote olmo-data.org mix, since
-    # from_data_mix() takes a single mix_base_dir and cannot span the two.
-    if unique_data_fraction < 1.0 or local_data_glob:
+    # for blending a locally tokenized mix with the remote olmo-data.org mix.
+    # DataMix.build() prepends a single base_dir to every relative path in a
+    # manifest, and from_data_mix() accepts only one mix plus one mix_base_dir, so
+    # there is no way to express "these paths are remote, those are local" through
+    # it. Building each mix separately against its own root and combining them as
+    # SourceMixtureConfigs is what makes the two roots possible.
+    if unique_data_fraction < 1.0 or local_datamix_name:
         # Use the actual training token budget (from overrides) instead of the
         # default train_tokens, which is only 200M and wrong for 80M/200M models.
         actual_train_tokens = train_tokens
@@ -248,6 +255,27 @@ def build_config(
         source_paths = defaultdict(list)
         for path, label in zip(paths, labels):
             source_paths[label].append(path)
+        remote_labels = set(source_paths)
+
+        # Second mix, resolved against a local root instead of olmo-data.org.
+        local_labels: set = set()
+        if local_datamix_name:
+            local_mix = DATAMIX_LOOKUP[local_datamix_name]
+            local_paths, local_mix_labels = local_mix.build(
+                local_data_root, tokenizer_config.identifier
+            )
+            for path, label in zip(local_paths, local_mix_labels):
+                # A label shared with the remote mix would silently merge the two
+                # into one source and make the ratio split meaningless.
+                if label in remote_labels:
+                    raise ValueError(
+                        f"Label '{label}' appears in both '{train_datamix_name}' and "
+                        f"'{local_datamix_name}'. Rename it in the local manifest."
+                    )
+                source_paths[label].append(path)
+                local_labels.add(label)
+            if not local_labels:
+                raise ValueError(f"Local mix '{local_datamix_name}' produced no paths")
 
         # Infer dtype from vocab size (same logic as NumpyDatasetConfig.get_dtype)
         npdtype = np.uint32  # safe fallback
@@ -262,18 +290,23 @@ def build_config(
             source_token_counts[name] = sum(get_file_size(p) // itemsize for p in spaths)
         total_tokens_available = sum(source_token_counts.values())
 
-        ratios = {name: source_token_counts[name] / total_tokens_available for name in source_paths}
-
-        # Blend in locally tokenized data. The remote sources keep their relative
-        # proportions but are scaled down to make room, so the whole set still
-        # sums to 1.0 -- SourceMixtureList.validate() rejects anything else.
-        if local_data_glob:
-            for name in ratios:
-                ratios[name] *= 1.0 - local_data_ratio
-            ratios[local_data_name] = local_data_ratio
-            # SourceMixtureConfig.resolved_paths expands globs itself (and raises
-            # if nothing matches), so hand it the pattern rather than pre-globbing.
-            source_paths[local_data_name] = [local_data_glob]
+        if local_labels:
+            # Each group keeps its internal proportions (by available tokens) and is
+            # scaled to its share of the whole, so the full set still sums to 1.0 --
+            # SourceMixtureList.validate() rejects anything else.
+            remote_total = sum(source_token_counts[n] for n in remote_labels)
+            local_total = sum(source_token_counts[n] for n in local_labels)
+            ratios = {
+                n: source_token_counts[n] / remote_total * (1.0 - local_data_ratio)
+                for n in remote_labels
+            }
+            ratios.update(
+                {n: source_token_counts[n] / local_total * local_data_ratio for n in local_labels}
+            )
+        else:
+            ratios = {
+                name: source_token_counts[name] / total_tokens_available for name in source_paths
+            }
 
         # Correct for float drift before validate()'s allclose check.
         ratio_total = sum(ratios.values())
@@ -328,11 +361,11 @@ def build_config(
             f"from {len(source_paths)} sources "
             f"(fraction={unique_data_fraction}, expected ~{num_repetitions}x repetition)"
         )
-        if local_data_glob:
+        if local_labels:
             log.info(
-                f"Mixing local source '{local_data_name}' at ratio {local_data_ratio} "
-                f"from '{local_data_glob}' with remote mix '{train_datamix_name}' "
-                f"at ratio {1.0 - local_data_ratio}"
+                f"Mixing local mix '{local_datamix_name}' (labels {sorted(local_labels)}, "
+                f"root {local_data_root}) at ratio {local_data_ratio} with remote mix "
+                f"'{train_datamix_name}' (root {data_root}) at ratio {1.0 - local_data_ratio}"
             )
     else:
         dataset_config = NumpyFSLDatasetConfig.from_data_mix(
@@ -487,9 +520,9 @@ def main(args: argparse.Namespace, overrides: List[str]) -> None:
             train_datamix_name=args.train_datamix_name,
             valid_datamix_name=args.valid_datamix_name,
             data_root=args.data_root,
-            local_data_glob=args.local_data_glob,
+            local_datamix_name=args.local_datamix_name,
+            local_data_root=args.local_data_root,
             local_data_ratio=args.local_data_ratio,
-            local_data_name=args.local_data_name,
             save_root=args.save_root,
             valid_data_dir=args.valid_data_dir,
             data_work_dir=args.data_work_dir,
@@ -582,26 +615,30 @@ if __name__ == "__main__":
         "--data_root", type=str, default="https://olmo-data.org/", help="Root URL for the data"
     )
     parser.add_argument(
-        "--local_data_glob",
+        "--local_datamix_name",
         type=str,
         default=None,
+        choices=[None, *DATAMIX_LOOKUP.keys()],
         help=(
-            "Glob of locally tokenized .npy files to blend into the training mix, e.g. "
-            "'.../preprocessed/dclm-pool-400m-1x/allenai/dolma2-tokenizer/**/*.npy'. "
-            "Quote it so the shell does not expand it. Requires --local_data_ratio."
+            "A second data mix whose paths resolve against --local_data_root instead of "
+            "--data_root, blended into the training mix at --local_data_ratio. "
+            "e.g. 'dclm_pool'."
+        ),
+    )
+    parser.add_argument(
+        "--local_data_root",
+        type=str,
+        default=USER_PROJECT_SPECS["DATA_WORK_DIR"],
+        help=(
+            "Base directory for --local_datamix_name. Manifest paths are appended to it, "
+            "so this should be the parent of 'preprocessed/'."
         ),
     )
     parser.add_argument(
         "--local_data_ratio",
         type=float,
         default=0.0,
-        help="Fraction of the training tokens to draw from --local_data_glob (0 < r < 1).",
-    )
-    parser.add_argument(
-        "--local_data_name",
-        type=str,
-        default="local",
-        help="Source name for the local data, used in mixture logs and instance metadata.",
+        help="Fraction of the training tokens to draw from --local_datamix_name (0 < r < 1).",
     )
     parser.add_argument(
         "--save_root",
