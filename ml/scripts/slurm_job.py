@@ -455,6 +455,9 @@ def run_grid(
 
 def bash(bashCommand):
     result = subprocess.run(bashCommand.split(), capture_output=True, text=True)
+    if result.returncode != 0 and result.stderr:
+        # Surface failures (e.g. sbatch QOS rejections) instead of swallowing them.
+        print(f"[bash] '{bashCommand.split()[0]}' failed: {result.stderr.strip()}")
     return result.stdout.strip()
 
 
