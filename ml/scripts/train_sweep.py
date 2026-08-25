@@ -38,6 +38,13 @@ MODELS = [
 # True would REPLACE those subgrids and silently drop the whole experiment.
 RUN_FAMILY_A = False
 RUN_FAMILY_A_REP = False
+# Family A quality axis, take 2 (2026-08-25): DCLM-Baseline <-> DCLM-pool (the raw crawl
+# DCLM was filtered from), replacing the confounded DCLM <-> Dolma3 interpolation. Only the
+# three interior blends run here: the 100% DCLM endpoint is the existing famAr_dclm100 set
+# and the 100% pool endpoint was run by ML on klone (sweep 2026_08_22-16_25_03). Arms match
+# those endpoints: dense + moe64, R {1..32}. 4.3B local pool tokens cover the largest
+# minority pool (0.75 * 1.6B at R=1).
+RUN_FAMILY_A_POOL = True
 RUN_FAMILY_B = False
 # Not used for the granularity sweep: moe16/moe128 are defined explicitly in the
 # inline subgrids instead, so they get the same flat naming as the other arms.
@@ -132,6 +139,37 @@ def build_family_a_subgrids():
                 }
             sg.update(arch)
             subgrids[f"famA_dclm{pct}_{arch_name}"] = sg
+    return subgrids
+
+
+def build_family_a_pool_subgrids():
+    """Family A quality axis with DCLM-pool as the low-quality endpoint. Interior blends only
+    (75/25, 50/50, 25/75 DCLM-Baseline/pool), dense + moe64, whole-mix repetition {1..32}x via
+    the two-source re-epoch path, exactly as build_family_a_rep_subgrids does for Dolma3."""
+    arches = [
+        ("dense", {"moe_num_experts_list": ["1"]}),
+        ("moe64", {"moe_num_experts_list": ["64"], "moe_hidden_multipliers_list": ["0.25"],
+                   "moe_router_top_ks_list": ["4"], "moe_generalist_hidden_multiplier": ["0"]}),
+    ]
+    reps = [("1", "1.0"), ("2", "0.5"), ("4", "0.25"), ("8", "0.125"), ("16", "0.0625"), ("32", "0.03125")]
+    interiors = [("dclm75", "0.25"), ("dclm50", "0.50"), ("dclm25", "0.75")]
+    subgrids = {}
+    for rep, frac in reps:
+        for cell, minority_frac in interiors:
+            for arch_name, arch in arches:
+                # All 36 cells submitted 2026-08-25 (sweep 2026_08_25-04_50_03_data_rep_AC,
+                # jobs 446882 / 446998 / 447155 / 447363, chunked around the 32-submit
+                # account cap). Before add-launching into this sweep again, exclude every
+                # cell that is running or finished (MARLOWE_HANDOFF section 10).
+                sg = {
+                    "mix_primary": ["dclm_only"],
+                    "mix_minority": ["dclm_pool"],
+                    "minority_fraction": [minority_frac],
+                    "mix_unique_fraction": [frac],
+                    "num_repetitions": [rep],
+                }
+                sg.update(arch)
+                subgrids[f"famAp_{cell}_rep{rep}x_{arch_name}"] = sg
     return subgrids
 
 
@@ -953,13 +991,15 @@ def main(
                 },
             }
 
-            if sum([RUN_FAMILY_A, RUN_FAMILY_A_REP, RUN_FAMILY_B]) > 1:
+            if sum([RUN_FAMILY_A, RUN_FAMILY_A_REP, RUN_FAMILY_A_POOL, RUN_FAMILY_B]) > 1:
                 raise ValueError(
                     "RUN_FAMILY_A / RUN_FAMILY_A_REP / RUN_FAMILY_B are mutually exclusive; enable only one."
                 )
             if RUN_FAMILY_A:
                 # DCLM<->Dolma3 interpolation (composition, rep=1).
                 grid["subgrids"] = build_family_a_subgrids()
+            elif RUN_FAMILY_A_POOL:
+                grid["subgrids"] = build_family_a_pool_subgrids()
             elif RUN_FAMILY_A_REP:
                 # DCLM<->Dolma3 interpolation crossed with the repetition axis {1,2,4,8,16,32}x.
                 grid["subgrids"] = build_family_a_rep_subgrids()
