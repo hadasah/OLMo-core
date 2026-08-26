@@ -44,8 +44,12 @@ RUN_FAMILY_A_REP = False
 # and the 100% pool endpoint was run by ML on klone (sweep 2026_08_22-16_25_03). Arms match
 # those endpoints: dense + moe64, R {1..32}. 4.3B local pool tokens cover the largest
 # minority pool (0.75 * 1.6B at R=1).
-RUN_FAMILY_A_POOL = True
-RUN_FAMILY_B = False
+RUN_FAMILY_A_POOL = False   # famAp done 2026-08-25, 36/36 finished (handoff 9c)
+# famB repair (2026-08-26): relaunch the two never-run p2o10 rep32x cells (dense,
+# moe64) plus the crashed-on-klone p2o10 rep8x moe32, fresh from step 0 on Marlowe.
+# The RELAUNCH_ONLY filter below restricts the famB grid to exactly those three.
+RUN_FAMILY_B = True
+FAMB_RELAUNCH_ONLY = {"famB_p2o10_rep32x_dense", "famB_p2o10_rep32x_moe64", "famB_p2o10_rep8x_moe32"}
 # Not used for the granularity sweep: moe16/moe128 are defined explicitly in the
 # inline subgrids instead, so they get the same flat naming as the other arms.
 INCLUDE_GRANULARITY = False
@@ -91,6 +95,8 @@ def build_family_b_subgrids():
                 }
                 sg.update(arch)
                 subgrids[f"famB_{cell}_rep{rep}x_{arch_name}"] = sg
+    if FAMB_RELAUNCH_ONLY:
+        subgrids = {k: v for k, v in subgrids.items() if k in FAMB_RELAUNCH_ONLY}
     return subgrids
 
 
