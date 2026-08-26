@@ -57,7 +57,7 @@ def parse_run(name):
     return {"size": size, "arch": arch, "rep": int(rep), "dropout": float(drop) if drop else 0.0}
 
 
-def load_all(analysis_root, models_root=None):
+def load_all(analysis_root, models_root=None, exclude=()):
     runs = []
     for d in sorted(os.listdir(analysis_root)):
         p = os.path.join(analysis_root, d)
@@ -66,6 +66,8 @@ def load_all(analysis_root, models_root=None):
             continue
         meta = parse_run(d)
         if meta is None:
+            continue
+        if any(x in d for x in exclude):
             continue
         meta["name"] = d
         meta["oss"] = json.load(open(os.path.join(p, "ossification.json")))
@@ -94,9 +96,17 @@ def load_all(analysis_root, models_root=None):
     return runs
 
 
+ARCH_FALLBACK = {
+    "moe16": (16, 4), "moe32": (32, 4), "moe64": (64, 4), "moe128": (128, 4),
+    "moe64s8": (64, 8), "moe64s32": (64, 2),
+}
+
+
 def arch_label(runs_of_family):
     r = runs_of_family[0]
     n, k = r["num_experts"], r["top_k"]
+    if not (n and k):
+        n, k = ARCH_FALLBACK.get(r["arch"], (None, None))
     if n and k:
         return f"MoE ({n} x 1/{k})"
     return r["arch"]
@@ -117,8 +127,10 @@ def modal_gap_indices(oss):
     return [i for i, g in enumerate(gaps) if g == modal], modal
 
 
-def fig_ossification_curves(runs, out_dir, size, arch, dropout=0.0):
+def fig_ossification_curves(runs, out_dir, size, arch, dropout=0.0, gap=None):
     fam = sorted([r for r in runs if family_key(r) == (size, arch, dropout)], key=lambda r: r["rep"])
+    if gap is not None:
+        fam = [r for r in fam if run_modal_gap(r) == gap]
     if not fam:
         return None
     colors = viridis(len(fam))
@@ -142,12 +154,23 @@ def fig_ossification_curves(runs, out_dir, size, arch, dropout=0.0):
     return path
 
 
-def fig_ossification_vs_rep(runs, out_dir, families, fname, late=True, legend_inside=False):
+def run_modal_gap(r):
+    gaps = [b - a for a, b in r["oss"]["step_pairs"]]
+    return Counter(gaps).most_common(1)[0][0]
+
+
+def fig_ossification_vs_rep(runs, out_dir, families, fname, late=True, legend_inside=False,
+                            gap=None):
     fig, ax = plt.subplots(figsize=(6.0, 4.6))
     colors = viridis(len(families))
     all_reps = set()
     for (famk, label), c, ls in zip(families, colors, LINESTYLES * 3):
         fam = sorted([r for r in runs if family_key(r) == famk], key=lambda r: r["rep"])
+        if gap is not None:
+            fam = [r for r in fam if run_modal_gap(r) == gap]
+        elif fam:
+            fam_gap = Counter(run_modal_gap(r) for r in fam).most_common(1)[0][0]
+            fam = [r for r in fam if run_modal_gap(r) == fam_gap]
         if not fam:
             continue
         reps, vals = [], []
@@ -166,7 +189,8 @@ def fig_ossification_vs_rep(runs, out_dir, families, fname, late=True, legend_in
     ax.set_xlabel("Repetition Rate")
     ax.set_ylabel("Routing stability, end of training")
     if legend_inside:
-        leg = ax.legend(title="Model type", frameon=True, loc="lower right")
+        leg = ax.legend(title="Model type", frameon=True, loc=legend_inside
+                        if isinstance(legend_inside, str) else "lower right")
     else:
         leg = ax.legend(title="Model type", frameon=True, loc="upper left", bbox_to_anchor=(1.02, 1.0))
     leg.get_title().set_fontweight("bold")
@@ -180,7 +204,9 @@ def fig_knockout_vs_rep(runs, out_dir, families, fname, stat="median"):
     fig, ax = plt.subplots(figsize=(6.0, 4.6))
     colors = viridis(len(families))
     all_reps = set()
-    for (famk, label), c, ls in zip(families, colors, LINESTYLES * 3):
+    for spec, c, ls in zip(families, colors, LINESTYLES * 3):
+        famk, label = spec[0], spec[1]
+        max_rep = spec[2] if len(spec) > 2 else None
         fam = sorted([r for r in runs if family_key(r) == famk], key=lambda r: r["rep"])
         if not fam:
             continue
@@ -190,7 +216,16 @@ def fig_knockout_vs_rep(runs, out_dir, families, fname, stat="median"):
                    for v in kk.values()]
             vals.append(float(np.median(inc)) if stat == "median" else float(np.mean(inc)))
             reps.append(r["rep"])
-        ax.plot(reps, vals, marker="o", ms=6, lw=2, ls=ls, color=c, label=label)
+        if max_rep is not None:
+            line = [(x, y) for x, y in zip(reps, vals) if x <= max_rep]
+            loose = [(x, y) for x, y in zip(reps, vals) if x > max_rep]
+            ax.plot([x for x, _ in line], [y for _, y in line],
+                    marker="o", ms=6, lw=2, ls=ls, color=c, label=label)
+            if loose:
+                ax.plot([x for x, _ in loose], [y for _, y in loose],
+                        marker="o", ms=6, lw=0, color=c)
+        else:
+            ax.plot(reps, vals, marker="o", ms=6, lw=2, ls=ls, color=c, label=label)
         all_reps.update(reps)
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
@@ -246,10 +281,12 @@ if __name__ == "__main__":
     ap.add_argument("--models_root", default=None,
                     help="Root of <sweep>/<run>/stepN checkpoint dirs, for arch labels")
     ap.add_argument("--out_dir", required=True)
+    ap.add_argument("--exclude", nargs="*", default=[],
+                    help="Skip analyzed runs whose name contains any of these substrings")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    runs = load_all(args.analysis_root, args.models_root)
+    runs = load_all(args.analysis_root, args.models_root, exclude=args.exclude)
     print(f"Loaded {len(runs)} analyzed runs")
 
     def fams(size, dropout, archs):
@@ -261,24 +298,35 @@ if __name__ == "__main__":
         return out
 
     made = []
-    # (a) ossification curves for one representative no-dropout family
-    for arch in ("moe64s32", "moe128"):
-        p = fig_ossification_curves(runs, args.out_dir, "80M", arch)
-        if p:
-            made.append(p)
-    # (b) end-of-training stability vs R
+    # (a) ossification curves: 200M core moe64 no-dropout (klone ladder, 200-step
+    # checkpoints), plus the 80M moe128 shape panel for the appendix
+    made.append(fig_ossification_curves(runs, args.out_dir, "200M", "moe64", gap=200))
+    made.append(fig_ossification_curves(runs, args.out_dir, "80M", "moe128"))
+    # (b) end-of-training stability vs R, no-dropout core + famC/granularity,
+    # all at 200-step checkpoint spacing
     f80 = fams("80M", 0.0, ["moe16", "moe32", "moe64", "moe64s8", "moe64s32", "moe128"])
+    fcore = (fams("200M", 0.0, ["moe32", "moe64"])
+             + fams("80M", 0.0, ["moe32", "moe64"]))
+    fcore = [(k, l + (" (200M)" if k[0] == "200M" else " (80M)")) for k, l in fcore]
+    made.append(fig_ossification_vs_rep(runs, args.out_dir, fcore,
+                "routing_ossification_vs_rep__core__dolma_cc.pdf", gap=200,
+                legend_inside="upper left"))
     made.append(fig_ossification_vs_rep(runs, args.out_dir, f80,
-                "routing_ossification_vs_rep__80M__dolma_cc.pdf"))
-    # knockout vs R, 80M no-dropout families
+                "routing_ossification_vs_rep__80M__dolma_cc.pdf", gap=200))
+    # dropout ossification contrast: 1,000-step spacing throughout (Marlowe arms
+    # + the single no-dropout R64 baseline)
+    fdrop = ([(("200M", "moe64", 0.0), "MoE (64 x 1/4)")]
+             + [(("200M", "moe64", 0.1), "MoE (64 x 1/4), drop 0.1"),
+                (("200M", "moe64", 0.4), "MoE (64 x 1/4), drop 0.4")])
+    made.append(fig_ossification_vs_rep(runs, args.out_dir, fdrop,
+                "routing_ossification_vs_rep__200M__dropout__dolma_cc.pdf",
+                legend_inside=True, gap=1000))
+    # knockout vs R (final checkpoint only, spacing-independent)
     made.append(fig_knockout_vs_rep(runs, args.out_dir, f80,
                 "expert_knockout_vs_rep__80M__dolma_cc.pdf"))
-    # 200M dropout contrast (ossification + knockout)
-    f200 = (fams("200M", 0.0, ["moe32", "moe64"])
-            + [(( "200M", "moe64", 0.1), "MoE (64 x 1/4), drop 0.1"),
+    f200 = ([(k, l, 32) for k, l in fams("200M", 0.0, ["moe32", "moe64"])]
+            + [(("200M", "moe64", 0.1), "MoE (64 x 1/4), drop 0.1"),
                (("200M", "moe64", 0.4), "MoE (64 x 1/4), drop 0.4")])
-    made.append(fig_ossification_vs_rep(runs, args.out_dir, f200,
-                "routing_ossification_vs_rep__200M__dropout__dolma_cc.pdf", legend_inside=True))
     made.append(fig_knockout_vs_rep(runs, args.out_dir, f200,
                 "expert_knockout_vs_rep__200M__dropout__dolma_cc.pdf"))
     # co-activation, 80M
